@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Corruption, Error, InvalidFrame, Result};
 use crate::frame::{self, Decoded};
 use crate::lsn::{Lsn, LsnRange};
-use crate::seal::{Digest, Head, Integrity, SEAL_LEN, SealDamage, SigningKey, VerifyingKey};
+use crate::seal::{Digest, Head, Integrity, Opened, Seal, SealDamage, SigningKey, VerifyingKey};
 use crate::segment::{self, Format, Header, Segment, sync_dir};
 
 /// How a log is laid out.
@@ -77,6 +77,9 @@ pub enum TailDamage {
     Header,
     /// The last frame was only partly written.
     Frame(InvalidFrame),
+    /// The last batch of a signed log ends before the record that signs
+    /// it: the crash came before the batch was synced.
+    Unsigned,
 }
 
 /// Whether a write may still go to the active segment.
@@ -116,25 +119,31 @@ impl Chain {
         }
     }
 
-    /// Seals `payload` as record `lsn` and moves the head past it. The seal
-    /// is empty for a checksummed log.
-    fn seal(&mut self, lsn: Lsn, payload: &[u8]) -> [u8; SEAL_LEN] {
+    /// Seals `payload` as record `lsn` and moves the head past it: links
+    /// it, or signs it when it closes its batch. `None` for a checksummed
+    /// log.
+    fn seal(&mut self, lsn: Lsn, payload: &[u8], place: InBatch) -> Option<Seal> {
         match self {
-            Self::Checksummed => [0; SEAL_LEN],
+            Self::Checksummed => None,
             Self::Signed { key, head } => {
-                let (seal, next) = head.seal(key, lsn.get(), payload);
+                let (seal, next) = match place {
+                    InBatch::Inside => head.link(lsn.get(), payload),
+                    InBatch::Last => head.sign(key, lsn.get(), payload),
+                };
                 *head = next;
-                seal
+                Some(seal)
             }
         }
     }
+}
 
-    const fn seal_len(&self) -> usize {
-        match self {
-            Self::Checksummed => 0,
-            Self::Signed { .. } => SEAL_LEN,
-        }
-    }
+/// Where a record sits in the batch it is appended with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InBatch {
+    /// Another record follows it.
+    Inside,
+    /// It is the last one, so a signed log signs it.
+    Last,
 }
 
 /// How scanned records are checked: the expected format, and for a signed
@@ -193,16 +202,17 @@ impl Check {
         }
     }
 
-    /// Checks record `lsn` and returns its payload without the seal.
-    fn open<'a>(&mut self, lsn: Lsn, record: &'a [u8]) -> Result<&'a [u8], Corruption> {
+    /// Checks record `lsn` and returns its payload without the seal. Every
+    /// record of a checksummed log stands alone, as if signed.
+    fn open<'a>(&mut self, lsn: Lsn, record: &'a [u8]) -> Result<Opened<'a>, Corruption> {
         match self {
-            Self::Checksummed => Ok(record),
+            Self::Checksummed => Ok(Opened::Signed(record)),
             Self::Signed { key, head } => {
-                let (payload, next) = head
+                let (opened, next) = head
                     .open(key, lsn.get(), record)
                     .map_err(|damage| Corruption::Seal { lsn, damage })?;
                 *head = next;
-                Ok(payload)
+                Ok(opened)
             }
         }
     }
@@ -211,6 +221,13 @@ impl Check {
         match self {
             Self::Checksummed => Head::new(Digest::GENESIS),
             Self::Signed { head, .. } => *head,
+        }
+    }
+
+    /// Moves the head back to `head`, past records that were cut off.
+    const fn rewind(&mut self, to: Head) {
+        if let Self::Signed { head, .. } = self {
+            *head = to;
         }
     }
 }
@@ -254,6 +271,60 @@ struct Scan {
     valid_len: usize,
     replayed: u64,
     damage: Option<TailDamage>,
+}
+
+/// The records of a batch read so far, before the signed record that
+/// closes it.
+struct Batch<'a> {
+    /// The linked records, in order.
+    records: Vec<(Lsn, &'a [u8])>,
+    /// The position after the last record read.
+    next: Lsn,
+    /// Bytes up to the end of the last record read.
+    len: usize,
+    /// The chain before the batch, to go back to when it is cut off.
+    head: Head,
+}
+
+/// What reading on from a batch found.
+enum Step<'a> {
+    /// A signed record closed the batch: these are all its records.
+    Closed(Vec<(Lsn, &'a [u8])>),
+    /// The segment ends after the last batch.
+    End,
+    /// The segment ends inside a batch that no signed record closes.
+    Unsigned,
+    /// Bytes that are not a valid frame.
+    Invalid(InvalidFrame),
+}
+
+/// Passes `records` to `deliver` in order and adds up what it returns.
+fn replay_all(
+    deliver: &mut impl FnMut(Lsn, &[u8]) -> Result<u64>,
+    records: Vec<(Lsn, &[u8])>,
+) -> Result<u64> {
+    records
+        .into_iter()
+        .try_fold(0_u64, |count, (lsn, payload)| {
+            Ok(count.saturating_add(deliver(lsn, payload)?))
+        })
+}
+
+impl<'a> Batch<'a> {
+    /// Adds the record `lsn`; returns the whole batch once a signed record
+    /// closes it.
+    fn add(&mut self, lsn: Lsn, opened: Opened<'a>) -> Option<Vec<(Lsn, &'a [u8])>> {
+        match opened {
+            Opened::Linked(payload) => {
+                self.records.push((lsn, payload));
+                None
+            }
+            Opened::Signed(payload) => {
+                self.records.push((lsn, payload));
+                Some(std::mem::take(&mut self.records))
+            }
+        }
+    }
 }
 
 /// One segment's bytes and where it sits, while it is read.
@@ -365,15 +436,20 @@ impl Wal {
         }
         self.buffer.clear();
         let mut chain = self.chain.clone();
-        let seal_len = chain.seal_len();
         let mut end = self.next;
-        for payload in payloads {
+        let mut payloads = payloads.into_iter().peekable();
+        while let Some(payload) = payloads.next() {
             let payload = payload.as_ref();
-            let seal = chain.seal(end, payload);
+            let place = if payloads.peek().is_some() {
+                InBatch::Inside
+            } else {
+                InBatch::Last
+            };
+            let seal = chain.seal(end, payload, place);
             frame::encode(
                 end,
                 payload,
-                seal.get(..seal_len).unwrap_or_default(),
+                seal.as_ref().map(Seal::as_bytes).unwrap_or_default(),
                 &mut self.buffer,
             )?;
             end = end.next();
@@ -563,16 +639,52 @@ impl Reading<'_> {
             replayed: 0,
             damage: None,
         };
+        // Linked records read since the last signed one; they count once
+        // a signed record closes their batch.
+        let mut batch = Batch {
+            records: Vec::new(),
+            next: scan.next,
+            len: scan.valid_len,
+            head: check.head(),
+        };
         loop {
-            match frame::decode(self.data.get(scan.valid_len..).unwrap_or_default()) {
-                Decoded::End => return Ok(scan),
-                Decoded::Record { lsn, payload, len } => {
-                    let payload = self.open_record(check, &scan, lsn, payload)?;
-                    scan.replayed = scan.replayed.saturating_add(deliver(lsn, payload)?);
-                    scan.next = lsn.next();
-                    scan.valid_len = scan.valid_len.saturating_add(len);
+            match self.next_batch(check, &mut batch)? {
+                Step::Closed(records) => {
+                    let replayed = replay_all(&mut deliver, records)?;
+                    scan.replayed = scan.replayed.saturating_add(replayed);
+                    scan.next = batch.next;
+                    scan.valid_len = batch.len;
+                    batch.head = check.head();
                 }
-                Decoded::Invalid(invalid) => return self.cut(scan, invalid),
+                Step::End => return Ok(scan),
+                Step::Unsigned => return self.unsigned(scan, &batch, check),
+                Step::Invalid(invalid) => {
+                    check.rewind(batch.head);
+                    return self.cut(scan, invalid);
+                }
+            }
+        }
+    }
+
+    /// Reads records into `batch` until one closes it.
+    fn next_batch<'a>(&self, check: &mut Check, batch: &mut Batch<'a>) -> Result<Step<'a>>
+    where
+        Self: 'a,
+    {
+        loop {
+            let (lsn, record, len) =
+                match frame::decode(self.data.get(batch.len..).unwrap_or_default()) {
+                    Decoded::End if batch.records.is_empty() => return Ok(Step::End),
+                    Decoded::End => return Ok(Step::Unsigned),
+                    Decoded::Invalid(invalid) => return Ok(Step::Invalid(invalid)),
+                    Decoded::Record { lsn, payload, len } => (lsn, payload, len),
+                };
+            let opened = self.open_record(check, batch, lsn, record)?;
+            // Every frame moves the batch on, so reading always ends.
+            batch.next = lsn.next();
+            batch.len = batch.len.saturating_add(len);
+            if let Some(closed) = batch.add(lsn, opened) {
+                return Ok(Step::Closed(closed));
             }
         }
     }
@@ -601,27 +713,45 @@ impl Reading<'_> {
         Ok(Some(header))
     }
 
-    /// Checks that the record at the end of `scan` is the next one and
-    /// returns its payload.
+    /// Checks that the record at the end of `batch` is the next one and
+    /// returns it without its seal.
     fn open_record<'a>(
         &self,
         check: &mut Check,
-        scan: &Scan,
+        batch: &Batch<'_>,
         lsn: Lsn,
         record: &'a [u8],
-    ) -> Result<&'a [u8]> {
-        if lsn != scan.next {
+    ) -> Result<Opened<'a>> {
+        if lsn != batch.next {
             return Err(self.corrupt(
-                scan.valid_len,
+                batch.len,
                 Corruption::LsnMismatch {
-                    expected: scan.next,
+                    expected: batch.next,
                     found: lsn,
                 },
             ));
         }
         check
             .open(lsn, record)
-            .map_err(|reason| self.corrupt(scan.valid_len, reason))
+            .map_err(|reason| self.corrupt(batch.len, reason))
+    }
+
+    /// Ends the scan at the end of a segment whose last batch is not
+    /// signed: a batch the crash kept from being synced in the newest
+    /// segment, corruption anywhere else.
+    fn unsigned(&self, mut scan: Scan, batch: &Batch<'_>, check: &mut Check) -> Result<Scan> {
+        if self.place == Place::Older {
+            return Err(self.corrupt(
+                scan.valid_len,
+                Corruption::Seal {
+                    lsn: scan.next,
+                    damage: SealDamage::Unsigned,
+                },
+            ));
+        }
+        check.rewind(batch.head);
+        scan.damage = Some(TailDamage::Unsigned);
+        Ok(scan)
     }
 
     /// Ends the scan at an invalid frame: the torn tail of the newest

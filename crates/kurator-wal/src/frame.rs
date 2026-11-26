@@ -4,7 +4,7 @@ use crate::bytes;
 use crate::checksum::crc32c;
 use crate::error::{Error, InvalidFrame, Result};
 use crate::lsn::Lsn;
-use crate::seal::SEAL_LEN;
+use crate::seal::MAX_SEAL_LEN;
 
 /// Size of the frame header in bytes.
 pub(crate) const HEADER_LEN: usize = 16;
@@ -13,7 +13,7 @@ pub(crate) const HEADER_LEN: usize = 16;
 pub const MAX_PAYLOAD_LEN: usize = 64 * 1024 * 1024;
 
 /// Largest payload a frame can hold: a record's payload and its seal.
-const MAX_FRAME_PAYLOAD_LEN: usize = MAX_PAYLOAD_LEN + SEAL_LEN;
+const MAX_FRAME_PAYLOAD_LEN: usize = MAX_PAYLOAD_LEN + MAX_SEAL_LEN;
 
 /// What the start of a buffer holds.
 #[derive(Debug, PartialEq, Eq)]
@@ -119,7 +119,7 @@ mod tests {
             "payload then seal"
         );
         let payload = vec![0; super::MAX_PAYLOAD_LEN];
-        let seal = [0; crate::seal::SEAL_LEN];
+        let seal = [0; crate::seal::MAX_SEAL_LEN];
         out.clear();
         encode(Lsn::new(1), &payload, &seal, &mut out).unwrap();
         assert!(

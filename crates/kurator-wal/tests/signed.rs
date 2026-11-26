@@ -228,3 +228,142 @@ fn checksummed_logs_have_no_chain() {
     let (wal, _) = open(fresh.path(), signed(1), Start::Oldest).unwrap();
     assert_eq!(wal.chain_head(), Some(Digest::GENESIS), "fresh signed log");
 }
+
+/// Seal bytes after a payload: a linked record, and the signed record that
+/// closes a batch.
+const LINKED_SEAL_LEN: usize = 33;
+const SIGNED_SEAL_LEN: usize = 97;
+
+/// A log with one batch of `count` records of 20 bytes, in one segment.
+fn one_batch(count: u8) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = signed(1);
+    options.segment_size = 1 << 20;
+    let (mut wal, _) = open(dir.path(), options, Start::Oldest).unwrap();
+    let _: Option<_> = wal.append_batch(payloads(count)).unwrap();
+    dir
+}
+
+fn truncate(path: &Path, len: u64) {
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_len(len).unwrap();
+}
+
+fn frame_len(seal: usize) -> u64 {
+    u64::try_from(FRAME_HEADER_LEN + 20 + seal).unwrap()
+}
+
+#[test]
+fn a_batch_is_signed_once_at_its_end() {
+    let dir = one_batch(4);
+    let path = segments(dir.path()).pop().unwrap();
+    let expected = u64::try_from(HEADER_LEN).unwrap()
+        + 3 * frame_len(LINKED_SEAL_LEN)
+        + frame_len(SIGNED_SEAL_LEN);
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        expected,
+        "three linked, one signed"
+    );
+    let (_, records) = open(dir.path(), signed(1), Start::Oldest).unwrap();
+    assert_eq!(records, payloads(4), "the whole batch replays");
+}
+
+#[test]
+fn a_batch_cut_before_its_signature_is_dropped_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = signed(1);
+    options.segment_size = 1 << 20;
+    let (mut wal, _) = open(dir.path(), options.clone(), Start::Oldest).unwrap();
+    let _: Option<_> = wal.append_batch([b"kept".to_vec()]).unwrap();
+    let after_kept = wal.next_lsn();
+    let _: Option<_> = wal.append_batch(payloads(3)).unwrap();
+    drop(wal);
+    let path = segments(dir.path()).pop().unwrap();
+    let full = fs::metadata(&path).unwrap().len();
+    // Two complete linked records survive; the signed one does not.
+    truncate(&path, full - frame_len(SIGNED_SEAL_LEN));
+    let mut records = Vec::new();
+    let (mut wal, report) = Wal::open(dir.path(), options.clone(), Start::Oldest, |_, payload| {
+        records.push(payload.to_vec());
+        Ok::<(), Infallible>(())
+    })
+    .unwrap();
+    let tail = report.truncated_tail.unwrap();
+    assert_eq!(tail.damage, TailDamage::Unsigned, "unsigned tail");
+    assert_eq!(
+        tail.discarded_bytes,
+        2 * frame_len(LINKED_SEAL_LEN),
+        "both linked records"
+    );
+    assert_eq!(records, vec![b"kept".to_vec()], "only the signed batch");
+    assert_eq!(wal.next_lsn(), after_kept, "positions are reused");
+    let _: Option<_> = wal.append_batch([b"after".to_vec()]).unwrap();
+    drop(wal);
+    let (_, records) = open(dir.path(), options, Start::Oldest).unwrap();
+    assert_eq!(
+        records,
+        vec![b"kept".to_vec(), b"after".to_vec()],
+        "the chain goes on"
+    );
+}
+
+#[test]
+fn a_torn_frame_inside_a_batch_drops_the_batch() {
+    let dir = one_batch(3);
+    let path = segments(dir.path()).pop().unwrap();
+    let header = u64::try_from(HEADER_LEN).unwrap();
+    truncate(&path, header + frame_len(LINKED_SEAL_LEN) + 5);
+    let (wal, report) = Wal::open(dir.path(), signed(1), Start::Oldest, |_, _| {
+        Ok::<(), Infallible>(())
+    })
+    .unwrap();
+    let tail = report.truncated_tail.unwrap();
+    assert!(matches!(tail.damage, TailDamage::Frame(_)), "torn frame");
+    assert_eq!(tail.offset, header, "cut back to the start of the batch");
+    assert_eq!(report.replayed, 0, "nothing of the batch replays");
+    assert_eq!(
+        wal.chain_head(),
+        Some(Digest::GENESIS),
+        "the chain is back at its start"
+    );
+}
+
+#[test]
+fn a_changed_linked_record_breaks_the_chain() {
+    let dir = one_batch(2);
+    let path = segments(dir.path()).pop().unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[HEADER_LEN + FRAME_HEADER_LEN] ^= 1;
+    fix_first_checksum(&mut bytes);
+    fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        corruption(open(dir.path(), signed(1), Start::Oldest)),
+        Corruption::Seal {
+            lsn: Lsn::new(2),
+            damage: SealDamage::Chain
+        },
+        "the signed record no longer follows"
+    );
+}
+
+#[test]
+fn an_older_segment_that_ends_unsigned_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut wal, _) = open(dir.path(), signed(1), Start::Oldest).unwrap();
+    // The segment size is 128 bytes, so the second batch starts a new one.
+    let _: Option<_> = wal.append_batch(payloads(2)).unwrap();
+    let _: Option<_> = wal.append_batch(payloads(1)).unwrap();
+    drop(wal);
+    let oldest = segments(dir.path())[0].clone();
+    let header = u64::try_from(HEADER_LEN).unwrap();
+    truncate(&oldest, header + frame_len(LINKED_SEAL_LEN));
+    assert_eq!(
+        corruption(open(dir.path(), signed(1), Start::Oldest)),
+        Corruption::Seal {
+            lsn: Lsn::new(1),
+            damage: SealDamage::Unsigned
+        },
+        "unsigned in the middle"
+    );
+}

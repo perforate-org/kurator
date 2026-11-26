@@ -1,24 +1,31 @@
-//! Signed records: a hash chain over the log, signed record by record.
+//! Signed records: a hash chain over the log, signed batch by batch.
 //!
 //! A signed record's frame payload is the caller's payload followed by a
-//! seal:
+//! seal, which ends in its kind:
 //!
 //! ```text
-//! payload | prev digest [32] | signature [64]
+//! linked: payload | prev digest [32] | 0
+//! signed: payload | prev digest [32] | signature [64] | 1
 //! ```
 //!
 //! `prev` is the [`Digest`] of the record before, so deleting, reordering
 //! or replacing a record breaks the chain. The record's own digest is
-//! BLAKE3 over `lsn | prev | payload`, and the signature is Ed25519 over
-//! that digest by the key of the node that wrote the log.
+//! BLAKE3 over `lsn | prev | payload`. The last record of every synced
+//! batch is signed: Ed25519 over its digest by the key of the node that
+//! wrote the log. Through the chain, that one signature covers every
+//! record of the batch.
 
 use std::fmt;
 
-/// Bytes a seal adds to a record.
-pub(crate) const SEAL_LEN: usize = DIGEST_LEN + SIGNATURE_LEN;
+/// The most bytes a seal adds to a record.
+pub(crate) const MAX_SEAL_LEN: usize = SIGNED_LEN;
 
 const DIGEST_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
+const LINKED_LEN: usize = DIGEST_LEN + 1;
+const SIGNED_LEN: usize = DIGEST_LEN + SIGNATURE_LEN + 1;
+const LINKED: u8 = 0;
+const SIGNED: u8 = 1;
 
 /// The digest that links a record to the one before it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,9 +124,9 @@ pub enum Integrity {
     /// A CRC-32C per record: detects torn and damaged writes.
     #[default]
     Checksum,
-    /// A CRC-32C, the digest of the record before, and a signature by this
-    /// key per record: also detects records that were changed, removed or
-    /// reordered, and shows which node wrote them.
+    /// A CRC-32C and the digest of the record before per record, and a
+    /// signature by this key per synced batch: also detects records that
+    /// were changed, removed or reordered, and shows which node wrote them.
     Signed(SigningKey),
 }
 
@@ -160,6 +167,38 @@ pub enum SealDamage {
     /// The signature does not match the record.
     #[error("record signature does not match")]
     Signature,
+    /// A batch ends without the signed record that closes it, in a place
+    /// where a crash cannot have cut it short.
+    #[error("batch is not signed")]
+    Unsigned,
+}
+
+/// The seal of one record, as it is written after the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Seal {
+    /// Links the record to the one before it; a later record of the same
+    /// batch is signed.
+    Linked([u8; LINKED_LEN]),
+    /// Links the record and signs it, closing its batch.
+    Signed([u8; SIGNED_LEN]),
+}
+
+impl Seal {
+    pub(crate) const fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Linked(bytes) => bytes,
+            Self::Signed(bytes) => bytes,
+        }
+    }
+}
+
+/// A record whose seal checked out, and whether it closes its batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opened<'a> {
+    /// Its batch goes on: the record counts once a later one is signed.
+    Linked(&'a [u8]),
+    /// It is signed, and with it every linked record before it.
+    Signed(&'a [u8]),
 }
 
 /// The chain of a signed log at one point: the digest of the last record.
@@ -175,43 +214,89 @@ impl Head {
         self.0
     }
 
-    /// Seals `payload` as record `lsn`, which follows this head, and
+    /// Links `payload` as record `lsn`, which follows this head, and
     /// returns the seal and the head after it.
-    pub(crate) fn seal(self, key: &SigningKey, lsn: u64, payload: &[u8]) -> ([u8; SEAL_LEN], Self) {
-        let digest = record_digest(lsn, self.0, payload);
-        let signature = sign(key, digest);
-        let mut seal = [0; SEAL_LEN];
-        for (slot, byte) in seal.iter_mut().zip(self.0.0.iter().chain(signature.iter())) {
-            *slot = *byte;
-        }
-        (seal, Self(digest))
+    pub(crate) fn link(self, lsn: u64, payload: &[u8]) -> (Seal, Self) {
+        let mut seal = [LINKED; LINKED_LEN];
+        fill(&mut seal, &[&self.0.0]);
+        (
+            Seal::Linked(seal),
+            Self(record_digest(lsn, self.0, payload)),
+        )
     }
 
-    /// Checks the signed record `lsn`, which must follow this head, and
-    /// returns its payload and the head after it.
+    /// Links and signs `payload` as record `lsn`, which follows this head,
+    /// and returns the seal and the head after it.
+    pub(crate) fn sign(self, key: &SigningKey, lsn: u64, payload: &[u8]) -> (Seal, Self) {
+        let digest = record_digest(lsn, self.0, payload);
+        let mut seal = [SIGNED; SIGNED_LEN];
+        fill(&mut seal, &[&self.0.0, &sign(key, digest)]);
+        (Seal::Signed(seal), Self(digest))
+    }
+
+    /// Checks the sealed record `lsn`, which must follow this head, and
+    /// returns its payload and the head after it. A linked record is only
+    /// checked against the chain; the signature that closes its batch
+    /// vouches for it.
     pub(crate) fn open<'a>(
         self,
         key: &VerifyingKey,
         lsn: u64,
         record: &'a [u8],
-    ) -> Result<(&'a [u8], Self), SealDamage> {
-        let (payload, prev, signature) = split(record).ok_or(SealDamage::Missing)?;
-        if prev != self.0 {
+    ) -> Result<(Opened<'a>, Self), SealDamage> {
+        let split = split(record).ok_or(SealDamage::Missing)?;
+        if split.prev != self.0 {
             return Err(SealDamage::Chain);
         }
-        let digest = record_digest(lsn, prev, payload);
-        if !verify(key, digest, &signature) {
-            return Err(SealDamage::Signature);
-        }
-        Ok((payload, Self(digest)))
+        let digest = record_digest(lsn, split.prev, split.payload);
+        let opened = match split.signature {
+            None => Opened::Linked(split.payload),
+            Some(signature) if verify(key, digest, &signature) => Opened::Signed(split.payload),
+            Some(_) => return Err(SealDamage::Signature),
+        };
+        Ok((opened, Self(digest)))
     }
 }
 
-/// Splits a signed record into payload, previous digest and signature.
-fn split(record: &[u8]) -> Option<(&[u8], Digest, [u8; SIGNATURE_LEN])> {
-    let (payload, seal) = record.split_at_checked(record.len().checked_sub(SEAL_LEN)?)?;
+/// Copies `parts` to the front of `seal`, leaving its kind byte at the end.
+fn fill(seal: &mut [u8], parts: &[&[u8]]) {
+    for (slot, byte) in seal
+        .iter_mut()
+        .zip(parts.iter().flat_map(|part| part.iter()))
+    {
+        *slot = *byte;
+    }
+}
+
+/// A sealed record taken apart.
+#[derive(Debug, PartialEq, Eq)]
+struct Split<'a> {
+    payload: &'a [u8],
+    prev: Digest,
+    /// Present on the record that closes a batch.
+    signature: Option<[u8; SIGNATURE_LEN]>,
+}
+
+/// Splits a sealed record into payload, previous digest and signature.
+fn split(record: &[u8]) -> Option<Split<'_>> {
+    let (kind, rest) = record.split_last()?;
+    let seal_len = match *kind {
+        LINKED => LINKED_LEN,
+        SIGNED => SIGNED_LEN,
+        _ => return None,
+    };
+    let (payload, seal) =
+        rest.split_at_checked(rest.len().checked_sub(seal_len.checked_sub(1)?)?)?;
     let (prev, signature) = seal.split_first_chunk::<DIGEST_LEN>()?;
-    Some((payload, Digest(*prev), signature.try_into().ok()?))
+    let signature = match *kind {
+        SIGNED => Some(signature.try_into().ok()?),
+        _ => None,
+    };
+    Some(Split {
+        payload,
+        prev: Digest(*prev),
+        signature,
+    })
 }
 
 fn record_digest(lsn: u64, prev: Digest, payload: &[u8]) -> Digest {
@@ -236,22 +321,35 @@ fn verify(key: &VerifyingKey, digest: Digest, signature: &[u8; SIGNATURE_LEN]) -
 
 #[cfg(kani)]
 mod proofs {
-    use super::{SEAL_LEN, split};
+    use super::{LINKED_LEN, SIGNED_LEN, split};
 
     /// Splitting a record never panics, and finds a seal exactly when the
-    /// record is long enough to hold one, with the payload in front of it.
-    /// BLAKE3 and Ed25519 are beyond a bounded model checker; the unit
-    /// tests check them.
+    /// record ends in a known kind and is long enough to hold that seal,
+    /// with the payload in front of it. BLAKE3 and Ed25519 are beyond a
+    /// bounded model checker; the unit tests check them.
     #[kani::proof]
     #[kani::unwind(130)]
     fn split_is_total() {
         let record: [u8; 100] = kani::any();
         let len: usize = kani::any_where(|len| *len <= record.len());
-        match split(&record[..len]) {
-            Some((payload, _, _)) => {
-                assert_eq!(payload.len() + SEAL_LEN, len, "payload is the rest")
+        let record = &record[..len];
+        let seal_len = match record.last() {
+            Some(0) => Some(LINKED_LEN),
+            Some(1) => Some(SIGNED_LEN),
+            _ => None,
+        };
+        match (split(record), seal_len) {
+            (Some(split), Some(seal_len)) => {
+                assert_eq!(split.payload.len() + seal_len, len, "payload is the rest");
+                assert_eq!(
+                    split.signature.is_some(),
+                    seal_len == SIGNED_LEN,
+                    "signed kind"
+                );
             }
-            None => assert!(len < SEAL_LEN, "only short records have no seal"),
+            (None, Some(seal_len)) => assert!(len < seal_len, "only short records have no seal"),
+            (None, None) => {}
+            (Some(_), None) => panic!("a seal of no known kind"),
         }
     }
 }
@@ -260,33 +358,59 @@ mod proofs {
 mod tests {
     use proptest::prelude::*;
 
-    use super::{Digest, Head, Integrity, Protection, SEAL_LEN, SealDamage, SigningKey};
+    use super::{
+        Digest, Head, Integrity, LINKED_LEN, Opened, Protection, SIGNED_LEN, SealDamage, SigningKey,
+    };
 
     fn key() -> SigningKey {
         SigningKey::from_seed([7; 32])
     }
 
-    fn sealed(head: Head, lsn: u64, payload: &[u8]) -> (Vec<u8>, Head) {
-        let (seal, next) = head.seal(&key(), lsn, payload);
-        ([payload, &seal].concat(), next)
+    fn signed(head: Head, lsn: u64, payload: &[u8]) -> (Vec<u8>, Head) {
+        let (seal, next) = head.sign(&key(), lsn, payload);
+        ([payload, seal.as_bytes()].concat(), next)
+    }
+
+    fn linked(head: Head, lsn: u64, payload: &[u8]) -> (Vec<u8>, Head) {
+        let (seal, next) = head.link(lsn, payload);
+        ([payload, seal.as_bytes()].concat(), next)
     }
 
     #[test]
-    fn a_sealed_record_opens_to_its_payload() {
+    fn sealed_records_open_to_their_payloads() {
         let head = Head::new(Digest::GENESIS);
-        let (record, next) = sealed(head, 1, b"payload");
-        assert_eq!(record.len(), 7 + SEAL_LEN, "seal length");
+        let (first, middle) = linked(head, 1, b"first");
+        let (second, last) = signed(middle, 2, b"second");
+        assert_eq!(first.len(), 5 + LINKED_LEN, "linked seal length");
+        assert_eq!(second.len(), 6 + SIGNED_LEN, "signed seal length");
+        let verifying = key().verifying_key();
         assert_eq!(
-            head.open(&key().verifying_key(), 1, &record),
-            Ok((b"payload".as_slice(), next)),
-            "opens"
+            head.open(&verifying, 1, &first),
+            Ok((Opened::Linked(b"first".as_slice()), middle)),
+            "linked"
         );
-        assert_ne!(next.digest(), Digest::GENESIS, "the head moves");
+        assert_eq!(
+            middle.open(&verifying, 2, &second),
+            Ok((Opened::Signed(b"second".as_slice()), last)),
+            "signed"
+        );
+        assert_ne!(middle.digest(), Digest::GENESIS, "the head moves");
+        assert_ne!(last.digest(), middle.digest(), "and moves again");
+    }
+
+    #[test]
+    fn linking_and_signing_move_the_head_alike() {
+        let head = Head::new(Digest::GENESIS);
+        assert_eq!(
+            head.link(4, b"payload").1,
+            head.sign(&key(), 4, b"payload").1,
+            "the digest does not depend on the signature"
+        );
     }
 
     #[test]
     fn the_wrong_predecessor_breaks_the_chain() {
-        let (record, _) = sealed(Head::new(Digest::GENESIS), 1, b"payload");
+        let (record, _) = linked(Head::new(Digest::GENESIS), 1, b"payload");
         let other = Head::new(Digest::from_bytes([1; 32]));
         assert_eq!(
             other.open(&key().verifying_key(), 1, &record),
@@ -298,7 +422,7 @@ mod tests {
     #[test]
     fn another_position_or_key_fails_the_signature() {
         let head = Head::new(Digest::GENESIS);
-        let (record, _) = sealed(head, 1, b"payload");
+        let (record, _) = signed(head, 1, b"payload");
         assert_eq!(
             head.open(&key().verifying_key(), 2, &record),
             Err(SealDamage::Signature),
@@ -310,10 +434,30 @@ mod tests {
             Err(SealDamage::Signature),
             "key"
         );
+    }
+
+    #[test]
+    fn short_records_and_unknown_kinds_have_no_seal() {
+        let head = Head::new(Digest::GENESIS);
+        let verifying = key().verifying_key();
+        let (record, _) = signed(head, 1, b"");
+        let short = &record[1..];
         assert_eq!(
-            head.open(&key().verifying_key(), 1, &record[..SEAL_LEN - 1]),
+            head.open(&verifying, 1, short),
             Err(SealDamage::Missing),
-            "too short"
+            "short"
+        );
+        let mut unknown = record.clone();
+        *unknown.last_mut().unwrap() = 2;
+        assert_eq!(
+            head.open(&verifying, 1, &unknown),
+            Err(SealDamage::Missing),
+            "kind"
+        );
+        assert_eq!(
+            head.open(&verifying, 1, &[]),
+            Err(SealDamage::Missing),
+            "empty"
         );
     }
 
@@ -351,11 +495,13 @@ mod tests {
 
     proptest! {
         #[test]
-        fn any_change_to_a_sealed_record_is_detected(payload in proptest::collection::vec(any::<u8>(), 0..32), byte in any::<prop::sample::Index>(), bit in 0_u32..8) {
+        fn any_change_to_a_signed_record_is_detected(payload in proptest::collection::vec(any::<u8>(), 0..32), byte in any::<prop::sample::Index>(), bit in 0_u32..8) {
             let head = Head::new(Digest::GENESIS);
-            let (mut record, _) = sealed(head, 3, &payload);
+            let (mut record, _) = signed(head, 3, &payload);
             let byte = byte.index(record.len());
             record[byte] ^= 1_u8.rotate_left(bit);
+            // Even a kind byte flipped to "linked" fails: the chain then
+            // reads the signature as the previous digest.
             prop_assert!(head.open(&key().verifying_key(), 3, &record).is_err(), "flipped bit {bit} of byte {byte}");
         }
     }
