@@ -133,6 +133,13 @@ impl<'a> Reader<'a> {
         self.take(usize::try_from(len).map_err(|_| DecodeError::Truncated)?)
     }
 
+    /// Takes every byte that is left.
+    pub const fn rest(&mut self) -> &'a [u8] {
+        let rest = self.rest;
+        self.rest = &[];
+        rest
+    }
+
     /// Succeeds when every byte was read.
     ///
     /// # Errors
