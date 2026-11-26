@@ -3,6 +3,7 @@
 use kurator_codec::{DecodeError, Reader, put_bytes};
 
 use crate::error::{Error, Result};
+use crate::span::Span;
 
 const OP_PUT: u8 = 1;
 const OP_DELETE: u8 = 2;
@@ -23,6 +24,16 @@ pub enum KvOp {
         /// The key.
         key: Vec<u8>,
     },
+}
+
+impl KvOp {
+    /// The key it changes.
+    #[must_use]
+    pub fn key(&self) -> &[u8] {
+        match self {
+            Self::Put { key, .. } | Self::Delete { key } => key,
+        }
+    }
 }
 
 /// Changes that are applied together or not at all, in order.
@@ -66,6 +77,12 @@ impl WriteBatch {
     #[must_use]
     pub fn ops(&self) -> &[KvOp] {
         &self.ops
+    }
+
+    /// Whether every key it changes is in `span`.
+    #[must_use]
+    pub fn fits(&self, span: &Span) -> bool {
+        self.ops.iter().all(|op| span.contains(op.key()))
     }
 
     /// Consumes the batch, yielding its changes in order.

@@ -16,6 +16,7 @@ categories = ["database-implementations"]
 kurator-wal = { path = "crates/wal" }
 kurator-codec = { path = "crates/codec" }
 kurator-storage = { path = "crates/storage" }
+kurator-shard = { path = "crates/shard" }
 kurator-raft = { path = "crates/raft" }
 kurator-sim = { path = "crates/sim" }
 kurator-net = { path = "crates/net" }

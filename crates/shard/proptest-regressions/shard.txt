@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 02a886623356b698ee642f90aa3731d6036925cee1479d0a94c9b972762344d7 # shrinks to shard = Shard { id: ShardId(2), span: Span { start: [], end: Unbounded }, epoch: Epoch(0) }

@@ -1,6 +1,13 @@
 //! The `kurator` binary, driven through its console like an operator would.
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::process::{Command, Stdio};
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test code: a failure should panic with context"
+)]
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 const KURATOR: &str = env!("CARGO_BIN_EXE_kurator");
@@ -34,39 +41,84 @@ fn a_bad_command_line_fails_with_a_message() {
     assert!(output.stdout.is_empty(), "nothing on stdout");
 }
 
+/// How long the console may take to answer one line: a node that hangs
+/// fails the test instead of hanging it.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A running node, driven through its console.
+struct Console {
+    node: Child,
+    stdin: ChildStdin,
+    lines: Receiver<String>,
+}
+
+impl Console {
+    /// Runs `kurator run` with `args` and `--dir <dir>`, and waits for it
+    /// to say it is ready.
+    fn start(args: &[&str], dir: &Path) -> Self {
+        let mut node = Command::new(KURATOR)
+            .arg("run")
+            .args(args)
+            .arg("--dir")
+            .arg(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = node.stdin.take().unwrap();
+        let stdout = BufReader::new(node.stdout.take().unwrap());
+        let (send, lines) = mpsc::channel();
+        // Stops at the end of the output, or once the console is gone.
+        drop(std::thread::spawn(move || {
+            let _sent: Result<(), _> = stdout
+                .lines()
+                .map_while(Result::ok)
+                .try_for_each(|line| send.send(line));
+        }));
+        let console = Self { node, stdin, lines };
+        let banner = console.read(1);
+        assert!(banner.starts_with("ready"), "banner: {banner}");
+        console
+    }
+
+    /// Sends `line` and reads an answer of `lines` lines.
+    fn ask(&mut self, line: &str, lines: usize) -> String {
+        writeln!(self.stdin, "{line}").unwrap();
+        self.read(lines)
+    }
+
+    fn read(&self, lines: usize) -> String {
+        let answer: Vec<String> = (0..lines)
+            .map(|_| {
+                self.lines
+                    .recv_timeout(ANSWER_TIMEOUT)
+                    .unwrap_or_else(|error| panic!("no answer: {error}"))
+            })
+            .collect();
+        answer.join("\n")
+    }
+
+    /// Says `quit`, checks that the node stops cleanly, and returns what it
+    /// said after.
+    fn quit(mut self) -> Vec<String> {
+        writeln!(self.stdin, "quit").unwrap();
+        assert!(self.node.wait().unwrap().success(), "quits cleanly");
+        self.lines.iter().collect()
+    }
+}
+
 #[test]
 fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = Command::new(KURATOR)
-        .args([
-            "run",
-            "--id",
-            "1",
-            "--listen",
-            "127.0.0.1:0",
-            "--found",
-            "--dir",
-        ])
-        .arg(dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = node.stdin.take().unwrap();
-    let mut stdout = BufReader::new(node.stdout.take().unwrap());
-    let mut banner = String::new();
-    let _: usize = stdout.read_line(&mut banner).unwrap();
-    assert!(banner.starts_with("ready"), "banner: {banner}");
-    let mut ask = |line: &str| {
-        writeln!(stdin, "{line}").unwrap();
-        let mut answer = String::new();
-        let _: usize = stdout.read_line(&mut answer).unwrap();
-        answer.trim_end().to_owned()
-    };
-    assert!(ask("help").starts_with("commands:"), "help");
+    let mut console = Console::start(
+        &["--id", "1", "--listen", "127.0.0.1:0", "--found"],
+        dir.path(),
+    );
+    let mut ask = |line: &str, lines: usize| console.ask(line, lines);
+    assert!(ask("help", 1).starts_with("commands:"), "help");
     let started = Instant::now();
     loop {
-        let answer = ask("put greeting hello");
+        let answer = ask("put greeting hello", 1);
         if answer.starts_with("ok at") {
             break;
         }
@@ -76,16 +128,50 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(ask("get greeting"), "hello", "read back");
-    assert_eq!(ask("get missing"), "(none)", "absent");
-    assert!(ask("members").starts_with("voter 1 127.0.0.1:"), "members");
+    assert_eq!(ask("get greeting", 1), "hello", "read back");
+    assert_eq!(ask("get missing", 1), "(none)", "absent");
+    assert_eq!(ask("shards", 1), "s1 [, ..) at e0", "one shard");
+    let members = ask("members", 2);
     assert!(
-        ask("promote 7").starts_with("error: n7 cannot vote yet"),
+        members.starts_with("s1 [, ..) at e0\nvoter 1 127.0.0.1:"),
+        "members: {members}"
+    );
+    assert!(
+        ask("promote 7", 1).starts_with("error on s1: n7 cannot vote yet"),
         "a stranger cannot be promoted"
     );
-    writeln!(stdin, "quit").unwrap();
-    assert!(node.wait().unwrap().success(), "quits cleanly");
-    let mut rest = String::new();
-    let _: usize = stdout.read_to_string(&mut rest).unwrap();
-    assert_eq!(rest, "", "says nothing after quit");
+    assert_eq!(
+        ask("split m 2", 1),
+        "ok: s1 [, m) at e1 | s2 [m, ..) at e1",
+        "split"
+    );
+    let split = Instant::now();
+    loop {
+        let answer = ask("put melon green", 1);
+        if answer.starts_with("ok at") {
+            break;
+        }
+        assert!(
+            split.elapsed() < Duration::from_secs(20),
+            "the new shard never elected a leader: {answer}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(ask("get melon", 1), "green", "read from the new shard");
+    assert_eq!(ask("get greeting", 1), "hello", "still in the first");
+    assert!(console.quit().is_empty(), "says nothing after quit");
+}
+
+#[test]
+fn a_node_that_holds_no_shard_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut console = Console::start(&["--id", "2", "--listen", "127.0.0.1:0"], dir.path());
+    for line in ["get k", "put k v", "del k", "split k 2"] {
+        assert_eq!(
+            console.ask(line, 1),
+            "error: no shard on this node holds the key",
+            "{line}"
+        );
+    }
+    assert!(console.quit().is_empty(), "nothing more");
 }

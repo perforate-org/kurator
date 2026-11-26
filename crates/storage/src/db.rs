@@ -1,4 +1,10 @@
-//! The public database handle.
+//! The public database handle, and the engine behind it: the directory
+//! lock, the group commit thread, the in-memory core and its snapshots.
+
+mod commit;
+mod core;
+mod lock;
+mod snapshot;
 
 use std::num::NonZeroUsize;
 use std::ops::Bound;
@@ -7,13 +13,13 @@ use std::sync::Arc;
 
 use kurator_wal::{Lsn, RecoveryReport};
 
+use self::commit::GroupCommit;
+use self::core::Core;
+use self::lock::DirLock;
 use crate::batch::WriteBatch;
 use crate::command::Command;
-use crate::commit::GroupCommit;
-use crate::core::Core;
 use crate::draft::{Draft, KeyValue};
 use crate::error::Result;
-use crate::lock::DirLock;
 use crate::state::KvState;
 use crate::version::Version;
 

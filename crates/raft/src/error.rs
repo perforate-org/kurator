@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use kurator_codec::DecodeError;
+use kurator_shard::{Shard, ShardId};
 use kurator_wal::Lsn;
 
 use crate::types::{NodeId, Progress};
@@ -69,6 +70,20 @@ pub enum Error {
         node: NodeId,
         /// Where it stands.
         progress: Progress,
+    },
+    /// The shard does not hold a key the request touches, or a split does
+    /// not apply to it: it split meanwhile. `shard` is the shard as the
+    /// replica holds it now.
+    #[error("misrouted: the shard is {shard}")]
+    Misrouted {
+        /// The shard as it is.
+        shard: Box<Shard>,
+    },
+    /// The node holds no replica of the shard.
+    #[error("no replica of {shard} here")]
+    NoReplica {
+        /// The shard.
+        shard: ShardId,
     },
     /// The cluster is already initialized.
     #[error("the cluster is already initialized")]

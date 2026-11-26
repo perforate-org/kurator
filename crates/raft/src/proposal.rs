@@ -1,22 +1,34 @@
-//! Proposals: commands encoded for the Raft log.
+//! Proposals: what a client asks a shard's log to hold.
 
 use std::fmt;
 
+use kurator_codec::{DecodeError, Reader};
+use kurator_shard::Split;
 use kurator_storage::{Command, Encoded};
 
 use crate::error::{Error, Result};
 
-/// Bytes an entry record adds to its command: the tag, the log id and the
+/// Bytes an entry record adds to its proposal: the tag, the log id and the
 /// payload kind. The log codec's tests hold it to the encoding.
 pub(crate) const ENTRY_OVERHEAD: usize = 1 + 24 + 1;
 
-/// A command on its way through the Raft log: the application data of an
-/// entry.
+/// The application data of an entry: a command for the shard's keys, or a
+/// split of the shard.
 ///
-/// Only [`Proposal::new`] and the log decoder make one, so a proposal
-/// always fits one log record together with its entry header.
+/// Only [`Proposal::new`], [`Proposal::split`] and the log decoder make
+/// one, so a proposal always fits one log record together with its entry
+/// header.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Proposal(Encoded);
+pub struct Proposal(Body);
+
+/// What a proposal carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Body {
+    /// A command, with its encoding.
+    Command(Encoded),
+    /// A split, with its encoding.
+    Split(Split, Vec<u8>),
+}
 
 impl Proposal {
     /// Encodes `command` for the log.
@@ -27,52 +39,103 @@ impl Proposal {
     /// and [`Error::ProposalTooLarge`] when it does not fit one log record
     /// together with its entry header.
     pub fn new(command: Command) -> Result<Self> {
-        let encoded = command.encode()?;
-        let len = encoded.payload().len();
+        Self::fitting(Body::Command(command.encode()?))
+    }
+
+    /// Encodes `split` for the log.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ProposalTooLarge`] when the split key does not fit one log
+    /// record.
+    pub fn split(split: Split) -> Result<Self> {
+        let mut encoded = Vec::new();
+        split.encode(&mut encoded)?;
+        Self::fitting(Body::Split(split, encoded))
+    }
+
+    fn fitting(body: Body) -> Result<Self> {
+        let len = body.payload().len();
         if len.saturating_add(ENTRY_OVERHEAD) > kurator_wal::MAX_PAYLOAD_LEN {
             return Err(Error::ProposalTooLarge { len });
         }
-        Ok(Self(encoded))
+        Ok(Self(body))
     }
 
-    /// Wraps a payload read back from the log.
-    pub(crate) const fn decoded(encoded: Encoded) -> Self {
-        Self(encoded)
+    /// Reads back a command's payload from the log.
+    pub(crate) fn decode_command(payload: Vec<u8>) -> Result<Self, DecodeError> {
+        Encoded::decode(payload).map(|encoded| Self(Body::Command(encoded)))
     }
 
-    /// The encoded command.
-    #[must_use]
-    pub const fn encoded(&self) -> &Encoded {
+    /// Reads back a split's payload from the log.
+    pub(crate) fn decode_split(payload: Vec<u8>) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(&payload);
+        let split = Split::decode(&mut reader)?;
+        reader.finish()?;
+        Ok(Self(Body::Split(split, payload)))
+    }
+
+    /// What it carries.
+    pub(crate) const fn body(&self) -> &Body {
         &self.0
     }
 
-    /// Consumes the proposal, keeping the command.
-    #[must_use]
-    pub fn into_command(self) -> Command {
-        self.0.into_command()
+    /// Consumes the proposal, keeping what it carries.
+    pub(crate) fn into_body(self) -> Body {
+        self.0
+    }
+}
+
+impl Body {
+    /// The bytes that go into the log.
+    pub(crate) fn payload(&self) -> &[u8] {
+        match self {
+            Self::Command(encoded) => encoded.payload(),
+            Self::Split(_, encoded) => encoded,
+        }
     }
 }
 
 impl fmt::Display for Proposal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "proposal of {} bytes", self.0.payload().len())
+        let len = self.0.payload().len();
+        match &self.0 {
+            Body::Command(_) => write!(f, "proposal of {len} bytes"),
+            Body::Split(split, _) => write!(f, "split of {} into {}", split.epoch(), split.right()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use kurator_shard::{Epoch, ShardId, Split};
     use kurator_storage::{Command, WriteBatch};
 
     use super::Proposal;
+    use crate::error::Error;
 
     #[test]
-    fn a_proposal_shows_its_size() {
+    fn a_proposal_shows_what_it_carries() {
         let proposal = Proposal::new(Command::Kv(WriteBatch::new().put("k", "v"))).unwrap();
-        let len = proposal.encoded().payload().len();
+        let len = proposal.body().payload().len();
         assert_eq!(
             proposal.to_string(),
             format!("proposal of {len} bytes"),
-            "display"
+            "command"
+        );
+        let split = Proposal::split(Split::new("m", ShardId::new(2), Epoch::ZERO)).unwrap();
+        assert_eq!(split.to_string(), "split of e0 into s2", "split");
+    }
+
+    #[test]
+    fn a_split_key_must_fit_one_record() {
+        let at = vec![0; kurator_wal::MAX_PAYLOAD_LEN];
+        assert!(
+            matches!(
+                Proposal::split(Split::new(at, ShardId::new(2), Epoch::ZERO)),
+                Err(Error::ProposalTooLarge { .. })
+            ),
+            "too large"
         );
     }
 }

@@ -1,11 +1,13 @@
 //! The messages replicas exchange, and their binary encoding.
 //!
-//! One [`Request`] goes out and one [`Response`] comes back. A transport
-//! carries the bytes of [`Request::encode`] and [`Response::encode`] and
-//! nothing else, so every transport speaks the same protocol, and the
-//! deterministic simulator runs the same encoding as the network.
+//! One [`Message`], a [`Request`] for the replica of one shard, goes out
+//! and one [`Response`] comes back. A transport carries the bytes of
+//! [`Message::encode`] and [`Response::encode`] and nothing else, so every
+//! transport speaks the same protocol, and the deterministic simulator
+//! runs the same encoding as the network.
 //!
 //! ```text
+//! message   = shard u64 | request
 //! request   = 1 append | 2 vote | 3 pre-vote | 4 snapshot
 //! append    = vote | option(log id) prev | option(log id) commit
 //!             | count u32 bytes(entry)*
@@ -41,6 +43,7 @@ use crate::codec::{
 use crate::config::Config;
 use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{LogId, NodeId, Vote};
+use kurator_shard::ShardId;
 
 const REFUSED: u8 = 0;
 const APPEND: u8 = 1;
@@ -127,57 +130,47 @@ impl<C: Config> Request<C> {
         vote.leader_id.node_id
     }
 
-    /// The request as it goes over the wire.
-    ///
-    /// # Errors
-    ///
-    /// When an entry or the snapshot is longer than `u32::MAX` bytes.
-    pub fn encode(&self) -> std::io::Result<Vec<u8>> {
-        let mut out = Vec::new();
+    /// Appends the request as it goes over the wire.
+    fn put(&self, out: &mut Vec<u8>) -> std::io::Result<()> {
         match self {
             Self::AppendEntries(request) => {
                 out.push(APPEND);
-                put_vote(&mut out, &request.vote);
-                put_option(&mut out, request.prev_log_id.as_ref());
-                put_option(&mut out, request.leader_commit.as_ref());
-                put_len(&mut out, request.entries.len());
+                put_vote(out, &request.vote);
+                put_option(out, request.prev_log_id.as_ref());
+                put_option(out, request.leader_commit.as_ref());
+                put_len(out, request.entries.len());
                 let mut encoded = Vec::new();
                 for entry in &request.entries {
                     encoded.clear();
                     put_entry(&mut encoded, entry);
-                    put_bytes(&mut out, &encoded)?;
+                    put_bytes(out, &encoded)?;
                 }
             }
             Self::Vote(request) => {
                 out.push(VOTE);
-                put_vote_request(&mut out, request);
+                put_vote_request(out, request);
             }
             Self::PreVote(request) => {
                 out.push(PRE_VOTE);
-                put_vote_request(&mut out, request);
+                put_vote_request(out, request);
             }
             Self::InstallSnapshot { vote, snapshot } => {
                 out.push(SNAPSHOT);
-                put_vote(&mut out, vote);
-                put_meta(&mut out, &snapshot.meta);
-                put_bytes(&mut out, snapshot.snapshot.as_slice())?;
+                put_vote(out, vote);
+                put_meta(out, &snapshot.meta);
+                put_bytes(out, snapshot.snapshot.as_slice())?;
             }
         }
-        Ok(out)
+        Ok(())
     }
 
-    /// Decodes what [`Request::encode`] wrote.
-    ///
-    /// # Errors
-    ///
-    /// When `bytes` is not a whole request.
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(bytes);
+    /// Reads a request written by [`Request::put`].
+    fn read(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let request = match reader.read::<u8>()? {
             APPEND => {
-                let vote = vote(&mut reader)?;
-                let prev_log_id = option(&mut reader)?;
-                let leader_commit = option(&mut reader)?;
+                let vote = vote(reader)?;
+                let prev_log_id = option(reader)?;
+                let leader_commit = option(reader)?;
                 let mut entries = Vec::new();
                 for _ in 0..reader.read::<u32>()? {
                     let mut encoded = Reader::new(reader.bytes()?);
@@ -191,11 +184,11 @@ impl<C: Config> Request<C> {
                     leader_commit,
                 })
             }
-            VOTE => Self::Vote(vote_request(&mut reader)?),
-            PRE_VOTE => Self::PreVote(vote_request(&mut reader)?),
+            VOTE => Self::Vote(vote_request(reader)?),
+            PRE_VOTE => Self::PreVote(vote_request(reader)?),
             SNAPSHOT => {
-                let vote = vote(&mut reader)?;
-                let meta = meta(&mut reader)?;
+                let vote = vote(reader)?;
+                let meta = meta(reader)?;
                 let snapshot = SnapshotBytes::from_vec(reader.bytes()?.to_vec());
                 Self::InstallSnapshot {
                     vote,
@@ -204,8 +197,64 @@ impl<C: Config> Request<C> {
             }
             other => return Err(DecodeError::Tag(other)),
         };
-        reader.finish()?;
         Ok(request)
+    }
+}
+
+/// A [`Request`] for one shard's replica on the receiving node.
+#[derive(Debug)]
+pub struct Message<C: Config> {
+    shard: ShardId,
+    request: Request<C>,
+}
+
+impl<C: Config> Message<C> {
+    /// `request` for the replica of `shard`.
+    #[must_use]
+    pub const fn new(shard: ShardId, request: Request<C>) -> Self {
+        Self { shard, request }
+    }
+
+    /// The shard it is for.
+    #[must_use]
+    pub const fn shard(&self) -> ShardId {
+        self.shard
+    }
+
+    /// The replica it claims to come from; see [`Request::sender`].
+    #[must_use]
+    pub const fn sender(&self) -> NodeId {
+        self.request.sender()
+    }
+
+    /// The request.
+    #[must_use]
+    pub fn into_request(self) -> Request<C> {
+        self.request
+    }
+
+    /// The message as it goes over the wire: `shard u64 | request`.
+    ///
+    /// # Errors
+    ///
+    /// When an entry or the snapshot is longer than `u32::MAX` bytes.
+    pub fn encode(&self) -> std::io::Result<Vec<u8>> {
+        let mut out = self.shard.get().to_le_bytes().to_vec();
+        self.request.put(&mut out)?;
+        Ok(out)
+    }
+
+    /// Decodes what [`Message::encode`] wrote.
+    ///
+    /// # Errors
+    ///
+    /// When `bytes` is not a whole message.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let shard = ShardId::new(reader.read()?);
+        let request = Request::read(&mut reader)?;
+        reader.finish()?;
+        Ok(Self { shard, request })
     }
 }
 
@@ -365,7 +414,8 @@ fn append_result<C: Config>(reader: &mut Reader<'_>) -> Result<AppendResult<C>, 
 #[cfg(test)]
 mod tests {
     use kurator_codec::DecodeError;
-    use kurator_storage::{Command, KvState, WriteBatch};
+    use kurator_shard::ShardState;
+    use kurator_storage::{Command, WriteBatch};
     use openraft::EntryPayload;
     use openraft::raft::{
         AppendEntriesRequest, AppendError, ConflictHint, SnapshotResponse, VoteRequest,
@@ -373,12 +423,13 @@ mod tests {
     };
     use proptest::prelude::*;
 
-    use super::{Refusal, Request, Response};
+    use super::{Message, Refusal, Request, Response};
     use crate::config::Entry;
     use crate::proposal::Proposal;
     use crate::snapshot::{Snapshot, SnapshotBytes};
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, SnapshotMeta, StoredMembership, Vote};
+    use kurator_shard::ShardId;
 
     crate::declare_config!(Test, openraft_rt_sim::SimRuntime);
 
@@ -453,7 +504,7 @@ mod tests {
                 last_log_id,
                 last_membership: StoredMembership::new(Some(membership_id), membership(&[1], &[2])),
             };
-            let mut state = KvState::default();
+            let mut state = ShardState::default();
             let _committed = state.apply(
                 kurator_storage::Version::new(1),
                 Command::Kv(WriteBatch::new().put("k", "v")),
@@ -538,8 +589,9 @@ mod tests {
                 "{bytes:?}"
             );
         }
+        let unknown = [&1_u64.to_le_bytes()[..], &[0]].concat();
         assert!(
-            matches!(Request::<Test>::decode(&[0]), Err(DecodeError::Tag(0))),
+            matches!(Message::<Test>::decode(&unknown), Err(DecodeError::Tag(0))),
             "request tag"
         );
         let mut encoded = Response::<Test>::Refused(Refusal::Stopped).encode();
@@ -555,12 +607,15 @@ mod tests {
 
     proptest! {
         #[test]
-        fn requests_roundtrip(request in request()) {
-            let encoded = request.encode().unwrap();
-            let decoded = Request::<Test>::decode(&encoded).unwrap();
-            prop_assert_eq!(decoded.sender(), request.sender());
+        fn messages_roundtrip(request in request(), shard in any::<u64>()) {
+            let message = Message::new(ShardId::new(shard), request);
+            let encoded = message.encode().unwrap();
+            let decoded = Message::<Test>::decode(&encoded).unwrap();
+            prop_assert_eq!(decoded.shard(), message.shard());
+            prop_assert_eq!(decoded.sender(), message.sender());
             prop_assert_eq!(decoded.encode().unwrap(), encoded);
-            prop_assert_eq!(format!("{decoded:?}"), format!("{request:?}"));
+            prop_assert_eq!(format!("{decoded:?}"), format!("{message:?}"));
+            prop_assert_eq!(format!("{:?}", decoded.into_request()), format!("{:?}", message.into_request()));
         }
 
         #[test]
@@ -573,15 +628,15 @@ mod tests {
 
         #[test]
         fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..96)) {
-            drop(Request::<Test>::decode(&bytes));
+            drop(Message::<Test>::decode(&bytes));
             drop(Response::<Test>::decode(&bytes));
         }
 
         #[test]
-        fn every_cut_of_a_request_is_rejected(request in request(), cut in any::<prop::sample::Index>()) {
-            let encoded = request.encode().unwrap();
+        fn every_cut_of_a_message_is_rejected(request in request(), cut in any::<prop::sample::Index>()) {
+            let encoded = Message::new(ShardId::FIRST, request).encode().unwrap();
             let len = cut.index(encoded.len());
-            prop_assert!(Request::<Test>::decode(&encoded[..len]).is_err());
+            prop_assert!(Message::<Test>::decode(&encoded[..len]).is_err());
         }
     }
 }

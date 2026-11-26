@@ -24,9 +24,10 @@ async fn write_keys(cluster: &Cluster, from: u32, count: u32) -> BTreeSet<Vec<u8
     let mut acked = BTreeSet::new();
     for index in from..from.saturating_add(count) {
         let key = index.to_le_bytes().to_vec();
-        if let Outcome::Acked(_) = cluster
+        if cluster
             .write(WriteBatch::new().put(key.clone(), b"v".to_vec()))
             .await
+            == Outcome::Acked
         {
             let _: bool = acked.insert(key);
         }
@@ -47,7 +48,7 @@ fn a_new_node_votes_only_after_it_caught_up_and_then_counts_in_the_quorum() {
 
         // The learner is added and goes down before it receives anything.
         let added = cluster.add_learner(id(4)).await.unwrap();
-        assert!(matches!(added, Outcome::Acked(_)), "added: {added:?}");
+        assert!(added == Outcome::Acked, "added: {added:?}");
         cluster.crash(id(4)).await.unwrap();
         acked.extend(write_keys(&cluster, 120, 20).await);
         assert!(
@@ -72,10 +73,7 @@ fn a_new_node_votes_only_after_it_caught_up_and_then_counts_in_the_quorum() {
             }
             SimRuntime::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            matches!(promoted, Outcome::Acked(_)),
-            "promoted: {promoted:?}"
-        );
+        assert!(promoted == Outcome::Acked, "promoted: {promoted:?}");
         assert!(voters(&cluster).contains(&id(4)), "votes");
         let joined = cluster
             .statuses()
@@ -93,7 +91,7 @@ fn a_new_node_votes_only_after_it_caught_up_and_then_counts_in_the_quorum() {
         let old = [id(1), id(2), id(3)];
         let leaving = old.into_iter().find(|node| *node != leader).unwrap();
         let left = cluster.leave(leaving).await.unwrap();
-        assert!(matches!(left, Outcome::Acked(_)), "left: {left:?}");
+        assert!(left == Outcome::Acked, "left: {left:?}");
         let down = old
             .into_iter()
             .find(|node| *node != leader && *node != leaving)
@@ -125,7 +123,7 @@ fn the_leader_can_remove_itself_and_the_rest_carry_on() {
         let mut acked = write_keys(&cluster, 0, 10).await;
         let leader = cluster.leader().unwrap();
         let left = cluster.leave(leader).await.unwrap();
-        assert!(matches!(left, Outcome::Acked(_)), "left: {left:?}");
+        assert!(left == Outcome::Acked, "left: {left:?}");
         acked.extend(write_keys(&cluster, 10, 10).await);
         cluster.settle().await.unwrap();
         let remaining = voters(&cluster);
@@ -151,14 +149,14 @@ fn a_cut_off_leader_cannot_change_the_membership() {
         cluster.isolate(old);
         let cut_off = cluster.leave_via(old, victim).await.unwrap();
         assert!(
-            !matches!(cut_off, Outcome::Acked(_)),
+            cut_off != Outcome::Acked,
             "no quorum, no change: {cut_off:?}"
         );
         SimRuntime::sleep(Duration::from_secs(2)).await;
 
         // Meanwhile the majority admits a new node.
         let joined = cluster.join(id(4)).await.unwrap();
-        assert!(matches!(joined, Outcome::Acked(_)), "joined: {joined:?}");
+        assert!(joined == Outcome::Acked, "joined: {joined:?}");
         cluster.settle().await.unwrap();
         assert_eq!(
             voters(&cluster),
@@ -190,9 +188,9 @@ fn the_majority_removes_a_cut_off_node_and_admits_another() {
         cluster.isolate(cut_off);
         let mut acked = write_keys(&cluster, 0, 10).await;
         let left = cluster.leave(cut_off).await.unwrap();
-        assert!(matches!(left, Outcome::Acked(_)), "left: {left:?}");
+        assert!(left == Outcome::Acked, "left: {left:?}");
         let joined = cluster.join(id(4)).await.unwrap();
-        assert!(matches!(joined, Outcome::Acked(_)), "joined: {joined:?}");
+        assert!(joined == Outcome::Acked, "joined: {joined:?}");
         acked.extend(write_keys(&cluster, 10, 10).await);
         cluster.heal();
         cluster.settle().await.unwrap();

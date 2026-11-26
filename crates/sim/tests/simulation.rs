@@ -1,6 +1,7 @@
-//! Clusters under random faults and membership changes: whatever happens,
-//! an acknowledged write is never lost, every replica ends with the same
-//! state, and the same seed replays the same run.
+//! Clusters under random faults, membership changes and splits: whatever
+//! happens, an acknowledged write is never lost, every replica of a shard
+//! ends with the same state, the shards hold every key once, and the same
+//! seed replays the same run.
 //!
 //! `KURATOR_SIM_SEEDS=<n>` runs more seeds than the default, and
 //! `KURATOR_SIM_SEED=<seed>` runs just one, to reproduce a failure.
@@ -16,8 +17,9 @@ use std::time::Duration;
 
 use kurator_raft::NodeId;
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_sim::{Cluster, Faults, Outcome, Rng, SimError};
-use kurator_storage::{KvState, WriteBatch};
+use kurator_shard::{ShardId, ShardMap, ShardState};
+use kurator_sim::{Cluster, Faults, Holdings, Outcome, Rng, SimError};
+use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 const DEFAULT_SEEDS: u64 = 12;
@@ -34,8 +36,8 @@ struct Run {
     acked: BTreeSet<Vec<u8>>,
     /// Keys whose writes may or may not have happened.
     unknown: BTreeSet<Vec<u8>>,
-    /// The state of every replica after the cluster settled.
-    states: BTreeMap<NodeId, KvState>,
+    /// What every node held after the cluster settled.
+    states: BTreeMap<NodeId, Holdings>,
     /// The id the next node to join gets. Ids are never reused: a node
     /// that left keeps its directory.
     next_id: u64,
@@ -49,8 +51,18 @@ fn seeds() -> Vec<u64> {
     if let Some(seed) = env_u64("KURATOR_SIM_SEED") {
         return vec![seed];
     }
-    (0..env_u64("KURATOR_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS)).collect()
+    let count = env_u64("KURATOR_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS);
+    let mut seeds: Vec<u64> = (0..count).collect();
+    seeds.extend(REGRESSIONS.iter().filter(|seed| **seed >= count));
+    seeds
 }
+
+/// Seeds that once failed, run every time:
+/// - 16: a leave ran before the client learned of a split, and missed the
+///   new shard.
+/// - 205: a split whose outcome was unknown applied after settle first
+///   looked.
+const REGRESSIONS: [u64; 2] = [16, 205];
 
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)
@@ -96,18 +108,23 @@ async fn act(
 ) -> Result<String, SimError> {
     let roll = rng.below(100);
     let event = match roll {
-        0..56 => {
+        0..52 => {
             let key = format!("key-{step}").into_bytes();
             let outcome = cluster
                 .write(WriteBatch::new().put(key.clone(), b"value".to_vec()))
                 .await;
             match outcome {
-                Outcome::Acked(_) => drop(run.acked.insert(key)),
+                Outcome::Acked => drop(run.acked.insert(key)),
                 Outcome::Unknown => drop(run.unknown.insert(key)),
                 Outcome::Rejected => {}
                 _ => panic!("an outcome added to kurator-sim: {outcome:?}"),
             }
             format!("write -> {outcome:?}")
+        }
+        52..56 => {
+            let at = format!("key-{}", rng.below(STEPS)).into_bytes();
+            let outcome = cluster.split(&at).await;
+            format!("split {} -> {outcome:?}", String::from_utf8_lossy(&at))
         }
         56..66 => match rng.pick(&cluster.up()).copied() {
             Some(id) => {
@@ -168,20 +185,42 @@ async fn act(
 
 /// Checks what every run must satisfy.
 fn check(seed: u64, run: &Run) {
-    let mut states = run.states.values();
-    let first = states.next().expect("replicas are up");
-    for state in states {
-        assert_eq!(state, first, "seed {seed}: replicas diverged");
+    let mut shards: BTreeMap<ShardId, &ShardState> = BTreeMap::new();
+    for (id, holdings) in &run.states {
+        for state in holdings.shards() {
+            let first = *shards.entry(state.shard().id()).or_insert(state);
+            assert_eq!(
+                state,
+                first,
+                "seed {seed}: {id} diverged on {}",
+                state.shard()
+            );
+        }
     }
+    let tiles = ShardMap::from_shards(shards.values().map(|state| state.shard().clone()));
+    assert!(
+        tiles.is_some(),
+        "seed {seed}: the shards do not hold every key once: {:?}",
+        shards
+            .values()
+            .map(|state| state.shard().to_string())
+            .collect::<Vec<_>>()
+    );
+    let holder = |key: &[u8]| {
+        shards
+            .values()
+            .find(|state| state.shard().span().contains(key))
+            .expect("a shard holds every key")
+    };
     for key in &run.acked {
         assert!(
-            first.get(key).is_some(),
+            holder(key).kv().get(key).is_some(),
             "seed {seed}: acknowledged write {} was lost\n{}",
             String::from_utf8_lossy(key),
             run.trace.join("\n")
         );
     }
-    for (key, _) in first.iter() {
+    for (key, _) in shards.values().flat_map(|state| state.kv().iter()) {
         assert!(
             run.acked.contains(key) || run.unknown.contains(key),
             "seed {seed}: {} appeared without a write",
@@ -193,6 +232,7 @@ fn check(seed: u64, run: &Run) {
 #[test]
 fn random_faults_never_lose_an_acknowledged_write() {
     let mut acked = 0;
+    let mut split = 0;
     let mut faults = BTreeSet::new();
     for seed in seeds() {
         let run = run(seed);
@@ -200,16 +240,20 @@ fn random_faults_never_lose_an_acknowledged_write() {
         acked += run.acked.len();
         for event in &run.trace {
             let kind = event.split_whitespace().nth(1).unwrap_or_default();
-            if ["crash", "restart", "isolate", "join", "leave"].contains(&kind) {
+            if ["crash", "restart", "isolate", "join", "leave", "split"].contains(&kind) {
                 let _: bool = faults.insert(kind.to_owned());
+            }
+            if kind == "split" && event.ends_with("Acked") {
+                split += 1;
             }
         }
     }
     assert!(acked > 0, "some writes succeed");
+    assert!(split > 0, "some splits succeed");
     assert_eq!(
         faults.len(),
-        5,
-        "replicas crashed, restarted, were cut off, joined and left: {faults:?}"
+        6,
+        "replicas crashed, restarted, were cut off, joined and left, shards split: {faults:?}"
     );
 }
 
@@ -236,9 +280,10 @@ fn a_follower_that_missed_purged_entries_catches_up_from_a_snapshot() {
         let mut acked = BTreeSet::new();
         for index in 0..120_u32 {
             let key = index.to_le_bytes().to_vec();
-            if let Outcome::Acked(_) = cluster
+            if cluster
                 .write(WriteBatch::new().put(key.clone(), b"v".to_vec()))
                 .await
+                == Outcome::Acked
             {
                 let _: bool = acked.insert(key);
             }
@@ -284,16 +329,13 @@ fn a_cut_off_leader_cannot_commit_and_its_writes_never_appear() {
         let cut_off = cluster
             .write_to(old, WriteBatch::new().put(b"lost".to_vec(), b"v".to_vec()))
             .await;
-        assert!(
-            !matches!(cut_off, Outcome::Acked(_)),
-            "no quorum, no ack: {cut_off:?}"
-        );
+        assert!(cut_off != Outcome::Acked, "no quorum, no ack: {cut_off:?}");
         SimRuntime::sleep(Duration::from_secs(2)).await;
         let outcome = cluster
             .write(WriteBatch::new().put(b"kept".to_vec(), b"v".to_vec()))
             .await;
         assert!(
-            matches!(outcome, Outcome::Acked(_)),
+            outcome == Outcome::Acked,
             "the majority elects a new leader: {outcome:?}"
         );
         cluster.settle().await.unwrap();
@@ -314,9 +356,10 @@ fn every_acknowledged_write_survives_a_full_cluster_restart() {
         let mut acked = Vec::new();
         for index in 0..60_u32 {
             let key = index.to_le_bytes().to_vec();
-            if let Outcome::Acked(_) = cluster
+            if cluster
                 .write(WriteBatch::new().put(key.clone(), b"v".to_vec()))
                 .await
+                == Outcome::Acked
             {
                 acked.push(key);
             }

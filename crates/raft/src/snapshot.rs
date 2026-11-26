@@ -2,10 +2,11 @@
 //! the network.
 //!
 //! ```text
-//! kurator_codec::Format "KRRS", version 3, around:
+//! kurator_codec::Format "KRRS", version 4, around:
 //! meta             as in crate::codec: the last entry, the membership's
 //!                  entry and the membership with every peer
-//! state            kurator_storage::KvState::encode
+//! state            kurator_shard::ShardState::encode: the shard, then its
+//!                  keys
 //! ```
 //!
 //! A snapshot is written to a temporary file, synced, renamed into place
@@ -17,7 +18,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use kurator_codec::{DecodeError, Format};
-use kurator_storage::KvState;
+use kurator_shard::ShardState;
 use kurator_wal::sync_dir;
 
 use crate::codec::{meta, put_meta};
@@ -25,8 +26,8 @@ use crate::error::{Error, Result, SnapshotDamage};
 use crate::types::{LeaderId, Membership, SnapshotMeta};
 
 /// Version 2 added peers to the membership, version 3 the readable
-/// versions of each key.
-const FORMAT: Format = Format::new(*b"KRRS", 3);
+/// versions of each key, version 4 the shard.
+const FORMAT: Format = Format::new(*b"KRRS", 4);
 const FILE: &str = "snapshot";
 const TEMP_PREFIX: &str = ".snapshot-";
 
@@ -54,7 +55,7 @@ impl SnapshotBytes {
     }
 
     /// Encodes `state` with `meta`.
-    pub(crate) fn encode(meta: &SnapshotMeta, state: &KvState) -> io::Result<Self> {
+    pub(crate) fn encode(meta: &SnapshotMeta, state: &ShardState) -> io::Result<Self> {
         let mut head = Vec::new();
         put_meta(&mut head, meta);
         let framed = FORMAT.write(Vec::new(), |out| {
@@ -65,15 +66,15 @@ impl SnapshotBytes {
     }
 
     /// The metadata and the state.
-    pub(crate) fn decode(&self) -> Result<(SnapshotMeta, KvState), SnapshotDamage> {
+    pub(crate) fn decode(&self) -> Result<(SnapshotMeta, ShardState), SnapshotDamage> {
         decode(&self.0).map_err(SnapshotDamage::Format)
     }
 }
 
-fn decode(framed: &[u8]) -> Result<(SnapshotMeta, KvState), DecodeError> {
+fn decode(framed: &[u8]) -> Result<(SnapshotMeta, ShardState), DecodeError> {
     let mut reader = FORMAT.read(framed)?;
     let meta = meta(&mut reader)?;
-    let state = KvState::decode(&mut reader)?;
+    let state = ShardState::decode(&mut reader)?;
     reader.finish()?;
     Ok((meta, state))
 }
@@ -141,7 +142,8 @@ impl SnapshotDir {
 #[cfg(test)]
 mod tests {
     use kurator_codec::{DecodeError, Format};
-    use kurator_storage::{Command, KvState, WriteBatch};
+    use kurator_shard::ShardState;
+    use kurator_storage::{Command, WriteBatch};
 
     use super::{SnapshotBytes, SnapshotDir};
     use crate::error::SnapshotDamage;
@@ -164,8 +166,8 @@ mod tests {
         }
     }
 
-    fn state() -> KvState {
-        let mut state = KvState::default();
+    fn state() -> ShardState {
+        let mut state = ShardState::default();
         let _committed = state.apply(
             kurator_storage::Version::new(1),
             Command::Kv(WriteBatch::new().put("a", "1").put("b", "")),
@@ -178,10 +180,10 @@ mod tests {
         let bytes = SnapshotBytes::encode(&meta(), &state()).unwrap();
         assert_eq!(bytes.decode(), Ok((meta(), state())), "roundtrip");
         let empty = SnapshotMeta::default();
-        let empty_bytes = SnapshotBytes::encode(&empty, &KvState::default()).unwrap();
+        let empty_bytes = SnapshotBytes::encode(&empty, &ShardState::default()).unwrap();
         assert_eq!(
             empty_bytes.decode(),
-            Ok((empty, KvState::default())),
+            Ok((empty, ShardState::default())),
             "empty roundtrip"
         );
     }
@@ -218,7 +220,8 @@ mod tests {
         let snapshots = SnapshotDir::open(dir.path()).unwrap();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "cleaned");
         assert_eq!(snapshots.load().unwrap(), None, "none yet");
-        let first = SnapshotBytes::encode(&SnapshotMeta::default(), &KvState::default()).unwrap();
+        let first =
+            SnapshotBytes::encode(&SnapshotMeta::default(), &ShardState::default()).unwrap();
         let second = SnapshotBytes::encode(&meta(), &state()).unwrap();
         snapshots.store(&first).unwrap();
         snapshots.store(&second).unwrap();

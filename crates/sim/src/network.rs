@@ -10,7 +10,7 @@ use std::time::Duration;
 use kurator_codec::DecodeError;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_raft::{
-    Connection, Failure, Inbox, NodeId, Peer, Refusal, Request, Response, Transport,
+    Connection, Failure, Inbox, Message, NodeId, Peer, Refusal, Response, Transport,
 };
 use openraft_rt_sim::SimRuntime;
 use parking_lot::Mutex;
@@ -52,7 +52,7 @@ struct Shared {
     rng: Rng,
     faults: Faults,
     /// The replicas that are up, by id.
-    inboxes: BTreeMap<NodeId, Inbox<Sim>>,
+    inboxes: BTreeMap<NodeId, Inbox<Sim, Endpoint>>,
     /// Links that are cut, from sender to receiver.
     cut: BTreeSet<(NodeId, NodeId)>,
     /// The first message that did not decode: a bug, never a fault.
@@ -93,7 +93,7 @@ impl Network {
     }
 
     /// Connects a replica that is up.
-    pub fn connect(&self, id: NodeId, inbox: Inbox<Sim>) {
+    pub fn connect(&self, id: NodeId, inbox: Inbox<Sim, Endpoint>) {
         drop(self.shared.lock().inboxes.insert(id, inbox));
     }
 
@@ -147,7 +147,7 @@ impl Network {
     }
 
     /// The inbox of `to` when `from` can reach it now.
-    fn reachable(&self, from: NodeId, to: NodeId) -> Option<Inbox<Sim>> {
+    fn reachable(&self, from: NodeId, to: NodeId) -> Option<Inbox<Sim, Endpoint>> {
         if self.is_cut(from, to) {
             return None;
         }
@@ -159,7 +159,7 @@ impl Network {
     /// the delay of the reply and checks the link back.
     async fn carry<T, F, Fut>(&self, from: NodeId, to: NodeId, deliver: F) -> Result<T, Failure>
     where
-        F: FnOnce(Inbox<Sim>) -> Fut,
+        F: FnOnce(Inbox<Sim, Endpoint>) -> Fut,
         Fut: Future<Output = T>,
     {
         let Fate::Delivered(delay) = self.fate() else {
@@ -220,13 +220,13 @@ impl Transport<Sim> for Endpoint {
 impl Connection<Sim> for Wire {
     async fn call(
         &mut self,
-        request: Request<Sim>,
+        message: Message<Sim>,
         deadline: Duration,
     ) -> Result<Response<Sim>, Failure> {
-        let bytes = request.encode().map_err(Failure::Unreachable)?;
+        let bytes = message.encode().map_err(Failure::Unreachable)?;
         let (from, to, network) = (self.from, self.to, self.network.clone());
         let carried = self.network.carry(from, to, |inbox| async move {
-            let response = match Request::decode(&bytes) {
+            let response = match Message::decode(&bytes) {
                 Ok(decoded) => inbox.handle(decoded).await,
                 Err(error) => {
                     network.garble(from, to, error);

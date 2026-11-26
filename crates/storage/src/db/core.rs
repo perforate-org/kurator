@@ -7,10 +7,10 @@ use std::sync::Arc;
 use kurator_wal::{Lsn, LsnRange, RecoveryReport, Start, Wal};
 use parking_lot::{Mutex, RwLock};
 
+use super::snapshot::Snapshots;
 use crate::command::{Command, Encoded};
 use crate::error::{Error, Result};
 use crate::outcome::Outcome;
-use crate::snapshot::Snapshots;
 use crate::state::{KvState, LoggedState};
 
 /// Everything a database shares between the commit thread and callers.

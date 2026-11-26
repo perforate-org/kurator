@@ -11,21 +11,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_net::{Endpoint, Replica, Server, Tokio};
+use kurator_net::{Endpoint, Replica, Server, Store, Tokio};
 use kurator_raft::openraft::raft::VoteRequest;
 use kurator_raft::openraft::{self, SnapshotPolicy};
 use kurator_raft::{
-    Connection as _, Failure, KeyPurpose, Member, Network, NodeId, NodeSecret, Peer, Progress,
+    Connection as _, Failure, KeyPurpose, Member, Message, NodeId, NodeSecret, Peer, Progress,
     Refusal, Request, Response, Role, Transport as _, Vote,
 };
+use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
 use kurator_wal::VerifyingKey;
 
 const LOOPBACK: &str = "127.0.0.1:0";
 
-/// One replica and its server.
+/// One node's store and its server.
 struct Node {
-    replica: Replica,
+    store: Store,
     peer: Peer,
     server: Server,
     _dir: tempfile::TempDir,
@@ -51,7 +52,21 @@ fn config() -> Arc<openraft::Config> {
     )
 }
 
-/// Starts replica `id`, trusting `bootstrap` until it has a membership.
+impl Node {
+    /// The node's replica of the first shard, once it holds one.
+    fn first(&self) -> Option<Arc<Replica>> {
+        self.store
+            .replicas()
+            .into_iter()
+            .find(|replica| replica.shard_id() == ShardId::FIRST)
+    }
+
+    fn replica(&self) -> Arc<Replica> {
+        self.first().unwrap()
+    }
+}
+
+/// Starts node `id`, trusting `bootstrap` until it has a membership.
 async fn start(id: u64, bootstrap: &[u64]) -> Node {
     let member = Member::new(NodeId::new(id), secret(id));
     let trusted = bootstrap
@@ -61,13 +76,12 @@ async fn start(id: u64, bootstrap: &[u64]) -> Node {
     let endpoint = Endpoint::bind(LOOPBACK.parse().unwrap(), member.secret(), trusted).unwrap();
     let peer = member.peer(endpoint.local_addr().unwrap());
     let dir = tempfile::tempdir().unwrap();
-    let network = Network::new(endpoint.transport());
-    let replica = Replica::open(member, dir.path(), config(), network)
+    let store = Store::open(member, dir.path(), config(), endpoint.transport())
         .await
         .unwrap();
-    let server = endpoint.serve(replica.inbox()).unwrap();
+    let server = endpoint.serve(store.inbox()).unwrap();
     Node {
-        replica,
+        store,
         peer,
         server,
         _dir: dir,
@@ -85,11 +99,12 @@ async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-fn leader(nodes: &BTreeMap<u64, Node>) -> Option<&Node> {
+fn leader(nodes: &BTreeMap<u64, Node>) -> Option<Arc<Replica>> {
     nodes
         .values()
-        .filter(|node| node.replica.status().role() == Role::Leader)
-        .max_by_key(|node| node.replica.status().term())
+        .filter_map(Node::first)
+        .filter(|replica| replica.status().role() == Role::Leader)
+        .max_by_key(|replica| replica.status().term())
 }
 
 async fn three_nodes() -> BTreeMap<u64, Node> {
@@ -102,19 +117,15 @@ async fn three_nodes() -> BTreeMap<u64, Node> {
         .iter()
         .map(|(id, node)| (NodeId::new(*id), node.peer.clone()))
         .collect();
-    nodes[&1].replica.initialize(voters).await.unwrap();
+    nodes[&1].store.found(voters).await.unwrap();
     eventually("a leader", || leader(&nodes).is_some()).await;
     nodes
 }
 
 async fn write(nodes: &BTreeMap<u64, Node>, key: &str) {
     for _ in 0..100 {
-        if let Some(node) = leader(nodes)
-            && node
-                .replica
-                .write(WriteBatch::new().put(key, "v"))
-                .await
-                .is_ok()
+        if let Some(replica) = leader(nodes)
+            && replica.write(WriteBatch::new().put(key, "v")).await.is_ok()
         {
             return;
         }
@@ -146,15 +157,14 @@ async fn membership_changes() {
     }
     let read = leader(&nodes)
         .unwrap()
-        .replica
         .read(|state| state.get(b"key-39").is_some())
         .await
         .unwrap();
     assert!(read, "a linearizable read sees the write");
     eventually("every replica applies every write", || {
         nodes.values().all(|node| {
-            node.replica
-                .read_local(|state| state.get(b"key-39").is_some())
+            node.replica()
+                .read_local(|state| state.kv().get(b"key-39").is_some())
         })
     })
     .await;
@@ -166,41 +176,39 @@ async fn membership_changes() {
     let four = NodeId::new(4);
     let _: kurator_raft::LogId = leader(&nodes)
         .unwrap()
-        .replica
         .add_learner(four, peer)
         .await
         .unwrap();
     eventually("node 4 catches up", || {
-        leader(&nodes).is_some_and(|node| node.replica.progress(four) == Progress::CaughtUp)
+        leader(&nodes).is_some_and(|replica| replica.progress(four) == Progress::CaughtUp)
     })
     .await;
-    let _: kurator_raft::LogId = leader(&nodes).unwrap().replica.promote(four).await.unwrap();
-    let status = nodes[&4].replica.status();
+    let _: kurator_raft::LogId = leader(&nodes).unwrap().promote(four).await.unwrap();
+    let status = nodes[&4].replica().status();
     assert!(
         status.snapshot().is_some(),
         "node 4 received a snapshot over QUIC: {status:?}"
     );
     assert!(
         nodes[&4]
-            .replica
-            .read_local(|state| state.get(b"key-0").is_some()),
+            .replica()
+            .read_local(|state| state.kv().get(b"key-0").is_some()),
         "node 4 holds the early writes"
     );
 
     // A follower leaves; the rest, node 4 among them, carry on.
     let leaving = nodes
         .iter()
-        .find(|(id, node)| **id != 4 && node.replica.status().role() != Role::Leader)
+        .find(|(id, node)| **id != 4 && node.replica().status().role() != Role::Leader)
         .map(|(id, _)| *id)
         .unwrap();
     let _: kurator_raft::LogId = leader(&nodes)
         .unwrap()
-        .replica
         .remove(NodeId::new(leaving))
         .await
         .unwrap();
     let gone = nodes.remove(&leaving).unwrap();
-    gone.replica.shutdown().await.unwrap();
+    gone.store.shutdown().await.unwrap();
 
     // Its key no longer opens a connection to the rest.
     let former =
@@ -222,25 +230,21 @@ async fn membership_changes() {
     write(&nodes, "after").await;
     eventually("node 4 applies the write after the change", || {
         nodes[&4]
-            .replica
-            .read_local(|state| state.get(b"after").is_some())
+            .replica()
+            .read_local(|state| state.kv().get(b"after").is_some())
     })
     .await;
-    let voters: Vec<NodeId> = leader(&nodes)
-        .unwrap()
-        .replica
-        .membership()
-        .voter_ids()
-        .collect();
+    let voters: Vec<NodeId> = leader(&nodes).unwrap().membership().voter_ids().collect();
     assert_eq!(voters.len(), 3, "three voters: {voters:?}");
     assert!(voters.contains(&four), "node 4 votes");
     for node in nodes.into_values() {
-        node.replica.shutdown().await.unwrap();
+        node.store.shutdown().await.unwrap();
     }
 }
 
-fn vote_from(sender: u64) -> Request<Tokio> {
-    Request::Vote(VoteRequest::new(Vote::new(1, NodeId::new(sender)), None))
+fn vote_from(sender: u64) -> Message<Tokio> {
+    let vote = VoteRequest::new(Vote::new(1, NodeId::new(sender)), None);
+    Message::new(ShardId::FIRST, Request::Vote(vote))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -295,11 +299,9 @@ async fn authentication() {
     assert!(silent.is_err(), "nobody there: {silent:?}");
 
     // Dropping the server closes the endpoint.
-    let Node {
-        replica, server, ..
-    } = target;
+    let Node { store, server, .. } = target;
     drop(server);
     let gone = member.call(vote_from(2), deadline).await;
     assert!(gone.is_err(), "the server is gone: {gone:?}");
-    replica.shutdown().await.unwrap();
+    store.shutdown().await.unwrap();
 }

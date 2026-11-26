@@ -1,10 +1,11 @@
-//! A Kurator replica as a process: [`run`] opens the replica in a
+//! A Kurator node as a process: [`run`] opens the node's store in a
 //! directory, serves it over QUIC, and takes commands from a console.
 //!
 //! ```text
-//! <dir>/node.secret   the node secret every key is derived from
-//! <dir>/log/          the signed Raft log
-//! <dir>/snapshot/     the latest snapshot
+//! <dir>/node.secret              the node secret every key is derived from
+//! <dir>/shards/<id>/log/         the signed Raft log of each shard's replica
+//! <dir>/shards/<id>/snapshot/    its latest snapshot
+//! <dir>/seeds/<id>/              a shard a split made, until it is planted
 //! ```
 
 pub mod args;
@@ -15,15 +16,15 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
-use kurator_net::{Endpoint, NetError, Replica};
-use kurator_raft::{KeyPurpose, Member, Network, NodeSecret};
+use kurator_net::{Endpoint, NetError, Server, Store};
+use kurator_raft::{KeyPurpose, Member, NodeSecret};
 use kurator_wal::VerifyingKey;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::args::{Settings, Start};
 use crate::console::{Reply, execute};
 
-/// Why a replica stopped.
+/// Why a node stopped.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum NodeError {
@@ -33,7 +34,7 @@ pub enum NodeError {
     /// The endpoint could not start.
     #[error(transparent)]
     Net(#[from] NetError),
-    /// The replica failed.
+    /// A replica failed.
     #[error(transparent)]
     Raft(#[from] kurator_raft::Error),
     /// The Raft configuration is invalid.
@@ -52,22 +53,21 @@ pub fn key(dir: &std::path::Path) -> io::Result<VerifyingKey> {
     Ok(secret.public_key(KeyPurpose::Transport))
 }
 
-/// Runs the replica `settings` describe until the console says `quit` or
+/// Runs the node `settings` describe until the console says `quit` or
 /// closes.
 ///
 /// # Errors
 ///
-/// When the replica cannot start, or the console fails.
+/// When the node cannot start, or the console fails.
 pub async fn run(settings: Settings) -> Result<(), NodeError> {
     let (secret, _) = secret::load_or_create(settings.dir())?;
-    let replica = open(&settings, secret).await?;
+    let (store, _server) = open(&settings, secret).await?;
     let mut out = tokio::io::stdout();
     out.write_all(b"ready; type a command, or anything else for help\n")
         .await?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let (replica, _server) = replica;
     while let Some(line) = lines.next_line().await? {
-        match execute(&replica, &line).await {
+        match execute(&store, &line).await {
             Reply::Show(text) => {
                 out.write_all(text.as_bytes()).await?;
                 out.write_all(b"\n").await?;
@@ -75,14 +75,11 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
             Reply::Quit => break,
         }
     }
-    replica.shutdown().await?;
+    store.shutdown().await?;
     Ok(())
 }
 
-async fn open(
-    settings: &Settings,
-    secret: NodeSecret,
-) -> Result<(Replica, kurator_net::Server), NodeError> {
+async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Server), NodeError> {
     let member = Member::new(settings.id(), secret);
     let bootstrap: BTreeMap<_, _> = settings
         .peers()
@@ -91,10 +88,9 @@ async fn open(
         .collect();
     let endpoint = Endpoint::bind(settings.listen(), member.secret(), bootstrap)?;
     let me = member.peer(endpoint.local_addr()?);
-    let network = Network::new(endpoint.transport());
     let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
-    let replica = Replica::open(member, settings.dir(), config, network).await?;
-    let server = endpoint.serve(replica.inbox())?;
+    let store = Store::open(member, settings.dir(), config, endpoint.transport()).await?;
+    let server = endpoint.serve(store.inbox())?;
     match settings.start() {
         Start::Found => {
             let voters = settings
@@ -102,12 +98,13 @@ async fn open(
                 .iter()
                 .cloned()
                 .chain([(settings.id(), me)]);
-            match replica.initialize(voters).await {
+            // A node that founded the cluster before holds a shard already.
+            match store.found(voters).await {
                 Ok(()) | Err(kurator_raft::Error::Initialized) => {}
                 Err(error) => return Err(error.into()),
             }
         }
         Start::Wait => {}
     }
-    Ok((replica, server))
+    Ok((store, server))
 }

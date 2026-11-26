@@ -1,0 +1,22 @@
+[package]
+name = "kurator-shard"
+description = "Shards for Kurator: key spans, shard maps for routing, and the state of one shard with its splits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kurator-codec.workspace = true
+kurator-storage.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

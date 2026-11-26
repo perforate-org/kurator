@@ -4,6 +4,7 @@ use kurator_codec::{DecodeError, Reader};
 
 use crate::batch::WriteBatch;
 use crate::error::{Error, Result};
+use crate::span::Span;
 use crate::txn::Transaction;
 
 /// Everything that can be written to the log.
@@ -67,6 +68,16 @@ const KIND_KV: u8 = 1;
 const KIND_TXN: u8 = 2;
 
 impl Command {
+    /// Whether everything the command reads or writes is in `span`, so a
+    /// state that holds only `span` can apply it.
+    #[must_use]
+    pub fn fits(&self, span: &Span) -> bool {
+        match self {
+            Self::Kv(batch) => batch.fits(span),
+            Self::Txn(transaction) => transaction.fits(span),
+        }
+    }
+
     /// Encodes the command as `version u8 | kind u8 | body`: kind 1 is a
     /// write batch, as [`WriteBatch`] encodes it, and kind 2 a
     /// transaction, its reads and then its writes.

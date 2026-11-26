@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
+use super::core::Core;
 use crate::command::Encoded;
-use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::outcome::Outcome;
 
