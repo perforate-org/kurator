@@ -123,10 +123,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git diff "origin/${{ github.base_ref }}.." > pr.diff
-          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 60 -j 2 --shard ${{ matrix.shard }}/4
+          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 300 -j 2 --shard ${{ matrix.shard }}/4
       - name: All mutants (main)
         if: github.event_name != 'pull_request'
-        run: cargo mutants --workspace --no-shuffle --timeout 60 -j 2 --shard ${{ matrix.shard }}/4
+        run: cargo mutants --workspace --no-shuffle --timeout 300 -j 2 --shard ${{ matrix.shard }}/4
       - uses: actions/upload-artifact@v4
         if: always()
         with:

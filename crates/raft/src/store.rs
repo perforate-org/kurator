@@ -440,7 +440,12 @@ mod tests {
                 "not planted yet"
             );
             store.plant().await.unwrap();
-            let planted = store.replica(shard).await.unwrap().unwrap();
+            // Store::replicas does not plant, so only Store::plant did.
+            let planted = store
+                .replicas()
+                .into_iter()
+                .find(|replica| replica.shard_id() == shard)
+                .unwrap();
             assert!(planted.is_initialized(), "the seed replaced it");
             assert_eq!(
                 planted.shard().span().start(),
