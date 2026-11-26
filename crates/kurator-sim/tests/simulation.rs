@@ -295,6 +295,19 @@ fn every_acknowledged_write_survives_a_full_cluster_restart() {
             cluster.restart(id).await.unwrap();
         }
         cluster.settle().await.unwrap();
+        let leader = cluster.leader().unwrap();
+        let statuses = cluster.statuses();
+        let term = statuses.first().unwrap().1.term();
+        assert!(term > 1, "the restart elected a new leader: {statuses:?}");
+        for (_, status) in &statuses {
+            assert_eq!(status.leader(), Some(leader), "one leader: {statuses:?}");
+            assert_eq!(status.term(), term, "one term: {statuses:?}");
+            assert_eq!(
+                status.last_log(),
+                status.applied().map(|applied| applied.index),
+                "applied everything logged: {statuses:?}"
+            );
+        }
         let read = cluster
             .read(|state| acked.iter().all(|key| state.get(key).is_some()))
             .await;

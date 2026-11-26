@@ -58,3 +58,21 @@ impl fmt::Display for Proposal {
         write!(f, "proposal of {} bytes", self.0.payload().len())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use kurator_storage::{Command, WriteBatch};
+
+    use super::Proposal;
+
+    #[test]
+    fn a_proposal_shows_its_size() {
+        let proposal = Proposal::new(Command::Kv(WriteBatch::new().put("k", "v"))).unwrap();
+        let len = proposal.encoded().payload().len();
+        assert_eq!(
+            proposal.to_string(),
+            format!("proposal of {len} bytes"),
+            "display"
+        );
+    }
+}

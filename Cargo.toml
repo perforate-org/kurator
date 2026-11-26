@@ -132,3 +132,8 @@ impl_trait_in_params = "allow" # `impl Into<PathBuf>` keeps call sites simple
 
 [profile.bench]
 debug = true
+
+# Signing, hashing and the simulator are dozens of times slower unoptimized,
+# which makes the simulation tests too slow for `cargo test` and mutants.
+[profile.dev.package."*"]
+opt-level = 3

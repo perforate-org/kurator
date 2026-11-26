@@ -270,15 +270,6 @@ impl<C: Config> Replica<C> {
         }
     }
 
-    /// Builds a snapshot now, instead of waiting for the snapshot policy.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Stopped`] when the replica has stopped.
-    pub async fn snapshot(&self) -> Result<()> {
-        self.raft.trigger().snapshot().await.map_err(stopped)
-    }
-
     /// Stops the replica. Everything it acknowledged is already durable, so
     /// stopping and crashing leave the same files behind.
     ///
