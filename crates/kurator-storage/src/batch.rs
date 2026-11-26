@@ -178,17 +178,17 @@ impl Command {
     /// model or operation this build does not know.
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
-        match reader.u8()? {
+        match reader.read::<u8>()? {
             VERSION => {}
             other => return Err(DecodeError::Version(other)),
         }
-        match reader.u8()? {
+        match reader.read::<u8>()? {
             MODEL_KV => {}
             other => return Err(DecodeError::Tag(other)),
         }
         let mut ops = Vec::new();
-        for _ in 0..reader.u32()? {
-            let tag = reader.u8()?;
+        for _ in 0..reader.read::<u32>()? {
+            let tag = reader.read::<u8>()?;
             let key = reader.bytes()?.to_vec();
             ops.push(match tag {
                 OP_PUT => KvOp::Put {

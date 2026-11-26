@@ -26,20 +26,21 @@
 //! caller passes, delivering into each replica's [`Inbox`].
 
 mod codec;
+mod config;
 mod error;
 mod log_store;
+mod proposal;
 mod replica;
 mod snapshot;
 mod state_machine;
 mod types;
 
+pub use config::{Config, Entry, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
 pub use log_store::LogStore;
 pub use openraft;
+pub use proposal::Proposal;
 pub use replica::{Inbox, Member, Replica, Role, Status};
-pub use snapshot::SnapshotBytes;
+pub use snapshot::{Snapshot, SnapshotBytes};
 pub use state_machine::StateMachine;
-pub use types::{
-    Config, Entry, LeaderId, LogId, Membership, NodeId, Payload, Proposal, Snapshot, SnapshotMeta,
-    StoredMembership, Vote,
-};
+pub use types::{LeaderId, LogId, Membership, NodeId, SnapshotMeta, StoredMembership, Vote};

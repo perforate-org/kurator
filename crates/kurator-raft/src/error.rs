@@ -78,9 +78,6 @@ pub type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SnapshotDamage {
-    /// The checksum does not match the contents.
-    #[error("checksum does not match")]
-    Checksum,
     /// The contents do not decode.
     #[error("{0}")]
     Format(DecodeError),

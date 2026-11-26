@@ -11,7 +11,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-crc32c.workspace = true
 futures-util.workspace = true
 kurator-codec.workspace = true
 kurator-storage.workspace = true

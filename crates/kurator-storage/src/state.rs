@@ -37,7 +37,7 @@ impl KvState {
     /// # Errors
     ///
     /// When `out` fails or a key or value is too long for its prefix.
-    pub fn encode(&self, out: &mut impl Write) -> io::Result<()> {
+    pub fn encode(&self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
         let count = u64::try_from(self.len()).map_err(io::Error::other)?;
         out.write_all(&count.to_le_bytes())?;
         for (key, value) in self.iter() {
@@ -54,7 +54,7 @@ impl KvState {
     ///
     /// [`DecodeError::Truncated`] when the input ends early.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
-        let count = reader.u64()?;
+        let count = reader.read::<u64>()?;
         let mut entries = BTreeMap::new();
         for _ in 0..count {
             let (key, value) = (reader.bytes()?, reader.bytes()?);

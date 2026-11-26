@@ -17,6 +17,7 @@ kurator-wal = { path = "crates/kurator-wal" }
 kurator-codec = { path = "crates/kurator-codec" }
 kurator-storage = { path = "crates/kurator-storage" }
 kurator-raft = { path = "crates/kurator-raft" }
+kurator-sim = { path = "crates/kurator-sim" }
 crc32c = "0.6.9"
 blake3 = "1.8.7"
 ed25519-dalek = "3.0.0"

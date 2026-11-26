@@ -19,8 +19,9 @@ use openraft::{LogState, OptionalSend, RaftLogReader};
 use parking_lot::Mutex;
 
 use crate::codec::Record;
+use crate::config::{Config, Entry};
 use crate::error::{Error, Result};
-use crate::types::{Config, Entry, LogId, Vote};
+use crate::types::{LogId, Vote};
 
 /// The log store of one replica. Clones share the same log.
 #[derive(Debug, Clone)]

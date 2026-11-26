@@ -22,11 +22,9 @@ use kurator_codec::{DecodeError, Reader};
 use kurator_storage::Encoded;
 use openraft::EntryPayload;
 
-use crate::types::{Entry, LeaderId, LogId, Membership, NodeId, Proposal, Vote};
-
-/// Bytes an entry record adds to its command: the tag, the log id and the
-/// payload kind.
-pub(crate) const ENTRY_OVERHEAD: usize = 1 + 24 + 1;
+use crate::config::Entry;
+use crate::proposal::Proposal;
+use crate::types::{LeaderId, LogId, Membership, NodeId, Vote};
 
 const ENTRY: u8 = 1;
 const TRUNCATE: u8 = 2;
@@ -83,7 +81,7 @@ impl Record {
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
-        let record = match reader.u8()? {
+        let record = match reader.read::<u8>()? {
             ENTRY => {
                 let log_id = log_id(&mut reader)?;
                 let payload = payload(&mut reader)?;
@@ -93,7 +91,7 @@ impl Record {
             PURGE => Self::PurgeThrough(log_id(&mut reader)?),
             VOTE => {
                 let leader_id = leader_id(&mut reader)?;
-                let committed = match reader.u8()? {
+                let committed = match reader.read::<u8>()? {
                     0 => false,
                     1 => true,
                     other => return Err(DecodeError::Tag(other)),
@@ -131,15 +129,15 @@ pub(crate) fn put_membership(out: &mut Vec<u8>, membership: &Membership) {
 /// Decodes what [`put_membership`] wrote.
 pub(crate) fn membership(reader: &mut Reader<'_>) -> Result<Membership, DecodeError> {
     let mut configs = Vec::new();
-    for _ in 0..reader.u32()? {
+    for _ in 0..reader.read::<u32>()? {
         let mut voters = BTreeSet::new();
-        for _ in 0..reader.u32()? {
+        for _ in 0..reader.read::<u32>()? {
             let _: bool = voters.insert(node_id(reader)?);
         }
         configs.push(voters);
     }
     let mut nodes = Vec::new();
-    for _ in 0..reader.u32()? {
+    for _ in 0..reader.read::<u32>()? {
         nodes.push(node_id(reader)?);
     }
     Ok(Membership::new_with_defaults(configs, nodes))
@@ -156,7 +154,7 @@ pub(crate) fn put_option(out: &mut Vec<u8>, log_id: Option<&LogId>) {
 }
 
 pub(crate) fn option(reader: &mut Reader<'_>) -> Result<Option<LogId>, DecodeError> {
-    match reader.u8()? {
+    match reader.read::<u8>()? {
         NONE => Ok(None),
         SOME => log_id(reader).map(Some),
         other => Err(DecodeError::Tag(other)),
@@ -178,7 +176,7 @@ fn put_payload(out: &mut Vec<u8>, payload: &EntryPayload<Proposal, Membership>) 
 }
 
 fn payload(reader: &mut Reader<'_>) -> Result<EntryPayload<Proposal, Membership>, DecodeError> {
-    match reader.u8()? {
+    match reader.read::<u8>()? {
         BLANK => Ok(EntryPayload::Blank),
         NORMAL => {
             let command = reader.rest().to_vec();
@@ -198,7 +196,7 @@ fn put_leader_id(out: &mut Vec<u8>, leader_id: &LeaderId) {
 
 fn leader_id(reader: &mut Reader<'_>) -> Result<LeaderId, DecodeError> {
     Ok(LeaderId {
-        term: reader.u64()?,
+        term: reader.read::<u64>()?,
         node_id: node_id(reader)?,
     })
 }
@@ -210,11 +208,11 @@ fn put_log_id(out: &mut Vec<u8>, log_id: &LogId) {
 
 fn log_id(reader: &mut Reader<'_>) -> Result<LogId, DecodeError> {
     let leader_id = leader_id(reader)?;
-    Ok(LogId::new(leader_id, reader.u64()?))
+    Ok(LogId::new(leader_id, reader.read::<u64>()?))
 }
 
 fn node_id(reader: &mut Reader<'_>) -> Result<NodeId, DecodeError> {
-    reader.u64().map(NodeId::new)
+    reader.read::<u64>().map(NodeId::new)
 }
 
 /// Writes a count. Memberships and snapshots never hold `u32::MAX` items,
@@ -233,8 +231,10 @@ mod tests {
     use openraft::EntryPayload;
     use proptest::prelude::*;
 
-    use super::{ENTRY_OVERHEAD, Record};
-    use crate::types::{Entry, LeaderId, LogId, Membership, NodeId, Proposal, Vote};
+    use super::Record;
+    use crate::config::Entry;
+    use crate::proposal::{ENTRY_OVERHEAD, Proposal};
+    use crate::types::{LeaderId, LogId, Membership, NodeId, Vote};
 
     fn log_id(term: u64, node: u64, index: u64) -> LogId {
         LogId::new(

@@ -14,11 +14,13 @@ use openraft::raft::{
 use openraft::type_config::async_runtime::WatchReceiver as _;
 use openraft::{Raft, RaftNetworkFactory, ReadPolicy, ServerState};
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::log_store::LogStore;
-use crate::snapshot::SnapshotBytes;
+use crate::proposal::Proposal;
+use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::state_machine::StateMachine;
-use crate::types::{Config, LogId, NodeId, Proposal, Snapshot, Vote};
+use crate::types::{LogId, NodeId, Vote};
 
 /// Who a replica is: its id in the cluster and the key it signs its log
 /// with.

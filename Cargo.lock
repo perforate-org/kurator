@@ -667,6 +667,7 @@ dependencies = [
 name = "kurator-codec"
 version = "0.0.1"
 dependencies = [
+ "crc32c",
  "proptest",
  "thiserror",
 ]
@@ -675,7 +676,6 @@ dependencies = [
 name = "kurator-raft"
 version = "0.0.1"
 dependencies = [
- "crc32c",
  "futures-util",
  "kurator-codec",
  "kurator-storage",
@@ -689,10 +689,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-sim"
+version = "0.0.1"
+dependencies = [
+ "kurator-raft",
+ "kurator-storage",
+ "kurator-wal",
+ "openraft-rt-sim",
+ "parking_lot",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "kurator-storage"
 version = "0.0.1"
 dependencies = [
- "crc32c",
  "criterion",
  "kurator-codec",
  "kurator-wal",

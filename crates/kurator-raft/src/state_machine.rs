@@ -11,9 +11,10 @@ use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
 use parking_lot::Mutex;
 
+use crate::config::{Config, Entry};
 use crate::error::{Error, Result, SnapshotDamage};
-use crate::snapshot::{SnapshotBytes, SnapshotDir};
-use crate::types::{Config, Entry, LogId, Snapshot, SnapshotMeta, StoredMembership};
+use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotDir};
+use crate::types::{LogId, SnapshotMeta, StoredMembership};
 
 /// The state machine of one replica. Clones share the same state.
 #[derive(Debug, Clone)]

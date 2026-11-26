@@ -2,12 +2,11 @@
 //! the network.
 //!
 //! ```text
-//! magic "KRRS" | version u16 | flags u16
+//! kurator_codec::Format "KRRS", version 1, around:
 //! last log id      option(log id)
 //! membership id    option(log id)
 //! membership       as in the Raft log
 //! state            kurator_storage::KvState::encode
-//! crc32c u32       over everything before it
 //! ```
 //!
 //! A snapshot is written to a temporary file, synced, renamed into place
@@ -18,19 +17,20 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use kurator_codec::{DecodeError, Reader};
+use kurator_codec::{DecodeError, Format};
 use kurator_storage::KvState;
 use kurator_wal::sync_dir;
 
 use crate::codec::{membership, option, put_membership, put_option};
 use crate::error::{Error, Result, SnapshotDamage};
-use crate::types::{SnapshotMeta, StoredMembership};
+use crate::types::{LeaderId, Membership, SnapshotMeta, StoredMembership};
 
-const MAGIC: [u8; 4] = *b"KRRS";
-const VERSION: u16 = 1;
-const FLAGS: u16 = 0;
+const FORMAT: Format = Format::new(*b"KRRS", 1);
 const FILE: &str = "snapshot";
 const TEMP_PREFIX: &str = ".snapshot-";
+
+/// A snapshot with its metadata, as Raft hands it around.
+pub type Snapshot = openraft::Snapshot<LeaderId, Membership, SnapshotBytes>;
 
 /// An encoded snapshot, as it is stored and sent to other replicas.
 ///
@@ -54,41 +54,25 @@ impl SnapshotBytes {
 
     /// Encodes `state` with `meta`.
     pub(crate) fn encode(meta: &SnapshotMeta, state: &KvState) -> io::Result<Self> {
-        let mut out = Vec::new();
-        for part in [&MAGIC[..], &VERSION.to_le_bytes(), &FLAGS.to_le_bytes()] {
-            out.extend_from_slice(part);
-        }
-        put_option(&mut out, meta.last_log_id.as_ref());
-        put_option(&mut out, meta.last_membership.log_id().as_ref());
-        put_membership(&mut out, meta.last_membership.membership());
-        state.encode(&mut out)?;
-        let crc = crc32c::crc32c(&out);
-        out.extend_from_slice(&crc.to_le_bytes());
-        Ok(Self(out))
+        let mut head = Vec::new();
+        put_option(&mut head, meta.last_log_id.as_ref());
+        put_option(&mut head, meta.last_membership.log_id().as_ref());
+        put_membership(&mut head, meta.last_membership.membership());
+        let framed = FORMAT.write(Vec::new(), |out| {
+            out.write_all(&head)?;
+            state.encode(out)
+        })?;
+        Ok(Self(framed))
     }
 
     /// The metadata and the state.
     pub(crate) fn decode(&self) -> Result<(SnapshotMeta, KvState), SnapshotDamage> {
-        let (body, crc) = self
-            .0
-            .split_last_chunk::<4>()
-            .ok_or(SnapshotDamage::Checksum)?;
-        if crc32c::crc32c(body) != u32::from_le_bytes(*crc) {
-            return Err(SnapshotDamage::Checksum);
-        }
-        decode(body).map_err(SnapshotDamage::Format)
+        decode(&self.0).map_err(SnapshotDamage::Format)
     }
 }
 
-fn decode(body: &[u8]) -> Result<(SnapshotMeta, KvState), DecodeError> {
-    let mut reader = Reader::new(body);
-    if reader.exact::<4>()? != MAGIC {
-        return Err(DecodeError::Magic);
-    }
-    let version = reader.u16()?;
-    if version != VERSION || reader.u16()? != FLAGS {
-        return Err(DecodeError::Version(version.to_le_bytes()[0]));
-    }
+fn decode(framed: &[u8]) -> Result<(SnapshotMeta, KvState), DecodeError> {
+    let mut reader = FORMAT.read(framed)?;
     let last_log_id = option(&mut reader)?;
     let membership_log_id = option(&mut reader)?;
     let membership = membership(&mut reader)?;
@@ -165,7 +149,7 @@ impl SnapshotDir {
 mod tests {
     use std::collections::BTreeSet;
 
-    use kurator_codec::DecodeError;
+    use kurator_codec::{DecodeError, Format};
     use kurator_storage::{Command, KvState, WriteBatch};
 
     use super::{SnapshotBytes, SnapshotDir};
@@ -218,17 +202,17 @@ mod tests {
         flipped[10] ^= 1;
         assert_eq!(
             SnapshotBytes::from_vec(flipped).decode(),
-            Err(SnapshotDamage::Checksum),
+            Err(SnapshotDamage::Format(DecodeError::Checksum)),
             "bit flip"
         );
         assert_eq!(
             SnapshotBytes::from_vec(vec![1, 2]).decode(),
-            Err(SnapshotDamage::Checksum),
+            Err(SnapshotDamage::Format(DecodeError::Checksum)),
             "too short"
         );
-        let mut foreign = b"KRSN".to_vec();
-        let crc = crc32c::crc32c(&foreign);
-        foreign.extend_from_slice(&crc.to_le_bytes());
+        let foreign = Format::new(*b"KRSN", 1)
+            .write(Vec::new(), |_| Ok(()))
+            .unwrap();
         assert_eq!(
             SnapshotBytes::from_vec(foreign).decode(),
             Err(SnapshotDamage::Format(DecodeError::Magic)),
