@@ -20,6 +20,13 @@
 //!   snapshot and replays the log after it; a follower that fell behind
 //!   the purged log receives the leader's snapshot instead.
 //!
+//! - **Transactions.** [`Replica::begin`] starts a [`Txn`] that reads one
+//!   version of the state and commits its writes as one log entry. Each
+//!   replica checks, as it applies that entry, whether a write after the
+//!   read version touched what the transaction read, so every replica
+//!   commits or aborts it alike and the committed ones are serializable.
+//!   A version is the index of the entry that made it.
+//!
 //! - **Membership changes.** A new node joins as a learner, catches up
 //!   from the snapshot and the log, and only then becomes a voter
 //!   ([`Replica::add_learner`], [`Replica::progress`],
@@ -49,11 +56,12 @@ mod types;
 pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
 pub use identity::{KeyPurpose, NodeSecret};
+pub use kurator_storage::Outcome;
 pub use log_store::LogStore;
 pub use network::{Connection, Failure, Link, Network, Transport};
 pub use openraft;
 pub use proposal::Proposal;
-pub use replica::{Inbox, Member, Replica, Role, Status};
+pub use replica::{Inbox, Member, Replica, Role, Status, Txn};
 pub use rpc::{Refusal, Request, Response};
 pub use snapshot::{Snapshot, SnapshotBytes};
 pub use state_machine::StateMachine;

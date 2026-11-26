@@ -7,8 +7,9 @@ use std::sync::Arc;
 use kurator_wal::{Lsn, LsnRange, RecoveryReport, Start, Wal};
 use parking_lot::{Mutex, RwLock};
 
-use crate::batch::{Command, Encoded};
+use crate::command::{Command, Encoded};
 use crate::error::{Error, Result};
+use crate::outcome::Outcome;
 use crate::snapshot::Snapshots;
 use crate::state::{KvState, LoggedState};
 
@@ -36,7 +37,7 @@ impl Core {
             |lsn, payload| {
                 let command =
                     Command::decode(payload).map_err(|source| Error::Record { lsn, source })?;
-                state.apply(lsn, command);
+                let _replayed = state.apply(lsn, command);
                 Ok::<(), Error>(())
             },
         )?;
@@ -50,22 +51,23 @@ impl Core {
     }
 
     /// Makes `entries` durable as consecutive log records, then applies
-    /// them to the state in the same order.
+    /// them to the state in the same order. Returns what applying each
+    /// one did, in order.
     pub(crate) fn commit(
         &self,
         entries: Vec<Encoded>,
-    ) -> Result<Option<LsnRange>, Arc<kurator_wal::Error>> {
+    ) -> Result<Vec<Outcome>, Arc<kurator_wal::Error>> {
         let range = self
             .wal
             .lock()
             .append_batch(entries.iter().map(Encoded::payload))?;
-        if let Some(range) = range {
-            let mut state = self.state.write();
-            for (lsn, entry) in range.iter().zip(entries) {
-                state.apply(lsn, entry.into_command());
-            }
-        }
-        Ok(range)
+        let mut state = self.state.write();
+        Ok(range
+            .into_iter()
+            .flat_map(LsnRange::iter)
+            .zip(entries)
+            .map(|(lsn, entry)| state.apply(lsn, entry.into_command()))
+            .collect())
     }
 
     /// A copy of the current value of `key`.

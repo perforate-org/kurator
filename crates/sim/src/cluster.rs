@@ -11,9 +11,9 @@ use std::time::Duration;
 use kurator_raft::openraft::{self, AsyncRuntime as _, SnapshotPolicy};
 use kurator_raft::{
     Error, LogId, Member, Membership, Network as RaftNetwork, NodeId, NodeSecret, Peer, Replica,
-    Role, Status,
+    Role, Status, Txn,
 };
-use kurator_storage::{KvState, WriteBatch};
+use kurator_storage::{KvState, Version, WriteBatch};
 use openraft_rt_sim::SimRuntime;
 
 use crate::Sim;
@@ -55,6 +55,23 @@ pub enum Outcome {
     Rejected,
     /// The write may or may not take effect: it timed out, or its leader
     /// lost leadership after logging it.
+    Unknown,
+}
+
+/// The outcome of a client transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Transacted {
+    /// A quorum holds the writes, made at this version; or the
+    /// transaction wrote nothing and read this version.
+    Committed(Version),
+    /// A write after its read version touched what it read: it wrote
+    /// nothing.
+    Aborted,
+    /// It never reached the log: no leader took it, or a read failed.
+    Rejected,
+    /// It may or may not take effect: it timed out, or its leader lost
+    /// leadership after logging it.
     Unknown,
 }
 
@@ -329,6 +346,29 @@ impl Cluster {
             .await
             .ok()?
             .ok()
+    }
+
+    /// Runs `body` as one transaction on the leader: begins it there,
+    /// lets `body` read and write, and commits. Gives up after three
+    /// seconds of simulated time. A failing `body` writes nothing.
+    pub async fn transact<F>(&self, body: F) -> Transacted
+    where
+        F: FnOnce(&mut Txn<'_, Sim>) -> Result<(), Error> + Send,
+    {
+        let Some(replica) = self.leader().and_then(|leader| self.up.get(&leader)) else {
+            return Transacted::Rejected;
+        };
+        let attempt = async {
+            let mut txn = replica.begin().await?;
+            body(&mut txn)?;
+            txn.commit().await
+        };
+        match SimRuntime::timeout(CLIENT_TIMEOUT, attempt).await {
+            Ok(Ok(version)) => Transacted::Committed(version),
+            Ok(Err(Error::Storage(kurator_storage::Error::Aborted(_)))) => Transacted::Aborted,
+            Ok(Err(Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
+            Ok(Err(_)) => Transacted::Rejected,
+        }
     }
 
     /// The leader of the newest term among the replicas that are up. A

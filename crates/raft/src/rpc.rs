@@ -454,7 +454,10 @@ mod tests {
                 last_membership: StoredMembership::new(Some(membership_id), membership(&[1], &[2])),
             };
             let mut state = KvState::default();
-            state.apply(Command::Kv(WriteBatch::new().put("k", "v")));
+            let _committed = state.apply(
+                kurator_storage::Version::new(1),
+                Command::Kv(WriteBatch::new().put("k", "v")),
+            );
             let snapshot = SnapshotBytes::encode(&meta, &state).unwrap();
             Snapshot { meta, snapshot }
         })

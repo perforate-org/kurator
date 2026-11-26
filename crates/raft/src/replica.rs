@@ -2,10 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_storage::{Command, KvState, WriteBatch};
+use kurator_storage::{Command, Draft, KeyValue, KvState, Version, WriteBatch};
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
 use openraft::raft::ClientWriteResponse;
@@ -201,7 +202,30 @@ impl<C: Config> Replica<C> {
     /// write: then nobody knows whether the write commits.
     pub async fn write(&self, batch: WriteBatch) -> Result<LogId> {
         let proposal = Proposal::new(Command::Kv(batch))?;
-        written(self.raft.client_write(proposal).await)
+        written(self.raft.client_write(proposal).await).map(|response| response.log_id)
+    }
+
+    /// Starts a transaction that reads the newest version this cluster
+    /// committed: the leader confirms it still leads, as for
+    /// [`Replica::read`], and the transaction reads that version from this
+    /// replica's state.
+    ///
+    /// ```text
+    /// let mut txn = replica.begin().await?;
+    /// let balance = txn.get(b"alice")?;
+    /// txn.put("alice", debit(balance));
+    /// txn.commit().await?;   // Err(Aborted) when alice changed meanwhile
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`] when this replica is not the leader.
+    pub async fn begin(&self) -> Result<Txn<'_, C>> {
+        let read_at = self.read(KvState::version).await?;
+        Ok(Txn {
+            replica: self,
+            draft: Draft::new(read_at),
+        })
     }
 
     /// Adds `id`, reached as `peer`, as a learner: the leader starts sending
@@ -213,7 +237,7 @@ impl<C: Config> Replica<C> {
     ///
     /// [`Error::NotLeader`] when this replica cannot change the membership.
     pub async fn add_learner(&self, id: NodeId, peer: Peer) -> Result<LogId> {
-        written(self.raft.add_learner(id, peer, false).await)
+        written(self.raft.add_learner(id, peer, false).await).map(|response| response.log_id)
     }
 
     /// How far `id` is from holding everything the leader committed.
@@ -256,7 +280,7 @@ impl<C: Config> Replica<C> {
             }
         }
         let edit = MembershipEdit::AddVoterIds(BTreeSet::from([id]));
-        written(self.raft.change_membership(edit, false).await)
+        written(self.raft.change_membership(edit, false).await).map(|response| response.log_id)
     }
 
     /// Removes `id` from the cluster, voter or learner. Once the change
@@ -276,7 +300,7 @@ impl<C: Config> Replica<C> {
                 MembershipEdit::RemoveNodes(ids)
             }
         };
-        written(self.raft.change_membership(edit, false).await)
+        written(self.raft.change_membership(edit, false).await).map(|response| response.log_id)
     }
 
     /// The membership this replica knows of, committed or not.
@@ -421,12 +445,90 @@ impl<C: Config> Inbox<C> {
     }
 }
 
-/// The log position of a write, or why it failed.
+/// A transaction on a replicated state: it reads one version from its
+/// replica, holds its writes back, and commits them as one log entry that
+/// every replica checks for conflicts as it applies it.
+///
+/// Dropping it without committing writes nothing.
+#[derive(Debug)]
+#[must_use = "a transaction writes nothing until it commits"]
+pub struct Txn<'replica, C: Config> {
+    replica: &'replica Replica<C>,
+    draft: Draft,
+}
+
+impl<C: Config> Txn<'_, C> {
+    /// The version its reads see.
+    #[must_use]
+    pub const fn read_at(&self) -> Version {
+        self.draft.read_at()
+    }
+
+    /// The value of `key`, with the transaction's own writes applied.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`] when so many writes committed since the
+    /// transaction began that its version is forgotten.
+    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let value = self.replica.state.read(|state| self.draft.get(state, key));
+        Ok(value.map_err(kurator_storage::Error::from)?)
+    }
+
+    /// The entries between `start` and `end` in key order, with the
+    /// transaction's own writes applied.
+    ///
+    /// # Errors
+    ///
+    /// As [`Txn::get`].
+    pub fn range(&mut self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<KeyValue>> {
+        let entries = self
+            .replica
+            .state
+            .read(|state| self.draft.range(state, start, end));
+        Ok(entries.map_err(kurator_storage::Error::from)?)
+    }
+
+    /// Sets `key` to `value` when the transaction commits.
+    pub fn put(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
+        self.draft.put(key, value);
+    }
+
+    /// Removes `key` when the transaction commits.
+    pub fn delete(&mut self, key: impl Into<Vec<u8>>) {
+        self.draft.delete(key);
+    }
+
+    /// Replicates the transaction and returns the version its writes made,
+    /// once a quorum holds it and this replica applied it. A transaction
+    /// that wrote nothing returns its read version and logs nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when a
+    /// write after the read version touched what it read: it wrote
+    /// nothing, and running it again may succeed. Otherwise as
+    /// [`Replica::write`].
+    pub async fn commit(self) -> Result<Version> {
+        let read_at = self.draft.read_at();
+        let Some(transaction) = self.draft.into_transaction() else {
+            return Ok(read_at);
+        };
+        let proposal = Proposal::new(Command::Txn(transaction))?;
+        let response = written(self.replica.raft.client_write(proposal).await)?;
+        Ok(response
+            .data
+            .into_result()
+            .map_err(kurator_storage::Error::from)?)
+    }
+}
+
+/// What applying a write did, or why it failed.
 fn written<C: Config>(
     result: Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>>,
-) -> Result<LogId> {
+) -> Result<ClientWriteResponse<C>> {
     match result {
-        Ok(response) => Ok(response.log_id),
+        Ok(response) => Ok(response),
         Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
             Err(Error::NotLeader {
                 leader: forward.leader_id,

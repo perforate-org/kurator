@@ -2,7 +2,7 @@
 
 独立運営者による P2P マルチモデルデータベース(作業中)。
 
-現在は Phase 2。
+現在は Phase 3。
 
 - Phase 0: 単一ノードの Memory-first Storage(KV)、独自の追記型 WAL
   (group commit、fsync、破損末尾の検出と切り詰め)、Snapshot + WAL 再生による
@@ -15,16 +15,23 @@
   独自バイナリ符号化で流し、TLS 1.3 の Raw Public Key(Ed25519)で相互認証する。
   メンバー変更は learner として追いつかせてから voter に昇格し、ノード除去もできる。
   QUIC とシミュレーションは同じ `kurator_raft::Transport` 境界で差し替わる。
+- Phase 3: MVCC と単一シャードの直列化可能なトランザクション。各コマンドは版
+  (単一ノードでは LSN、レプリカでは Raft エントリの index)で適用され、各キーは
+  保持期間(既定 4096 版)ぶんの履歴を持つ。トランザクションは 1 つの版を読み、
+  読んだキーと走査した範囲を記録し、書き込みを 1 つのログエントリとして提出する。
+  エントリを適用する時点で「読んだ版より後に、読んだものへの書き込みがあったか」を
+  検査して commit か abort を決める(楽観的並行性制御)。検査は適用側で行うので、
+  どのレプリカもどの復旧も同じ判断になる。
 
-| crate            | 役割                                                               |
-| ---------------- | ------------------------------------------------------------------ |
-| `crates/codec`   | 共通のバイナリ符号化(`Reader`、ファイル枠 `Format`)                |
-| `crates/wal`     | 追記型 WAL。チェックサム版と署名版                                 |
-| `crates/storage` | メモリ上の状態、group commit、スナップショット、`Db`               |
-| `crates/raft`    | Raft ログストア・状態機械・スナップショット・`Replica`             |
-| `crates/sim`     | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱) |
-| `crates/net`     | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証)      |
-| `crates/node`    | `kurator` バイナリ: レプリカ 1 つをプロセスとして動かすコンソール  |
+| crate | 役割 |
+| --- | --- |
+| `crates/codec` | 共通のバイナリ符号化(`Reader`、ファイル枠 `Format`) |
+| `crates/wal` | 追記型 WAL。チェックサム版と署名版 |
+| `crates/storage` | 版付きの状態、トランザクション、group commit、スナップショット、`Db` |
+| `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica` |
+| `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱) |
+| `crates/net` | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証) |
+| `crates/node` | `kurator` バイナリ: レプリカ 1 つをプロセスとして動かすコンソール |
 
 シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`
 で増やし、失敗したシードは `KURATOR_SIM_SEED=<seed>` で再現する。

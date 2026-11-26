@@ -21,7 +21,8 @@ pub enum Error {
     /// The Raft log failed.
     #[error(transparent)]
     Wal(#[from] kurator_wal::Error),
-    /// The command could not be encoded.
+    /// The command could not be encoded, or a transaction could not read
+    /// or commit.
     #[error(transparent)]
     Storage(#[from] kurator_storage::Error),
     /// A Raft log record does not decode.

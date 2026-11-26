@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use kurator_storage::{Db, Lsn, Options};
+use kurator_storage::{Db, Options, Version};
 use kurator_wal::{Integrity, SigningKey, Start, Wal};
 use proptest as _;
 use tempfile as _;
@@ -39,7 +39,7 @@ fn concurrent_puts(c: &mut Criterion) {
 fn time_writers(db: &Db, writers: u64) -> Duration {
     let put_all = |writer: u64| {
         for i in 0..WRITES_PER_THREAD {
-            let _: Lsn = db
+            let _: Version = db
                 .put(
                     black_box([writer.to_le_bytes(), i.to_le_bytes()].concat()),
                     [0; 64],

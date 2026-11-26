@@ -6,13 +6,12 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use kurator_wal::Lsn;
-
-use crate::batch::Encoded;
+use crate::command::Encoded;
 use crate::core::Core;
 use crate::error::{Error, Result};
+use crate::outcome::Outcome;
 
-type Reply = SyncSender<Result<Lsn>>;
+type Reply = SyncSender<Result<Outcome>>;
 
 /// The commit thread. Dropping it lets the thread finish the writes already
 /// queued and waits for it.
@@ -37,7 +36,7 @@ impl GroupCommit {
     }
 
     /// Queues `entry` and waits until it is durable and applied.
-    pub(crate) fn commit(&self, entry: Encoded) -> Result<Lsn> {
+    pub(crate) fn commit(&self, entry: Encoded) -> Result<Outcome> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.requests
             .as_ref()
@@ -65,13 +64,9 @@ fn run(core: &Core, queue: &Receiver<(Encoded, Reply)>, max_batch: NonZeroUsize)
             .chain(queue.try_iter().take(more))
             .unzip();
         match core.commit(entries) {
-            Ok(range) => {
-                for (lsn, reply) in range
-                    .into_iter()
-                    .flat_map(kurator_wal::LsnRange::iter)
-                    .zip(replies)
-                {
-                    answer(&reply, Ok(lsn));
+            Ok(outcomes) => {
+                for (outcome, reply) in outcomes.into_iter().zip(replies) {
+                    answer(&reply, Ok(outcome));
                 }
             }
             Err(error) => {
@@ -84,6 +79,6 @@ fn run(core: &Core, queue: &Receiver<(Encoded, Reply)>, max_batch: NonZeroUsize)
 }
 
 /// Sends the outcome to a writer; a writer that stopped waiting needs none.
-fn answer(reply: &Reply, outcome: Result<Lsn>) {
+fn answer(reply: &Reply, outcome: Result<Outcome>) {
     drop(reply.send(outcome));
 }

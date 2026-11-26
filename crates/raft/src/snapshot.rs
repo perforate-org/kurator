@@ -2,7 +2,7 @@
 //! the network.
 //!
 //! ```text
-//! kurator_codec::Format "KRRS", version 2, around:
+//! kurator_codec::Format "KRRS", version 3, around:
 //! meta             as in crate::codec: the last entry, the membership's
 //!                  entry and the membership with every peer
 //! state            kurator_storage::KvState::encode
@@ -24,8 +24,9 @@ use crate::codec::{meta, put_meta};
 use crate::error::{Error, Result, SnapshotDamage};
 use crate::types::{LeaderId, Membership, SnapshotMeta};
 
-/// Version 2 added peers to the membership.
-const FORMAT: Format = Format::new(*b"KRRS", 2);
+/// Version 2 added peers to the membership, version 3 the readable
+/// versions of each key.
+const FORMAT: Format = Format::new(*b"KRRS", 3);
 const FILE: &str = "snapshot";
 const TEMP_PREFIX: &str = ".snapshot-";
 
@@ -165,7 +166,10 @@ mod tests {
 
     fn state() -> KvState {
         let mut state = KvState::default();
-        state.apply(Command::Kv(WriteBatch::new().put("a", "1").put("b", "")));
+        let _committed = state.apply(
+            kurator_storage::Version::new(1),
+            Command::Kv(WriteBatch::new().put("a", "1").put("b", "")),
+        );
         state
     }
 
