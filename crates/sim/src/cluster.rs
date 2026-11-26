@@ -482,6 +482,8 @@ impl Cluster {
             if let Some(garbled) = self.network.garbled() {
                 return Err(garbled.into());
             }
+            // A split whose outcome was unknown may apply only now.
+            self.refresh().await;
             if self.converged() {
                 return Ok(());
             }
@@ -580,13 +582,14 @@ impl Cluster {
         Ok(())
     }
 
-    /// Whether every node is up, every shard has a leader, and every node
-    /// in a shard's membership applied the same last entry of it as the
-    /// leader.
+    /// Whether every node is up, the client knows every shard as the
+    /// replicas hold it, every shard has a leader, and every node in a
+    /// shard's membership applied the same last entry of it as the leader.
     fn converged(&self) -> bool {
         let memberships = self.memberships();
         let shards = self.shards();
         self.up.len() == self.members.len()
+            && self.mapped(&memberships)
             && memberships.len() == shards.len()
             && memberships.iter().all(|(shard, membership)| {
                 let applied: Vec<_> = self
@@ -597,6 +600,25 @@ impl Cluster {
                 applied.len() == membership.nodes().count()
                     && applied.windows(2).all(|pair| pair.first() == pair.last())
             })
+    }
+
+    /// Whether the client's map holds every shard a replica that is up
+    /// holds, as that replica holds it. Replicas a membership change left
+    /// behind, which no leader updates any more, do not count.
+    fn mapped(&self, memberships: &BTreeMap<ShardId, Membership>) -> bool {
+        let map = self.map.lock();
+        self.up.iter().all(|(id, store)| {
+            store
+                .replicas()
+                .iter()
+                .filter(|replica| {
+                    replica.is_initialized()
+                        && memberships
+                            .get(&replica.shard_id())
+                            .is_none_or(|membership| membership.get_node(id).is_some())
+                })
+                .all(|replica| map.get(replica.shard_id()) == Some(&replica.shard()))
+        })
     }
 
     /// Learns where every shard is from the replicas that are up: the

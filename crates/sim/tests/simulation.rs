@@ -191,7 +191,10 @@ fn check(seed: u64, run: &Run) {
     assert!(
         tiles.is_some(),
         "seed {seed}: the shards do not hold every key once: {:?}",
-        shards.keys()
+        shards
+            .values()
+            .map(|state| state.shard().to_string())
+            .collect::<Vec<_>>()
     );
     let holder = |key: &[u8]| {
         shards
