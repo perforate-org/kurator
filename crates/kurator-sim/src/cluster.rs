@@ -17,7 +17,7 @@ use kurator_storage::{KvState, WriteBatch};
 use openraft_rt_sim::SimRuntime;
 
 use crate::Sim;
-use crate::network::{Endpoint, Faults, Network};
+use crate::network::{Endpoint, Faults, Garbled, Network};
 
 /// Why the simulation could not go on.
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +37,9 @@ pub enum SimError {
     /// The Raft configuration is invalid.
     #[error("invalid Raft configuration: {0}")]
     Config(#[from] openraft::ConfigError),
+    /// A message did not decode: the encoding is broken.
+    #[error(transparent)]
+    Garbled(#[from] Garbled),
     /// The cluster did not settle in time.
     #[error("the cluster did not settle: {0:?}")]
     Unsettled(Vec<(NodeId, Status)>),
@@ -348,7 +351,8 @@ impl Cluster {
     /// # Errors
     ///
     /// [`SimError::Unsettled`] when that does not happen within a minute of
-    /// simulated time.
+    /// simulated time, and [`SimError::Garbled`] at once when a message
+    /// did not decode.
     pub async fn settle(&mut self) -> Result<(), SimError> {
         self.heal();
         for id in self.down() {
@@ -376,6 +380,9 @@ impl Cluster {
             }
         }
         for _ in 0..600 {
+            if let Some(garbled) = self.network.garbled() {
+                return Err(garbled.into());
+            }
             if self.converged() {
                 return Ok(());
             }
@@ -443,6 +450,9 @@ impl Cluster {
     /// Routes `op` to the leader. Gives up after three seconds of
     /// simulated time.
     async fn submit(&self, op: Op) -> Outcome {
+        if self.network.garbled().is_some() {
+            return Outcome::Rejected;
+        }
         SimRuntime::timeout(CLIENT_TIMEOUT, self.route(op))
             .await
             .unwrap_or(Outcome::Unknown)
@@ -451,6 +461,9 @@ impl Cluster {
     /// Submits `op` to `id` alone. Gives up after three seconds of
     /// simulated time.
     async fn submit_to(&self, id: NodeId, op: Op) -> Outcome {
+        if self.network.garbled().is_some() {
+            return Outcome::Rejected;
+        }
         SimRuntime::timeout(CLIENT_TIMEOUT, self.attempt(id, op))
             .await
             .map_or(Outcome::Unknown, |attempt| {

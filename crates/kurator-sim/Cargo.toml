@@ -12,6 +12,7 @@ categories.workspace = true
 publish = false
 
 [dependencies]
+kurator-codec.workspace = true
 kurator-raft.workspace = true
 kurator-storage.workspace = true
 openraft-rt-sim.workspace = true

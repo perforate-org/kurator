@@ -738,6 +738,7 @@ dependencies = [
 name = "kurator-sim"
 version = "0.0.1"
 dependencies = [
+ "kurator-codec",
  "kurator-raft",
  "kurator-storage",
  "openraft-rt-sim",

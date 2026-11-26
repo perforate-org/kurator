@@ -27,7 +27,7 @@ const LOOPBACK: &str = "127.0.0.1:0";
 struct Node {
     replica: Replica,
     peer: Peer,
-    _server: Server,
+    server: Server,
     _dir: tempfile::TempDir,
 }
 
@@ -69,7 +69,7 @@ async fn start(id: u64, bootstrap: &[u64]) -> Node {
     Node {
         replica,
         peer,
-        _server: server,
+        server,
         _dir: dir,
     }
 }
@@ -123,8 +123,22 @@ async fn write(nodes: &BTreeMap<u64, Node>, key: &str) {
     panic!("no leader took {key}");
 }
 
+/// How long a whole test may take: a broken replica hangs instead of
+/// failing, and should fail.
+const TEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn within(test: impl Future<Output = ()>) {
+    tokio::time::timeout(TEST_TIMEOUT, test)
+        .await
+        .unwrap_or_else(|_| panic!("the test did not finish within {TEST_TIMEOUT:?}"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replicas_elect_replicate_and_change_membership_over_quic() {
+    within(membership_changes()).await;
+}
+
+async fn membership_changes() {
     let mut nodes = three_nodes().await;
     for index in 0..40 {
         write(&nodes, &format!("key-{index}")).await;
@@ -230,6 +244,10 @@ fn vote_from(sender: u64) -> Request<Tokio> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_trusted_keys_get_through_and_only_as_themselves() {
+    within(authentication()).await;
+}
+
+async fn authentication() {
     let target = start(1, &[1, 2]).await;
     let deadline = Duration::from_secs(5);
 
@@ -274,5 +292,13 @@ async fn only_trusted_keys_get_through_and_only_as_themselves() {
         .connect(NodeId::new(1), &Peer::new(closed, key(1)));
     let silent = nowhere.call(vote_from(2), Duration::from_millis(300)).await;
     assert!(silent.is_err(), "nobody there: {silent:?}");
-    target.replica.shutdown().await.unwrap();
+
+    // Dropping the server closes the endpoint.
+    let Node {
+        replica, server, ..
+    } = target;
+    drop(server);
+    let gone = member.call(vote_from(2), deadline).await;
+    assert!(gone.is_err(), "the server is gone: {gone:?}");
+    replica.shutdown().await.unwrap();
 }

@@ -7,6 +7,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_codec::DecodeError;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_raft::{
     Connection, Failure, Inbox, NodeId, Peer, Refusal, Request, Response, Transport,
@@ -54,6 +55,19 @@ struct Shared {
     inboxes: BTreeMap<NodeId, Inbox<Sim>>,
     /// Links that are cut, from sender to receiver.
     cut: BTreeSet<(NodeId, NodeId)>,
+    /// The first message that did not decode: a bug, never a fault.
+    garbled: Option<Garbled>,
+}
+
+/// A message that did not decode on the other side of a [`Wire`]. The
+/// simulator never damages messages, so this is an encoding bug, and the
+/// cluster stops making progress instead of retrying for minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a message from {from} to {to} did not decode: {error}")]
+pub struct Garbled {
+    from: NodeId,
+    to: NodeId,
+    error: DecodeError,
 }
 
 /// What happens to one message.
@@ -73,6 +87,7 @@ impl Network {
                 faults,
                 inboxes: BTreeMap::new(),
                 cut: BTreeSet::new(),
+                garbled: None,
             })),
         }
     }
@@ -99,6 +114,17 @@ impl Network {
     /// Restores every link.
     pub fn heal(&self) {
         self.shared.lock().cut.clear();
+    }
+
+    /// The first message that did not decode, if one did not.
+    #[must_use]
+    pub fn garbled(&self) -> Option<Garbled> {
+        self.shared.lock().garbled
+    }
+
+    fn garble(&self, from: NodeId, to: NodeId, error: DecodeError) {
+        let mut shared = self.shared.lock();
+        let _: &mut Garbled = shared.garbled.get_or_insert(Garbled { from, to, error });
     }
 
     /// The fate of the next message, either way.
@@ -198,17 +224,24 @@ impl Connection<Sim> for Wire {
         deadline: Duration,
     ) -> Result<Response<Sim>, Failure> {
         let bytes = request.encode().map_err(Failure::Unreachable)?;
-        let carried = self.network.carry(self.from, self.to, |inbox| async move {
+        let (from, to, network) = (self.from, self.to, self.network.clone());
+        let carried = self.network.carry(from, to, |inbox| async move {
             let response = match Request::decode(&bytes) {
                 Ok(decoded) => inbox.handle(decoded).await,
-                Err(_) => Response::Refused(Refusal::Malformed),
+                Err(error) => {
+                    network.garble(from, to, error);
+                    Response::Refused(Refusal::Malformed)
+                }
             };
             response.encode()
         });
         let reply = SimRuntime::timeout(deadline, carried)
             .await
             .map_err(|_| Failure::Timeout)??;
-        Response::decode(&reply).map_err(|error| Failure::Unreachable(io::Error::other(error)))
+        Response::decode(&reply).map_err(|error| {
+            self.network.garble(to, from, error);
+            Failure::Unreachable(io::Error::other(error))
+        })
     }
 }
 

@@ -225,3 +225,27 @@ impl ClientCertVerifier for Trusted {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use kurator_raft::{KeyPurpose, NodeSecret};
+
+    use super::Expected;
+    use crate::der;
+
+    #[test]
+    fn an_expectation_shows_the_key_it_expects() {
+        let key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
+        let expected = Expected {
+            spki: der::spki(key.to_bytes()),
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        };
+        assert_eq!(
+            format!("{expected:?}"),
+            format!("Expected {{ key: Some(VerifyingKey({key})), .. }}"),
+            "debug"
+        );
+    }
+}

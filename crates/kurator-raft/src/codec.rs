@@ -455,6 +455,16 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_shows_its_address_and_key() {
+        let peer = peer(1);
+        assert_eq!(
+            peer.to_string(),
+            format!("127.0.0.1:1 {}", peer.key()),
+            "display"
+        );
+    }
+
+    #[test]
     fn invalid_memberships_are_rejected() {
         let mut encoded = Vec::new();
         put_membership(&mut encoded, &membership(&[1], &[]));
