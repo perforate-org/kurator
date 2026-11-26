@@ -695,7 +695,6 @@ dependencies = [
  "kurator-storage",
  "kurator-wal",
  "openraft-rt-tokio",
- "parking_lot",
  "proptest",
  "quinn",
  "rustls",

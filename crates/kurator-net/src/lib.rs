@@ -35,7 +35,7 @@
 //! let network = Network::new(endpoint.transport());
 //! let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
 //! let replica = Replica::open(member, "n1".as_ref(), config, network).await?;
-//! let _server = endpoint.serve(replica.inbox());
+//! let _server = endpoint.serve(replica.inbox())?;
 //! # Ok(())
 //! # }
 //! ```

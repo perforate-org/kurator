@@ -65,7 +65,7 @@ async fn start(id: u64, bootstrap: &[u64]) -> Node {
     let replica = Replica::open(member, dir.path(), config(), network)
         .await
         .unwrap();
-    let server = endpoint.serve(replica.inbox());
+    let server = endpoint.serve(replica.inbox()).unwrap();
     Node {
         replica,
         peer,

@@ -14,7 +14,6 @@ categories.workspace = true
 kurator-raft.workspace = true
 kurator-wal.workspace = true
 openraft-rt-tokio.workspace = true
-parking_lot.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 thiserror.workspace = true

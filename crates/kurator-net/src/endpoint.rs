@@ -36,46 +36,41 @@ const KEEP_ALIVE: Duration = Duration::from_secs(2);
 /// How long a connection may stay silent before it counts as broken.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A replica's QUIC endpoint: it listens for peers and connects to them,
-/// authenticated by the replica's transport key.
+/// A replica's QUIC endpoint: it connects to peers from the moment it is
+/// bound, and listens once it serves a replica, authenticated by the
+/// replica's transport key.
 #[derive(Debug)]
 pub struct Endpoint {
     socket: quinn::Endpoint,
-    roster: Arc<Roster>,
-    quic: Quic,
+    identity: Identity,
+    bootstrap: BTreeMap<NodeId, VerifyingKey>,
+    transport: Arc<quinn::TransportConfig>,
 }
 
 impl Endpoint {
     /// Binds to `addr` as the replica holding `secret`. Until the replica
-    /// knows a membership, it accepts the peers in `bootstrap`.
+    /// it serves knows a membership, it accepts the peers in `bootstrap`.
     ///
     /// # Errors
     ///
-    /// When the socket cannot be bound.
+    /// When the socket cannot be bound or the key cannot be loaded.
     pub fn bind(
         addr: SocketAddr,
         secret: &NodeSecret,
         bootstrap: BTreeMap<NodeId, VerifyingKey>,
     ) -> Result<Self, NetError> {
         let identity = Identity::new(secret)?;
-        let roster = Arc::new(Roster::new(bootstrap));
         let mut transport = quinn::TransportConfig::default();
         let _tuned = transport
             .keep_alive_interval(Some(KEEP_ALIVE))
             .max_idle_timeout(Some(
                 quinn::IdleTimeout::try_from(IDLE_TIMEOUT).map_err(io::Error::other)?,
             ));
-        let transport = Arc::new(transport);
-        let tls = identity.server(Arc::clone(&roster))?;
-        let mut server =
-            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
-        let _configured = server.transport_config(Arc::clone(&transport));
-        let socket = quinn::Endpoint::server(server, addr)?;
-        let quic = Quic::new(socket.clone(), identity, transport);
         Ok(Self {
-            socket,
-            roster,
-            quic,
+            socket: quinn::Endpoint::client(addr)?,
+            identity,
+            bootstrap,
+            transport: Arc::new(transport),
         })
     }
 
@@ -91,20 +86,32 @@ impl Endpoint {
     /// The transport a replica sends through.
     #[must_use]
     pub fn transport(&self) -> Quic {
-        self.quic.clone()
+        Quic::new(
+            self.socket.clone(),
+            self.identity.clone(),
+            Arc::clone(&self.transport),
+        )
     }
 
-    /// Starts delivering requests from trusted peers to `inbox`, and
-    /// trusts the peers of its membership from now on. Serving stops, and
-    /// the endpoint closes, when the returned [`Server`] drops.
-    #[must_use]
-    pub fn serve(self, inbox: Inbox<Tokio>) -> Server {
-        self.roster.follow(inbox.clone());
-        let task = tokio::spawn(accept(self.socket.clone(), Arc::clone(&self.roster), inbox));
-        Server {
+    /// Starts accepting peers and delivering their requests to `inbox`.
+    /// Serving stops, and the endpoint closes, when the returned
+    /// [`Server`] drops.
+    ///
+    /// # Errors
+    ///
+    /// When the TLS configuration cannot be built.
+    pub fn serve(self, inbox: Inbox<Tokio>) -> Result<Server, NetError> {
+        let roster = Arc::new(Roster::new(self.bootstrap, inbox.clone()));
+        let tls = self.identity.server(Arc::clone(&roster))?;
+        let mut server =
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
+        let _configured = server.transport_config(self.transport);
+        self.socket.set_server_config(Some(server));
+        let task = tokio::spawn(accept(self.socket.clone(), roster, inbox));
+        Ok(Server {
             socket: self.socket,
             task,
-        }
+        })
     }
 }
 

@@ -94,7 +94,7 @@ async fn open(
     let network = Network::new(endpoint.transport());
     let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
     let replica = Replica::open(member, settings.dir(), config, network).await?;
-    let server = endpoint.serve(replica.inbox());
+    let server = endpoint.serve(replica.inbox())?;
     match settings.start() {
         Start::Found => {
             let voters = settings
