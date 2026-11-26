@@ -104,6 +104,7 @@ async fn act(
         60..70 => match rng.pick(&cluster.up()).copied() {
             Some(id) => {
                 cluster.crash(id).await?;
+                assert!(cluster.down().contains(&id), "{id} is down");
                 format!("crash {id}")
             }
             None => "crash: none up".to_owned(),
@@ -171,12 +172,24 @@ fn check(seed: u64, run: &Run) {
 #[test]
 fn random_faults_never_lose_an_acknowledged_write() {
     let mut acked = 0;
+    let mut faults = BTreeSet::new();
     for seed in seeds() {
         let run = run(seed);
         check(seed, &run);
         acked += run.acked.len();
+        for event in &run.trace {
+            let kind = event.split_whitespace().nth(1).unwrap_or_default();
+            if ["crash", "restart", "isolate"].contains(&kind) {
+                let _: bool = faults.insert(kind.to_owned());
+            }
+        }
     }
     assert!(acked > 0, "some writes succeed");
+    assert_eq!(
+        faults.len(),
+        3,
+        "replicas crashed, restarted and were cut off: {faults:?}"
+    );
 }
 
 #[test]

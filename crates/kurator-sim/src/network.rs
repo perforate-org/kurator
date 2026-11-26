@@ -55,7 +55,7 @@ struct Shared {
     faults: Faults,
     /// The replicas that are up, by id.
     inboxes: BTreeMap<NodeId, Inbox<Sim>>,
-    /// Pairs that cannot reach each other, both ways, smaller id first.
+    /// Links that are cut, from sender to receiver.
     cut: BTreeSet<(NodeId, NodeId)>,
 }
 
@@ -94,7 +94,8 @@ impl Network {
     pub fn isolate(&self, node: NodeId, others: impl IntoIterator<Item = NodeId>) {
         let mut shared = self.shared.lock();
         for other in others {
-            let _: bool = shared.cut.insert(pair(node, other));
+            let _: bool = shared.cut.insert((node, other));
+            let _: bool = shared.cut.insert((other, node));
         }
     }
 
@@ -103,43 +104,36 @@ impl Network {
         self.shared.lock().cut.clear();
     }
 
-    /// Whether every link is up.
-    #[must_use]
-    pub fn is_healed(&self) -> bool {
-        self.shared.lock().cut.is_empty()
-    }
-
-    /// Changes how unreliable the network is from now on.
-    pub fn set_faults(&self, faults: Faults) {
-        self.shared.lock().faults = faults;
-    }
-
-    /// The fate of the next message from `from` to `to`.
-    fn fate(&self, from: NodeId, to: NodeId) -> Fate {
+    /// The fate of the next message, either way.
+    fn fate(&self) -> Fate {
         let mut shared = self.shared.lock();
         let faults = shared.faults;
         let delay = shared
             .rng
             .between(nanos(faults.min_delay), nanos(faults.max_delay));
-        if shared.rng.chance(faults.loss_per_mille) || shared.cut.contains(&pair(from, to)) {
+        if shared.rng.chance(faults.loss_per_mille) {
             Fate::Lost
         } else {
             Fate::Delivered(Duration::from_nanos(delay))
         }
     }
 
+    /// Whether the link from `from` to `to` is cut.
+    fn is_cut(&self, from: NodeId, to: NodeId) -> bool {
+        self.shared.lock().cut.contains(&(from, to))
+    }
+
     /// The inbox of `to` when `from` can reach it now.
     fn reachable(&self, from: NodeId, to: NodeId) -> Option<Inbox<Sim>> {
-        let shared = self.shared.lock();
-        if shared.cut.contains(&pair(from, to)) {
+        if self.is_cut(from, to) {
             return None;
         }
-        shared.inboxes.get(&to).cloned()
+        self.shared.lock().inboxes.get(&to).cloned()
     }
 
     /// Carries one message from `from` to `to` and back: waits out the
-    /// delay, checks the link and the target again, runs `deliver`, and
-    /// waits out the delay of the reply.
+    /// delay, checks the link and the target, runs `deliver`, waits out
+    /// the delay of the reply and checks the link back.
     async fn carry<T, F, Fut>(
         &self,
         from: NodeId,
@@ -150,7 +144,7 @@ impl Network {
         F: FnOnce(Inbox<Sim>) -> Fut,
         Fut: Future<Output = Result<T, Unreachable<Sim>>>,
     {
-        let Fate::Delivered(delay) = self.fate(from, to) else {
+        let Fate::Delivered(delay) = self.fate() else {
             return Err(unreachable("message lost"));
         };
         SimRuntime::sleep(delay).await;
@@ -158,10 +152,13 @@ impl Network {
             .reachable(from, to)
             .ok_or_else(|| unreachable("target is down or cut off"))?;
         let reply = deliver(inbox).await?;
-        let Fate::Delivered(back) = self.fate(to, from) else {
+        let Fate::Delivered(back) = self.fate() else {
             return Err(unreachable("reply lost"));
         };
         SimRuntime::sleep(back).await;
+        if self.is_cut(to, from) {
+            return Err(unreachable("reply cut off"));
+        }
         Ok(reply)
     }
 }
@@ -273,10 +270,6 @@ impl RaftNetworkV2<Sim> for Link {
             .await?;
         Ok(reply)
     }
-}
-
-fn pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
-    if a <= b { (a, b) } else { (b, a) }
 }
 
 fn nanos(duration: Duration) -> u64 {

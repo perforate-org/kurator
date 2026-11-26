@@ -15,6 +15,9 @@ exclude_re = [
     "match guard error.kind\\(\\) [!=]= io::ErrorKind::NotFound with (true|false)",
     # Dropping the last Raft handle stops the core as well; shutting down
     # only waits for it, which no test can tell apart.
-    "replace Replica<C>::shutdown -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    "replace (Replica<C>|Cluster)::shutdown -> Result<.*> with Ok\\(\\(\\)\\)",
+    # A stopped replica refuses messages too, so forgetting its inbox only
+    # frees memory.
+    "replace Network::disconnect with \\(\\)",
 ]
 timeout_multiplier = 3.0

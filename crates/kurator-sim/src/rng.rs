@@ -80,7 +80,9 @@ mod tests {
         }
         assert_eq!(rng.below(0), 0, "empty bound");
         assert_eq!(rng.between(9, 3), 9, "empty range");
-        assert!(!rng.chance(0), "never");
+        assert!((0..10_000).all(|_| !rng.chance(0)), "never");
+        let hits = (0..100_000).filter(|_| rng.chance(10)).count();
+        assert!((800..1200).contains(&hits), "one in a hundred: {hits}");
         assert!(rng.chance(1000), "always");
         assert_eq!(rng.pick::<u8>(&[]), None, "nothing to pick");
         assert_eq!(rng.pick(&[1]), Some(&1), "only choice");

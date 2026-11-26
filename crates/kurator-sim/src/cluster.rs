@@ -82,22 +82,18 @@ impl Cluster {
     ///
     /// When a replica cannot start.
     pub async fn start(seed: u64, size: u64, faults: Faults) -> Result<Self, SimError> {
+        // Snapshots and purges every few dozen entries, so that runs exercise
+        // catching up from a snapshot.
         let config = openraft::Config {
-            heartbeat_interval: 50,
-            election_timeout_min: 150,
-            election_timeout_max: 300,
             snapshot_policy: SnapshotPolicy::LogsSinceLast(40),
             max_in_snapshot_log_to_keep: 10,
-            purge_batch_size: 1,
             ..openraft::Config::default()
         }
         .validate()?;
         let members = (1..=size)
             .map(|id| {
                 let id = NodeId::new(id);
-                let key_seed: [u8; 32] = std::array::from_fn(|byte| {
-                    u8::try_from(byte).unwrap_or(0) ^ u8::try_from(id.get()).unwrap_or(0)
-                });
+                let key_seed = [u8::try_from(id.get()).unwrap_or(u8::MAX); 32];
                 (id, Member::new(id, SigningKey::from_seed(key_seed)))
             })
             .collect();
@@ -144,12 +140,6 @@ impl Cluster {
             .filter(|id| !self.up.contains_key(id))
             .copied()
             .collect()
-    }
-
-    /// The network, to change its faults.
-    #[must_use]
-    pub const fn network(&self) -> &Network {
-        &self.network
     }
 
     /// Stops `id`: it answers nothing until it is restarted, and comes back
@@ -243,8 +233,7 @@ impl Cluster {
             .map(Replica::id)
     }
 
-    /// Restarts every replica, heals the network, makes it reliable, and
-    /// waits until every replica applied the same log.
+    /// Restarts every replica, heals the network, and waits until every replica applied the same log.
     ///
     /// # Errors
     ///
@@ -252,10 +241,6 @@ impl Cluster {
     /// simulated time.
     pub async fn settle(&mut self) -> Result<(), SimError> {
         self.heal();
-        self.network.set_faults(Faults {
-            loss_per_mille: 0,
-            ..Faults::default()
-        });
         for id in self.down() {
             self.restart(id).await?;
         }
