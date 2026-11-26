@@ -108,8 +108,8 @@ const OP_DELETE: u8 = 2;
 
 impl Command {
     /// Encodes the command as `version u8 | model u8 | body`. A key-value
-    /// body is a sequence of `op u8 | key | value?`, each part length
-    /// prefixed.
+    /// body is `count u32` followed by that many `op u8 | key | value?`,
+    /// keys and values length prefixed.
     ///
     /// # Errors
     ///
@@ -119,7 +119,9 @@ impl Command {
         if batch.ops.is_empty() {
             return Err(Error::EmptyBatch);
         }
+        let count = u32::try_from(batch.ops.len()).map_err(|_| Error::BatchTooLarge)?;
         let mut payload = vec![VERSION, MODEL_KV];
+        payload.extend_from_slice(&count.to_le_bytes());
         let too_large = |_| Error::BatchTooLarge;
         for op in &batch.ops {
             match op {
@@ -155,7 +157,8 @@ impl Command {
             other => return Err(DecodeError::Tag(other)),
         }
         let mut ops = Vec::new();
-        while let Ok(tag) = reader.u8() {
+        for _ in 0..reader.u32()? {
+            let tag = reader.u8()?;
             let key = reader.bytes()?.to_vec();
             ops.push(match tag {
                 OP_PUT => KvOp::Put {
@@ -208,7 +211,7 @@ mod tests {
         for (at, error) in [
             (0, DecodeError::Version(0xFF)),
             (1, DecodeError::Tag(0xFF)),
-            (2, DecodeError::Tag(0xFF)),
+            (6, DecodeError::Tag(0xFF)),
         ] {
             let mut bad = payload.clone();
             bad[at] = 0xFF;
@@ -223,8 +226,8 @@ mod tests {
 
     #[test]
     fn a_batch_may_fill_a_whole_record() {
-        // version, model, op tag, key length, "k", value length
-        let overhead = 1 + 1 + 1 + 4 + 1 + 4;
+        // version, model, count, op tag, key length, "k", value length
+        let overhead = 1 + 1 + 4 + 1 + 4 + 1 + 4;
         let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - overhead];
         let encoded = Command::Kv(WriteBatch::new().put("k", value))
             .encode()
@@ -238,7 +241,7 @@ mod tests {
 
     #[test]
     fn oversized_batches_are_rejected() {
-        let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - 11];
+        let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - 15];
         assert!(
             matches!(
                 Command::Kv(WriteBatch::new().put("k", value)).encode(),

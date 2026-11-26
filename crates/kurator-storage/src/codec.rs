@@ -68,6 +68,10 @@ impl<'a> Reader<'a> {
         self.array().map(u16::from_le_bytes)
     }
 
+    pub(crate) fn u32(&mut self) -> Result<u32, DecodeError> {
+        self.array().map(u32::from_le_bytes)
+    }
+
     pub(crate) fn u64(&mut self) -> Result<u64, DecodeError> {
         self.array().map(u64::from_le_bytes)
     }
@@ -79,7 +83,7 @@ impl<'a> Reader<'a> {
 
     /// Reads bytes written by [`put_bytes`].
     pub(crate) fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
-        let len = self.array().map(u32::from_le_bytes)?;
+        let len = self.u32()?;
         self.take(usize::try_from(len).map_err(|_| DecodeError::Truncated)?)
     }
 
@@ -133,8 +137,11 @@ mod tests {
     proptest! {
         #[test]
         fn arbitrary_input_never_panics(buf in proptest::collection::vec(any::<u8>(), 0..32)) {
+            // Each value consumes at least its 4-byte prefix, so the input
+            // runs out well within one read per byte.
             let mut reader = Reader::new(&buf);
-            while reader.bytes().is_ok() {}
+            let reads = buf.len().saturating_add(1);
+            prop_assert!((0..reads).any(|_| reader.bytes().is_err()), "input exhausted");
         }
     }
 }
