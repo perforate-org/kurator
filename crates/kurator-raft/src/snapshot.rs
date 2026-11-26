@@ -2,10 +2,9 @@
 //! the network.
 //!
 //! ```text
-//! kurator_codec::Format "KRRS", version 1, around:
-//! last log id      option(log id)
-//! membership id    option(log id)
-//! membership       as in the Raft log
+//! kurator_codec::Format "KRRS", version 2, around:
+//! meta             as in crate::codec: the last entry, the membership's
+//!                  entry and the membership with every peer
 //! state            kurator_storage::KvState::encode
 //! ```
 //!
@@ -21,11 +20,12 @@ use kurator_codec::{DecodeError, Format};
 use kurator_storage::KvState;
 use kurator_wal::sync_dir;
 
-use crate::codec::{membership, option, put_membership, put_option};
+use crate::codec::{meta, put_meta};
 use crate::error::{Error, Result, SnapshotDamage};
-use crate::types::{LeaderId, Membership, SnapshotMeta, StoredMembership};
+use crate::types::{LeaderId, Membership, SnapshotMeta};
 
-const FORMAT: Format = Format::new(*b"KRRS", 1);
+/// Version 2 added peers to the membership.
+const FORMAT: Format = Format::new(*b"KRRS", 2);
 const FILE: &str = "snapshot";
 const TEMP_PREFIX: &str = ".snapshot-";
 
@@ -55,9 +55,7 @@ impl SnapshotBytes {
     /// Encodes `state` with `meta`.
     pub(crate) fn encode(meta: &SnapshotMeta, state: &KvState) -> io::Result<Self> {
         let mut head = Vec::new();
-        put_option(&mut head, meta.last_log_id.as_ref());
-        put_option(&mut head, meta.last_membership.log_id().as_ref());
-        put_membership(&mut head, meta.last_membership.membership());
+        put_meta(&mut head, meta);
         let framed = FORMAT.write(Vec::new(), |out| {
             out.write_all(&head)?;
             state.encode(out)
@@ -73,15 +71,9 @@ impl SnapshotBytes {
 
 fn decode(framed: &[u8]) -> Result<(SnapshotMeta, KvState), DecodeError> {
     let mut reader = FORMAT.read(framed)?;
-    let last_log_id = option(&mut reader)?;
-    let membership_log_id = option(&mut reader)?;
-    let membership = membership(&mut reader)?;
+    let meta = meta(&mut reader)?;
     let state = KvState::decode(&mut reader)?;
     reader.finish()?;
-    let meta = SnapshotMeta {
-        last_log_id,
-        last_membership: StoredMembership::new(membership_log_id, membership),
-    };
     Ok((meta, state))
 }
 
@@ -147,17 +139,15 @@ impl SnapshotDir {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use kurator_codec::{DecodeError, Format};
     use kurator_storage::{Command, KvState, WriteBatch};
 
     use super::{SnapshotBytes, SnapshotDir};
     use crate::error::SnapshotDamage;
-    use crate::types::{LeaderId, LogId, Membership, NodeId, SnapshotMeta, StoredMembership};
+    use crate::types::testing::membership;
+    use crate::types::{LeaderId, LogId, NodeId, SnapshotMeta, StoredMembership};
 
     fn meta() -> SnapshotMeta {
-        let voters: BTreeSet<_> = [1, 2, 3].map(NodeId::new).into_iter().collect();
         let log_id = |index| {
             LogId::new(
                 LeaderId {
@@ -169,10 +159,7 @@ mod tests {
         };
         SnapshotMeta {
             last_log_id: Some(log_id(9)),
-            last_membership: StoredMembership::new(
-                Some(log_id(1)),
-                Membership::new_with_defaults(vec![voters], []),
-            ),
+            last_membership: StoredMembership::new(Some(log_id(1)), membership(&[1, 2, 3], &[4])),
         }
     }
 

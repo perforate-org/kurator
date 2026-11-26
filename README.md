@@ -2,7 +2,7 @@
 
 独立運営者による P2P マルチモデルデータベース(作業中)。
 
-現在は Phase 1。
+現在は Phase 2。
 
 - Phase 0: 単一ノードの Memory-first Storage(KV)、独自の追記型 WAL
   (group commit、fsync、破損末尾の検出と切り詰め)、Snapshot + WAL 再生による
@@ -11,6 +11,10 @@
   quorum commit、リーダー選出、ログ追従、スナップショット転送)と、署名付き WAL
   (各レコードが直前レコードのダイジェストと Ed25519 署名を持つハッシュチェーン)。
   決定論的シミュレーションで遅延・消失・分断・クラッシュ・再起動を注入して検証する。
+- Phase 2: 実ネットワーク。QUIC の永続接続でRaft RPC・ログ複製・スナップショット転送を
+  独自バイナリ符号化で流し、TLS 1.3 の Raw Public Key(Ed25519)で相互認証する。
+  メンバー変更は learner として追いつかせてから voter に昇格し、ノード除去もできる。
+  QUIC とシミュレーションは同じ `kurator_raft::Transport` 境界で差し替わる。
 
 | crate | 役割 |
 | --- | --- |
@@ -18,9 +22,41 @@
 | `crates/kurator-wal` | 追記型 WAL。チェックサム版と署名版 |
 | `crates/kurator-storage` | メモリ上の状態、group commit、スナップショット、`Db` |
 | `crates/kurator-raft` | Raft ログストア・状態機械・スナップショット・`Replica` |
-| `crates/kurator-sim` | 決定論的シミュレーション(シード付きネットワークと障害) |
+| `crates/kurator-sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱) |
+| `crates/kurator-net` | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証) |
+| `crates/kurator-node` | `kurator` バイナリ: レプリカ 1 つをプロセスとして動かすコンソール |
 
 シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`
 で増やし、失敗したシードは `KURATOR_SIM_SEED=<seed>` で再現する。
+
+## ローカルで 3 ノードを動かす
+
+各ノードはディレクトリに秘密 `node.secret` を持ち、そこから WAL 署名鍵と通信鍵を
+用途別に導出する。`kurator key` は秘密を作り(既にあれば読み)、通信鍵の公開鍵を表示する。
+
+```sh
+cargo build -p kurator-node
+K=target/debug/kurator
+K1=$($K key n1); K2=$($K key n2); K3=$($K key n3)
+P1=1=127.0.0.1:7001,$K1; P2=2=127.0.0.1:7002,$K2; P3=3=127.0.0.1:7003,$K3
+
+# 端末をノードごとに分けて起動する。--found を付けた 1 台がクラスタを作る。
+$K run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer $P2 --peer $P3 --found
+$K run --id 2 --dir n2 --listen 127.0.0.1:7002 --peer $P1 --peer $P3
+$K run --id 3 --dir n3 --listen 127.0.0.1:7003 --peer $P1 --peer $P2
+```
+
+起動したノードは標準入力からコマンドを読む。書き込みと読み出しはリーダーで行う
+(`status` でリーダーが分かる)。
+
+```text
+put <key> <value> | del <key> | get <key> | status | members
+add <id> <addr> <key> | promote <id> | remove <id> | quit
+```
+
+4 台目を足すには、既存ノードを `--peer` に並べて `--found` なしで起動し、リーダーで
+`add 4 127.0.0.1:7004 <4 の公開鍵>` を実行する。スナップショットとログで追いついた後に
+`promote 4` が通る(追いつく前は `cannot vote yet` で断られる)。`remove <id>` で抜く。
+再起動は同じコマンドを `--found` なしで実行すればよい。
 
 開発の決まりと品質ゲートは [CLAUDE.md](CLAUDE.md) を参照。

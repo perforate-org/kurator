@@ -31,7 +31,7 @@ mod network;
 mod rng;
 
 pub use cluster::{Cluster, Outcome, SimError};
-pub use network::{Faults, Link, Links, Network};
+pub use network::{Endpoint, Faults, Garbled, Network, Wire};
 pub use rng::Rng;
 
 kurator_raft::declare_config!(

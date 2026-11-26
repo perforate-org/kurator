@@ -18,6 +18,7 @@ kurator-codec = { path = "crates/kurator-codec" }
 kurator-storage = { path = "crates/kurator-storage" }
 kurator-raft = { path = "crates/kurator-raft" }
 kurator-sim = { path = "crates/kurator-sim" }
+kurator-net = { path = "crates/kurator-net" }
 crc32c = "0.6.9"
 blake3 = "1.8.7"
 ed25519-dalek = "3.0.0"
@@ -29,6 +30,10 @@ proptest = "1.7"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 openraft = { version = "0.10.1", default-features = false }
 openraft-rt-sim = "0.10.1"
+openraft-rt-tokio = "0.10.1"
+quinn = { version = "0.11.12", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.54", features = ["rt", "net", "time", "sync", "macros"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

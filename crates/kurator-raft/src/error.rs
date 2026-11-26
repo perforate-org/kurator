@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use kurator_codec::DecodeError;
 use kurator_wal::Lsn;
 
-use crate::types::NodeId;
+use crate::types::{NodeId, Progress};
 
 /// Result of a replica operation.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -59,6 +59,15 @@ pub enum Error {
     Discarded {
         /// The leader, if this replica knows it.
         leader: Option<NodeId>,
+    },
+    /// The node cannot become a voter: it is not a learner that holds
+    /// everything the leader committed.
+    #[error("{node} cannot vote yet: {progress:?}")]
+    NotCaughtUp {
+        /// The node.
+        node: NodeId,
+        /// Where it stands.
+        progress: Progress,
     },
     /// The cluster is already initialized.
     #[error("the cluster is already initialized")]

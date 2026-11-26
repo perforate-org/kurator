@@ -19,6 +19,12 @@ exclude_re = [
     # A stopped replica refuses messages too, so forgetting its inbox only
     # frees memory.
     "replace Network::disconnect with \\(\\)",
+    # TLS 1.3 clients with raw public keys ignore certificate authority
+    # hints, so no handshake can tell an empty list from another.
+    "<impl ClientCertVerifier for Trusted>::root_hint_subjects",
+    # Only a broken encoding garbles a simulated message; noticing it only
+    # makes such a mutant fail in seconds instead of minutes.
+    "replace Network::garbled -> Option<Garbled> with None",
 ]
 timeout_multiplier = 3.0
 # The replica code is exercised mostly by kurator-sim's cluster tests, so

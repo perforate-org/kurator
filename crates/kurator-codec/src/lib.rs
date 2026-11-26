@@ -49,6 +49,10 @@ pub enum DecodeError {
     /// A tag byte names nothing this build knows.
     #[error("unknown tag {0}")]
     Tag(u8),
+    /// A value is well formed but not valid: a key that is not a curve
+    /// point, or a set that names a member it does not hold.
+    #[error("a value is not valid")]
+    Invalid,
 }
 
 /// A length that does not fit the `u32` prefix.

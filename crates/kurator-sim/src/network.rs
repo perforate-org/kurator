@@ -7,13 +7,11 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_raft::openraft::error::{RPCError, ReplicationClosed, StreamingError, Unreachable};
-use kurator_raft::openraft::network::{RPCOption, RaftNetworkFactory, v2::RaftNetworkV2};
-use kurator_raft::openraft::raft::{
-    AppendEntriesRequest, AppendResult, SnapshotResponse, VoteRequest, VoteResponse,
+use kurator_codec::DecodeError;
+use kurator_raft::openraft::AsyncRuntime as _;
+use kurator_raft::{
+    Connection, Failure, Inbox, NodeId, Peer, Refusal, Request, Response, Transport,
 };
-use kurator_raft::openraft::{AsyncRuntime as _, impls::EmptyNode};
-use kurator_raft::{Inbox, NodeId, Snapshot, SnapshotBytes, Vote};
 use openraft_rt_sim::SimRuntime;
 use parking_lot::Mutex;
 
@@ -57,6 +55,19 @@ struct Shared {
     inboxes: BTreeMap<NodeId, Inbox<Sim>>,
     /// Links that are cut, from sender to receiver.
     cut: BTreeSet<(NodeId, NodeId)>,
+    /// The first message that did not decode: a bug, never a fault.
+    garbled: Option<Garbled>,
+}
+
+/// A message that did not decode on the other side of a [`Wire`]. The
+/// simulator never damages messages, so this is an encoding bug, and the
+/// cluster stops making progress instead of retrying for minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a message from {from} to {to} did not decode: {error}")]
+pub struct Garbled {
+    from: NodeId,
+    to: NodeId,
+    error: DecodeError,
 }
 
 /// What happens to one message.
@@ -76,6 +87,7 @@ impl Network {
                 faults,
                 inboxes: BTreeMap::new(),
                 cut: BTreeSet::new(),
+                garbled: None,
             })),
         }
     }
@@ -102,6 +114,17 @@ impl Network {
     /// Restores every link.
     pub fn heal(&self) {
         self.shared.lock().cut.clear();
+    }
+
+    /// The first message that did not decode, if one did not.
+    #[must_use]
+    pub fn garbled(&self) -> Option<Garbled> {
+        self.shared.lock().garbled
+    }
+
+    fn garble(&self, from: NodeId, to: NodeId, error: DecodeError) {
+        let mut shared = self.shared.lock();
+        let _: &mut Garbled = shared.garbled.get_or_insert(Garbled { from, to, error });
     }
 
     /// The fate of the next message, either way.
@@ -134,63 +157,59 @@ impl Network {
     /// Carries one message from `from` to `to` and back: waits out the
     /// delay, checks the link and the target, runs `deliver`, waits out
     /// the delay of the reply and checks the link back.
-    async fn carry<T, F, Fut>(
-        &self,
-        from: NodeId,
-        to: NodeId,
-        deliver: F,
-    ) -> Result<T, Unreachable<Sim>>
+    async fn carry<T, F, Fut>(&self, from: NodeId, to: NodeId, deliver: F) -> Result<T, Failure>
     where
         F: FnOnce(Inbox<Sim>) -> Fut,
-        Fut: Future<Output = Result<T, Unreachable<Sim>>>,
+        Fut: Future<Output = T>,
     {
         let Fate::Delivered(delay) = self.fate() else {
-            return Err(unreachable("message lost"));
+            return Err(lost("message lost"));
         };
         SimRuntime::sleep(delay).await;
         let inbox = self
             .reachable(from, to)
-            .ok_or_else(|| unreachable("target is down or cut off"))?;
-        let reply = deliver(inbox).await?;
+            .ok_or_else(|| lost("target is down or cut off"))?;
+        let reply = deliver(inbox).await;
         let Fate::Delivered(back) = self.fate() else {
-            return Err(unreachable("reply lost"));
+            return Err(lost("reply lost"));
         };
         SimRuntime::sleep(back).await;
         if self.is_cut(to, from) {
-            return Err(unreachable("reply cut off"));
+            return Err(lost("reply cut off"));
         }
         Ok(reply)
     }
 }
 
-/// The link from one replica to another.
+/// One replica's end of the network: it opens a [`Wire`] to each peer.
 #[derive(Debug, Clone)]
-pub struct Link {
-    from: NodeId,
-    to: NodeId,
-    network: Network,
-}
-
-/// Opens the links of one replica.
-#[derive(Debug, Clone)]
-pub struct Links {
+pub struct Endpoint {
     from: NodeId,
     network: Network,
 }
 
-impl Links {
-    /// The links of `from` over `network`.
+impl Endpoint {
+    /// The end of `from` on `network`.
     #[must_use]
     pub const fn new(from: NodeId, network: Network) -> Self {
         Self { from, network }
     }
 }
 
-impl RaftNetworkFactory<Sim> for Links {
-    type Network = Link;
+/// The wire from one replica to another. Messages cross it encoded, as
+/// they cross a real network.
+#[derive(Debug, Clone)]
+pub struct Wire {
+    from: NodeId,
+    to: NodeId,
+    network: Network,
+}
 
-    async fn new_client(&mut self, target: NodeId, _node: &EmptyNode) -> Link {
-        Link {
+impl Transport<Sim> for Endpoint {
+    type Connection = Wire;
+
+    fn connect(&self, target: NodeId, _peer: &Peer) -> Wire {
+        Wire {
             from: self.from,
             to: target,
             network: self.network.clone(),
@@ -198,77 +217,31 @@ impl RaftNetworkFactory<Sim> for Links {
     }
 }
 
-impl RaftNetworkV2<Sim> for Link {
-    type SnapshotData = SnapshotBytes;
-
-    async fn append_entries(
+impl Connection<Sim> for Wire {
+    async fn call(
         &mut self,
-        rpc: AppendEntriesRequest<Sim>,
-        _option: RPCOption,
-    ) -> Result<AppendResult<Sim>, RPCError<Sim>> {
-        let reply = self
-            .network
-            .carry(self.from, self.to, |inbox| async move {
-                inbox
-                    .append_entries(rpc)
-                    .await
-                    .map_err(|error| unreachable(&error.to_string()))
-            })
-            .await?;
-        Ok(reply)
-    }
-
-    async fn vote(
-        &mut self,
-        rpc: VoteRequest<Sim>,
-        _option: RPCOption,
-    ) -> Result<VoteResponse<Sim>, RPCError<Sim>> {
-        let reply = self
-            .network
-            .carry(self.from, self.to, |inbox| async move {
-                inbox
-                    .vote(rpc)
-                    .await
-                    .map_err(|error| unreachable(&error.to_string()))
-            })
-            .await?;
-        Ok(reply)
-    }
-
-    async fn pre_vote(
-        &mut self,
-        rpc: VoteRequest<Sim>,
-        _option: RPCOption,
-    ) -> Result<VoteResponse<Sim>, RPCError<Sim>> {
-        let reply = self
-            .network
-            .carry(self.from, self.to, |inbox| async move {
-                inbox
-                    .pre_vote(rpc)
-                    .await
-                    .map_err(|error| unreachable(&error.to_string()))
-            })
-            .await?;
-        Ok(reply)
-    }
-
-    async fn full_snapshot(
-        &mut self,
-        vote: Vote,
-        snapshot: Snapshot,
-        _cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
-        _option: RPCOption,
-    ) -> Result<SnapshotResponse<Sim>, StreamingError<Sim>> {
-        let reply = self
-            .network
-            .carry(self.from, self.to, |inbox| async move {
-                inbox
-                    .install_snapshot(vote, snapshot)
-                    .await
-                    .map_err(|error| unreachable(&error.to_string()))
-            })
-            .await?;
-        Ok(reply)
+        request: Request<Sim>,
+        deadline: Duration,
+    ) -> Result<Response<Sim>, Failure> {
+        let bytes = request.encode().map_err(Failure::Unreachable)?;
+        let (from, to, network) = (self.from, self.to, self.network.clone());
+        let carried = self.network.carry(from, to, |inbox| async move {
+            let response = match Request::decode(&bytes) {
+                Ok(decoded) => inbox.handle(decoded).await,
+                Err(error) => {
+                    network.garble(from, to, error);
+                    Response::Refused(Refusal::Malformed)
+                }
+            };
+            response.encode()
+        });
+        let reply = SimRuntime::timeout(deadline, carried)
+            .await
+            .map_err(|_| Failure::Timeout)??;
+        Response::decode(&reply).map_err(|error| {
+            self.network.garble(to, from, error);
+            Failure::Unreachable(io::Error::other(error))
+        })
     }
 }
 
@@ -276,6 +249,6 @@ fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn unreachable(why: &str) -> Unreachable<Sim> {
-    Unreachable::new(&io::Error::other(why.to_owned()))
+fn lost(why: &str) -> Failure {
+    Failure::Unreachable(io::Error::other(why.to_owned()))
 }

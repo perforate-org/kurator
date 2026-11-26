@@ -1,0 +1,31 @@
+[package]
+name = "kurator-node"
+description = "A Kurator replica as a process: the signed-WAL Raft replica on the QUIC transport, driven from a console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[[bin]]
+name = "kurator"
+path = "src/main.rs"
+
+[dependencies]
+getrandom = "0.4.3"
+kurator-net.workspace = true
+kurator-raft.workspace = true
+kurator-storage.workspace = true
+kurator-wal.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

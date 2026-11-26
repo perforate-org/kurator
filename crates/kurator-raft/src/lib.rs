@@ -20,27 +20,43 @@
 //!   snapshot and replays the log after it; a follower that fell behind
 //!   the purged log receives the leader's snapshot instead.
 //!
-//! The async runtime is the one thing left open: [`declare_config!`] binds
-//! the types to Tokio for production or to a deterministic simulator for
-//! tests, and the network is whatever [`openraft::RaftNetworkFactory`] the
-//! caller passes, delivering into each replica's [`Inbox`].
+//! - **Membership changes.** A new node joins as a learner, catches up
+//!   from the snapshot and the log, and only then becomes a voter
+//!   ([`Replica::add_learner`], [`Replica::progress`],
+//!   [`Replica::promote`]); [`Replica::remove`] takes a node out. Each
+//!   member's [`Peer`], its address and transport key, travels in the
+//!   membership itself.
+//!
+//! Two things are left open. [`declare_config!`] binds the types to an
+//! async runtime: Tokio in production, a deterministic simulator in tests.
+//! And a [`Transport`] carries [`Request`]s and [`Response`]s between
+//! replicas, delivering into each replica's [`Inbox`]: QUIC in production,
+//! a simulated network in tests. Both speak the same binary encoding.
 
 mod codec;
 mod config;
 mod error;
+mod identity;
 mod log_store;
+mod network;
 mod proposal;
 mod replica;
+mod rpc;
 mod snapshot;
 mod state_machine;
 mod types;
 
-pub use config::{Config, Entry, Payload};
+pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
+pub use identity::{KeyPurpose, NodeSecret};
 pub use log_store::LogStore;
+pub use network::{Connection, Failure, Link, Network, Transport};
 pub use openraft;
 pub use proposal::Proposal;
 pub use replica::{Inbox, Member, Replica, Role, Status};
+pub use rpc::{Refusal, Request, Response};
 pub use snapshot::{Snapshot, SnapshotBytes};
 pub use state_machine::StateMachine;
-pub use types::{LeaderId, LogId, Membership, NodeId, SnapshotMeta, StoredMembership, Vote};
+pub use types::{
+    LeaderId, LogId, Membership, NodeId, Peer, Progress, SnapshotMeta, StoredMembership, Vote,
+};
