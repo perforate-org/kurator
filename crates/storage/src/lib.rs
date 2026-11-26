@@ -15,6 +15,13 @@
 //! A write that returned is therefore durable and visible to every read
 //! that starts after it.
 //!
+//! Every write gets a [`Version`], its log sequence number, and the state
+//! keeps each key's values back to a [`Retention`] horizon, so a [`View`]
+//! reads the state as it was at any version since. [`Db::begin`] starts a
+//! [`Txn`]: it reads one version, holds its writes back, and commits them
+//! only if no write after that version touched a key it read or a range it
+//! scanned. Committed transactions are serializable.
+//!
 //! [`Db::open`] loads the latest snapshot and replays the log records after
 //! it. [`Db::checkpoint`] writes a new snapshot and drops the log segments
 //! it covers.
