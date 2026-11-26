@@ -692,6 +692,7 @@ name = "kurator-net"
 version = "0.0.1"
 dependencies = [
  "kurator-raft",
+ "kurator-shard",
  "kurator-storage",
  "kurator-wal",
  "openraft-rt-tokio",
@@ -710,6 +711,7 @@ dependencies = [
  "getrandom 0.4.3",
  "kurator-net",
  "kurator-raft",
+ "kurator-shard",
  "kurator-storage",
  "kurator-wal",
  "tempfile",
@@ -724,6 +726,7 @@ dependencies = [
  "blake3",
  "futures-util",
  "kurator-codec",
+ "kurator-shard",
  "kurator-storage",
  "kurator-wal",
  "openraft",
@@ -735,12 +738,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-shard"
+version = "0.0.1"
+dependencies = [
+ "kurator-codec",
+ "kurator-storage",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "kurator-sim"
 version = "0.0.1"
 dependencies = [
  "futures-util",
  "kurator-codec",
  "kurator-raft",
+ "kurator-shard",
  "kurator-storage",
  "openraft-rt-sim",
  "parking_lot",

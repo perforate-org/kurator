@@ -25,6 +25,7 @@ use kurator_codec::{DecodeError, Reader, put_bytes};
 
 use crate::batch::WriteBatch;
 use crate::error::{Error, Result};
+use crate::span::Span;
 use crate::version::Version;
 
 /// A transaction as it goes into the log: what it read, at which version,
@@ -57,6 +58,19 @@ impl Transaction {
     #[must_use]
     pub const fn writes(&self) -> &WriteBatch {
         &self.writes
+    }
+
+    /// Whether every key it reads or writes, and every range it scans, is
+    /// in `span`.
+    #[must_use]
+    pub fn fits(&self, span: &Span) -> bool {
+        let reads = self.reads.keys.iter().all(|key| span.contains(key));
+        let scans = self
+            .reads
+            .ranges
+            .iter()
+            .all(|range| span.holds(range.start(), range.end()));
+        reads && scans && self.writes.fits(span)
     }
 
     pub(crate) const fn reads(&self) -> &ReadSet {

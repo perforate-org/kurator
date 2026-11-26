@@ -6,11 +6,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_raft::{Inbox, NodeId, NodeSecret, Refusal, Request, Response};
+use kurator_raft::{Message, NodeId, NodeSecret, Refusal, Response};
 use kurator_wal::VerifyingKey;
 use quinn::crypto::rustls::QuicServerConfig;
 
-use crate::Tokio;
+use crate::Inbox;
 use crate::connection::{MAX_MESSAGE, Quic};
 use crate::roster::Roster;
 use crate::tls::{Identity, presented_key};
@@ -100,8 +100,8 @@ impl Endpoint {
     /// # Errors
     ///
     /// When the TLS configuration cannot be built.
-    pub fn serve(self, inbox: Inbox<Tokio>) -> Result<Server, NetError> {
-        let roster = Arc::new(Roster::new(self.bootstrap, inbox.clone()));
+    pub fn serve(self, inbox: Inbox) -> Result<Server, NetError> {
+        let roster = Arc::new(Roster::new(self.bootstrap, inbox.memberships()));
         let tls = self.identity.server(Arc::clone(&roster))?;
         let mut server =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
@@ -131,7 +131,7 @@ impl Drop for Server {
 }
 
 /// Accepts connections until the endpoint closes.
-async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, inbox: Inbox<Tokio>) {
+async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, inbox: Inbox) {
     while let Some(incoming) = endpoint.accept().await {
         drop(tokio::spawn(connection(
             incoming,
@@ -142,7 +142,7 @@ async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, inbox: Inbox<Tok
 }
 
 /// Serves one connection: one request per stream, each in its own task.
-async fn connection(incoming: quinn::Incoming, roster: Arc<Roster>, inbox: Inbox<Tokio>) {
+async fn connection(incoming: quinn::Incoming, roster: Arc<Roster>, inbox: Inbox) {
     let Ok(connection) = incoming.await else {
         return;
     };
@@ -174,13 +174,13 @@ async fn stream(
     sender: NodeId,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    inbox: Inbox<Tokio>,
+    inbox: Inbox,
 ) {
     let Ok(bytes) = recv.read_to_end(MAX_MESSAGE).await else {
         return;
     };
-    let response = match Request::decode(&bytes) {
-        Ok(request) if request.sender() == sender => inbox.handle(request).await,
+    let response = match Message::decode(&bytes) {
+        Ok(message) if message.sender() == sender => inbox.handle(message).await,
         Ok(_) => Response::Refused(Refusal::Forged),
         Err(_) => Response::Refused(Refusal::Malformed),
     };

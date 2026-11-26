@@ -40,14 +40,11 @@
 
 mod batch;
 mod command;
-mod commit;
-mod core;
 mod db;
 mod draft;
 mod error;
-mod lock;
 mod outcome;
-mod snapshot;
+mod span;
 mod state;
 mod txn;
 mod version;
@@ -60,6 +57,7 @@ pub use error::{Error, Result, SnapshotDamage};
 pub use kurator_codec::DecodeError;
 pub use kurator_wal::{Lsn, RecoveryReport};
 pub use outcome::{Abort, Outcome, Unreadable};
+pub use span::{End, Span};
 pub use state::{KvState, View};
 pub use txn::Transaction;
 pub use version::{Retention, Version};

@@ -13,8 +13,10 @@
 //! log id    = term u64 | node u64 | index u64
 //! option(x) = 0 | 1 x
 //! flag      = 0 | 1
-//! payload   = 0 (blank) | 1 command | 2 membership
+//! payload   = 0 (blank) | 1 command | 2 membership | 3 split
 //! command   = the rest of the record, as `kurator_storage::Command::encode`
+//!             wrote it
+//! split     = the rest of the record, as `kurator_shard::Split::encode`
 //!             wrote it
 //! membership= configs u32 (voters u32 node u64*)* | nodes u32 (node u64 peer)*
 //! peer      = addr | key [32]
@@ -28,12 +30,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use kurator_codec::{DecodeError, Reader};
-use kurator_storage::Encoded;
 use kurator_wal::VerifyingKey;
 use openraft::EntryPayload;
 
 use crate::config::Entry;
-use crate::proposal::Proposal;
+use crate::proposal::{Body, Proposal};
 use crate::types::{
     LeaderId, LogId, Membership, NodeId, Peer, SnapshotMeta, StoredMembership, Vote,
 };
@@ -47,6 +48,7 @@ const COMMITTED: u8 = 5;
 const BLANK: u8 = 0;
 const NORMAL: u8 = 1;
 const MEMBERSHIP: u8 = 2;
+const SPLIT: u8 = 3;
 
 const NONE: u8 = 0;
 const SOME: u8 = 1;
@@ -244,8 +246,11 @@ fn put_payload(out: &mut Vec<u8>, payload: &EntryPayload<Proposal, Membership>) 
     match payload {
         EntryPayload::Blank => out.push(BLANK),
         EntryPayload::Normal(proposal) => {
-            out.push(NORMAL);
-            out.extend_from_slice(proposal.encoded().payload());
+            out.push(match proposal.body() {
+                Body::Command(_) => NORMAL,
+                Body::Split(..) => SPLIT,
+            });
+            out.extend_from_slice(proposal.body().payload());
         }
         EntryPayload::Membership(membership) => {
             out.push(MEMBERSHIP);
@@ -257,12 +262,8 @@ fn put_payload(out: &mut Vec<u8>, payload: &EntryPayload<Proposal, Membership>) 
 fn payload(reader: &mut Reader<'_>) -> Result<EntryPayload<Proposal, Membership>, DecodeError> {
     match reader.read::<u8>()? {
         BLANK => Ok(EntryPayload::Blank),
-        NORMAL => {
-            let command = reader.rest().to_vec();
-            Ok(EntryPayload::Normal(Proposal::decoded(Encoded::decode(
-                command,
-            )?)))
-        }
+        NORMAL => Proposal::decode_command(reader.rest().to_vec()).map(EntryPayload::Normal),
+        SPLIT => Proposal::decode_split(reader.rest().to_vec()).map(EntryPayload::Normal),
         MEMBERSHIP => membership(reader).map(EntryPayload::Membership),
         other => Err(DecodeError::Tag(other)),
     }
@@ -320,6 +321,7 @@ mod tests {
     use std::net::{Ipv6Addr, SocketAddr};
 
     use kurator_codec::{DecodeError, Reader};
+    use kurator_shard::{Epoch, ShardId, Split};
     use kurator_storage::{Command, WriteBatch};
     use openraft::EntryPayload;
     use proptest::prelude::*;
@@ -356,6 +358,13 @@ mod tests {
                 log_id,
                 payload: EntryPayload::Blank
             })),
+            (id(), bytes(), any::<u64>(), any::<u64>()).prop_map(|(log_id, at, right, epoch)| {
+                let split = Split::new(at, ShardId::new(right), Epoch::new(epoch));
+                Record::Entry(Entry {
+                    log_id,
+                    payload: EntryPayload::Normal(Proposal::split(split).unwrap()),
+                })
+            }),
             (id(), proptest::collection::btree_set(0_u64..8, 1..4)).prop_map(|(log_id, ids)| {
                 let voters: Vec<u64> = ids.into_iter().collect();
                 Record::Entry(Entry {
@@ -383,7 +392,7 @@ mod tests {
         });
         assert_eq!(
             entry.encode().len(),
-            proposal.encoded().payload().len() + ENTRY_OVERHEAD,
+            proposal.body().payload().len() + ENTRY_OVERHEAD,
             "overhead"
         );
     }
@@ -395,9 +404,9 @@ mod tests {
             (vec![2, 7], 7),
             (
                 vec![
-                    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3,
+                    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4,
                 ],
-                3,
+                4,
             ),
         ] {
             assert_eq!(

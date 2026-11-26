@@ -83,6 +83,19 @@ impl KvState {
         Outcome::Committed(version)
     }
 
+    /// Moves every key at or after `at`, with its history, into a new state
+    /// at the same version and retention; this state keeps the keys before
+    /// `at`. Each half reads at every readable version as the whole did
+    /// for its keys.
+    #[must_use]
+    pub fn split_off(&mut self, at: &[u8]) -> Self {
+        Self {
+            keys: self.keys.split_off(at),
+            version: self.version,
+            retention: self.retention,
+        }
+    }
+
     /// Whether `transaction` may commit now: its read version is readable
     /// and nothing it read was written after it.
     fn check(&self, transaction: &Transaction) -> Result<(), Abort> {
@@ -180,6 +193,12 @@ impl KvState {
     #[must_use = "iterators do nothing unless consumed"]
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         self.latest().range(Bound::Unbounded, Bound::Unbounded)
+    }
+
+    /// Every key the state keeps versions of, removed ones included, in
+    /// key order.
+    pub fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.keys.keys().map(Vec::as_slice)
     }
 
     /// How many keys have a value at the newest version.

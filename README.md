@@ -2,7 +2,7 @@
 
 独立運営者による P2P マルチモデルデータベース(作業中)。
 
-現在は Phase 3。
+現在は Phase 4(シャード分割)。
 
 - Phase 0: 単一ノードの Memory-first Storage(KV)、独自の追記型 WAL
   (group commit、fsync、破損末尾の検出と切り詰め)、Snapshot + WAL 再生による
@@ -22,16 +22,26 @@
   エントリを適用する時点で「読んだ版より後に、読んだものへの書き込みがあったか」を
   検査して commit か abort を決める(楽観的並行性制御)。検査は適用側で行うので、
   どのレプリカもどの復旧も同じ判断になる。
+- Phase 4(進行中): キー範囲によるシャード分割(multi-Raft)。シャードはキー範囲
+  `[start, end)` とエポックを持ち、それぞれが独立した Raft グループになる。分割は
+  ログエントリとして合意され、適用時に状態を分割キーで切り分け、右半分を新シャードの
+  最初のスナップショット(シード)として永続化する。新シャードは同じメンバーで選挙を
+  始め、版(Raft index)は分割点から続く。分割を逃したノードは新シャード宛ての
+  メッセージを受けて空のレプリカを開き、リーダーからスナップショットを受け取る。
+  範囲外のキーへのコマンドは適用時に `Misrouted` で現在のシャード記述子を返し、
+  クライアントはそれで経路を引き直す。今後: メタシャード(配置・ID 割り当て)と
+  Percolator 型のシャード横断トランザクション。
 
 | crate | 役割 |
 | --- | --- |
 | `crates/codec` | 共通のバイナリ符号化(`Reader`、ファイル枠 `Format`) |
 | `crates/wal` | 追記型 WAL。チェックサム版と署名版 |
-| `crates/storage` | 版付きの状態、トランザクション、group commit、スナップショット、`Db` |
-| `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica` |
+| `crates/storage` | 版付きの状態、トランザクション、キー範囲 `Span`、group commit、スナップショット、`Db` |
+| `crates/shard` | シャード記述子(ID・範囲・エポック)、分割、`ShardMap`、シャードの状態 |
+| `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica`、シャードごとのレプリカを束ねる `Store` |
 | `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱) |
 | `crates/net` | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証) |
-| `crates/node` | `kurator` バイナリ: レプリカ 1 つをプロセスとして動かすコンソール |
+| `crates/node` | `kurator` バイナリ: ノード 1 つ(全シャードのレプリカ)をプロセスとして動かすコンソール |
 
 シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`
 で増やし、失敗したシードは `KURATOR_SIM_SEED=<seed>` で再現する。
@@ -53,13 +63,18 @@ $K run --id 2 --dir n2 --listen 127.0.0.1:7002 --peer $P1 --peer $P3
 $K run --id 3 --dir n3 --listen 127.0.0.1:7003 --peer $P1 --peer $P2
 ```
 
-起動したノードは標準入力からコマンドを読む。書き込みと読み出しはリーダーで行う
-(`status` でリーダーが分かる)。
+起動したノードは標準入力からコマンドを読む。書き込みと読み出しはキーを持つシャードの
+リーダーで行う(`status` でシャードごとのリーダーが分かる)。メンバー変更はノードが持つ
+全シャードに適用される。
 
 ```text
-put <key> <value> | del <key> | get <key> | status | members
-add <id> <addr> <key> | promote <id> | remove <id> | quit
+put <key> <value> | del <key> | get <key> | split <key> <id> | shards
+status | members | add <id> <addr> <key> | promote <id> | remove <id> | quit
 ```
+
+`split m 2` は `m` を含むシャードを `m` で分け、`m` 以降を新シャード `s2` にする
+(ID は今のところ運用者が、過去に使われていないものを指定する)。`shards` は
+このノードが持つシャードの範囲とエポックを表示する。
 
 4 台目を足すには、既存ノードを `--peer` に並べて `--found` なしで起動し、リーダーで
 `add 4 127.0.0.1:7004 <4 の公開鍵>` を実行する。スナップショットとログで追いついた後に

@@ -498,3 +498,91 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    /// Splitting a state leaves each half reading, at every readable
+    /// version, what the whole read for the keys on its side.
+    #[test]
+    fn splitting_keeps_every_readable_version(
+        kept in 1..5_u64,
+        batches in proptest::collection::vec(writes(), 1..12),
+        at in any::<u8>(),
+    ) {
+        let mut whole = KvState::new(retention(kept));
+        for (version, writes) in (1_u64..).zip(&batches) {
+            let _outcome = whole.apply(Version::new(version), Command::Kv(batch(writes)));
+        }
+        let mut left = whole.clone();
+        let right = left.split_off(&[at]);
+        let keys = |state: &KvState| -> Vec<Vec<u8>> { state.keys().map(<[u8]>::to_vec).collect() };
+        let (below, above): (Vec<_>, Vec<_>) =
+            keys(&whole).into_iter().partition(|key| key.as_slice() < [at].as_slice());
+        prop_assert_eq!(keys(&left), below, "the keys on the left");
+        prop_assert_eq!(keys(&right), above, "the keys on the right");
+        for half in [&left, &right] {
+            prop_assert_eq!(half.version(), whole.version(), "same version");
+            prop_assert_eq!(half.retention(), whole.retention(), "same retention");
+        }
+        for version in whole.horizon().get()..=whole.version().get() {
+            let version = Version::new(version);
+            let read = |state: &KvState| -> Vec<(Vec<u8>, Vec<u8>)> {
+                state
+                    .view(version)
+                    .unwrap()
+                    .range(Unbounded, Unbounded)
+                    .map(|(key, value)| (key.to_vec(), value.to_vec()))
+                    .collect()
+            };
+            let (below, above): (Vec<_>, Vec<_>) =
+                read(&whole).into_iter().partition(|(key, _)| key.as_slice() < [at].as_slice());
+            prop_assert_eq!(read(&left), below, "left at {}", version);
+            prop_assert_eq!(read(&right), above, "right at {}", version);
+        }
+    }
+}
+
+#[test]
+fn keys_include_the_removed_ones() {
+    let mut state = KvState::default();
+    let write = WriteBatch::new().put("b", "1").put("a", "1");
+    let _put = state.apply(Version::new(1), Command::Kv(write));
+    let _removed = state.apply(Version::new(2), Command::Kv(WriteBatch::new().delete("b")));
+    let keys: Vec<&[u8]> = state.keys().collect();
+    assert_eq!(keys, [b"a".as_slice(), b"b".as_slice()], "in key order");
+}
+
+#[test]
+fn commands_fit_a_span_by_every_key_they_touch() {
+    use crate::span::{End, Span};
+
+    let span = Span::new("b", End::Before(b"m".to_vec())).unwrap();
+    assert!(
+        Command::Kv(WriteBatch::new().put("b", "1").delete("l")).fits(&span),
+        "inside"
+    );
+    assert!(
+        !Command::Kv(WriteBatch::new().put("b", "1").delete("m")).fits(&span),
+        "a write outside"
+    );
+    let txn = |keys: &[&[u8]], ranges: Vec<KeyRange>, writes: WriteBatch| {
+        transaction(1, reading(keys, ranges), writes)
+    };
+    let inside = || KeyRange::new(Included(b"c"), Excluded(b"m"));
+    assert!(
+        txn(&[b"c"], vec![inside()], WriteBatch::new().put("d", "1")).fits(&span),
+        "a transaction inside"
+    );
+    assert!(
+        !txn(&[b"a"], vec![inside()], WriteBatch::new().put("d", "1")).fits(&span),
+        "a read outside"
+    );
+    let beyond = KeyRange::new(Included(b"c"), Unbounded);
+    assert!(
+        !txn(&[b"c"], vec![beyond], WriteBatch::new().put("d", "1")).fits(&span),
+        "a scan outside"
+    );
+    assert!(
+        !txn(&[b"c"], vec![inside()], WriteBatch::new().put("z", "1")).fits(&span),
+        "a write outside"
+    );
+}

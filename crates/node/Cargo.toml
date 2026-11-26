@@ -19,6 +19,7 @@ path = "src/main.rs"
 getrandom = "0.4.3"
 kurator-net.workspace = true
 kurator-raft.workspace = true
+kurator-shard.workspace = true
 kurator-storage.workspace = true
 kurator-wal.workspace = true
 thiserror.workspace = true

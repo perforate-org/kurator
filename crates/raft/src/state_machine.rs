@@ -1,20 +1,22 @@
-//! The replicated state machine: the key-value state in memory, made
+//! The replicated state machine: one shard's state in memory, made
 //! durable by the Raft log and by snapshots.
 
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::{Stream, TryStreamExt as _};
-use kurator_storage::{KvState, Outcome, Version};
+use kurator_shard::{Applied, ShardState, Split};
+use kurator_storage::{Outcome, Version};
 use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
 use parking_lot::Mutex;
 
 use crate::config::{Config, Entry};
 use crate::error::{Error, Result, SnapshotDamage};
+use crate::layout::Home;
+use crate::proposal::Body;
 use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotDir};
-use crate::types::{LogId, SnapshotMeta, StoredMembership};
+use crate::types::{LeaderId, LogId, NodeId, SnapshotMeta, StoredMembership};
 
 /// The state machine of one replica. Clones share the same state.
 #[derive(Debug, Clone)]
@@ -24,23 +26,26 @@ pub struct StateMachine {
 
 #[derive(Debug)]
 struct Machine {
-    state: KvState,
+    state: ShardState,
     applied: Option<LogId>,
     membership: StoredMembership,
     snapshots: SnapshotDir,
     /// The stored snapshot, if there is one.
     current: Option<(SnapshotMeta, SnapshotBytes)>,
+    /// Where the replica lives, and where its splits sow.
+    home: Home,
 }
 
 impl StateMachine {
-    /// Opens the state machine in `dir`, starting from its snapshot. The
-    /// entries after the snapshot come back from the Raft log.
+    /// Opens the state machine of the replica at `home`, starting from its
+    /// snapshot. The entries after the snapshot come back from the Raft
+    /// log.
     ///
     /// # Errors
     ///
     /// When the snapshot is damaged or cannot be read.
-    pub fn open(dir: &Path) -> Result<Self> {
-        let snapshots = SnapshotDir::open(dir)?;
+    pub(crate) fn open(home: Home) -> Result<Self> {
+        let snapshots = SnapshotDir::open(&home.snapshot())?;
         let current = snapshots
             .load()?
             .map(|bytes| {
@@ -57,13 +62,15 @@ impl StateMachine {
                 membership: meta.last_membership.clone(),
                 snapshots,
                 current: Some((meta, bytes)),
+                home,
             },
             None => Machine {
-                state: KvState::default(),
+                state: ShardState::default(),
                 applied: None,
                 membership: StoredMembership::default(),
                 snapshots,
                 current: None,
+                home,
             },
         };
         Ok(Self {
@@ -72,7 +79,7 @@ impl StateMachine {
     }
 
     /// Runs `read` against the state as this replica has applied it.
-    pub fn read<R>(&self, read: impl FnOnce(&KvState) -> R) -> R {
+    pub fn read<R>(&self, read: impl FnOnce(&ShardState) -> R) -> R {
         read(&self.machine.lock().state)
     }
 
@@ -81,23 +88,62 @@ impl StateMachine {
     pub fn applied(&self) -> Option<LogId> {
         self.machine.lock().applied
     }
+
+    /// Whether the replica holds a state at all: one it was seeded with, a
+    /// snapshot it received, or entries it applied. A replica that a
+    /// message created holds none until the leader sends it a snapshot.
+    pub(crate) fn is_initialized(&self) -> bool {
+        let machine = self.machine.lock();
+        machine.applied.is_some() || machine.current.is_some()
+    }
 }
 
 impl Machine {
     /// Applies `entry`. A command applies at the version of its index; an
     /// entry without one leaves the state as it is.
-    fn apply(&mut self, entry: Entry) -> Outcome {
-        self.applied = Some(entry.log_id);
-        match entry.payload {
-            EntryPayload::Normal(proposal) => self
-                .state
-                .apply(Version::new(entry.log_id.index), proposal.into_command()),
-            EntryPayload::Blank => Outcome::Committed(self.state.version()),
+    ///
+    /// A split writes the seed of its new shard before it returns, so the
+    /// seed is on disk before this entry counts as applied.
+    fn apply(&mut self, entry: Entry) -> Result<Applied> {
+        let log_id = entry.log_id;
+        let unchanged = Applied::Data(Outcome::Committed(self.state.kv().version()));
+        let applied = match entry.payload {
+            EntryPayload::Normal(proposal) => match proposal.into_body() {
+                Body::Command(encoded) => self
+                    .state
+                    .apply(Version::new(log_id.index), encoded.into_command()),
+                Body::Split(split, _) => self.split(log_id, &split)?,
+            },
+            EntryPayload::Blank => unchanged,
             EntryPayload::Membership(membership) => {
-                self.membership = StoredMembership::new(Some(entry.log_id), membership);
-                Outcome::Committed(self.state.version())
+                self.membership = StoredMembership::new(Some(log_id), membership);
+                unchanged
             }
-        }
+        };
+        self.applied = Some(log_id);
+        Ok(applied)
+    }
+
+    /// Splits the shard at the entry `log_id` and sows the right half: a
+    /// snapshot of it as of that entry, with this shard's membership. The
+    /// new shard's log starts after the entry, so its versions go on from
+    /// this shard's.
+    fn split(&mut self, log_id: LogId, split: &Split) -> Result<Applied> {
+        let (halves, right) = match self.state.split(split) {
+            Ok(split) => split,
+            Err(shard) => return Ok(Applied::Misrouted(shard)),
+        };
+        let seeded = LogId::new(SEED_LEADER, log_id.index);
+        let meta = SnapshotMeta {
+            last_log_id: Some(seeded),
+            last_membership: StoredMembership::new(
+                Some(seeded),
+                self.membership.membership().clone(),
+            ),
+        };
+        let seed = SnapshotBytes::encode(&meta, &right)?;
+        self.home.sow(halves.right().id(), &seed)?;
+        Ok(Applied::Split(halves))
     }
 
     fn snapshot(&mut self) -> Result<(SnapshotMeta, SnapshotBytes)> {
@@ -127,6 +173,14 @@ impl Machine {
     }
 }
 
+/// The leader a seed's entry is written by: nobody, before the first term.
+/// Any leader of the new shard is in a later term, so its entries come
+/// after the seed's.
+const SEED_LEADER: LeaderId = LeaderId {
+    term: 0,
+    node_id: NodeId::new(0),
+};
+
 impl<C: Config> RaftSnapshotBuilder<C> for StateMachine {
     type SnapshotData = SnapshotBytes;
 
@@ -150,9 +204,9 @@ impl<C: Config> RaftStateMachine<C> for StateMachine {
         Strm: Stream<Item = io::Result<EntryResponder<C>>> + Unpin + OptionalSend,
     {
         while let Some((entry, responder)) = entries.try_next().await? {
-            let outcome = self.machine.lock().apply(entry);
+            let applied = self.machine.lock().apply(entry).map_err(Error::into_io)?;
             if let Some(responder) = responder {
-                responder.send(outcome);
+                responder.send(applied);
             }
         }
         Ok(())

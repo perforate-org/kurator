@@ -1,10 +1,10 @@
 //! The boundary between a replica and whatever carries its messages.
 //!
 //! A [`Transport`] opens a [`Connection`] to a peer, and a connection
-//! turns one [`Request`] into one [`Response`]. [`Network`] adapts any
-//! transport to the network `OpenRaft` drives, so the QUIC transport and
-//! the deterministic simulator plug into a replica the same way and differ
-//! only in how bytes travel.
+//! turns one [`Message`] into one [`Response`]. [`Network`] adapts any
+//! transport to the network `OpenRaft` drives for one shard, so the QUIC
+//! transport and the deterministic simulator plug into a store the same
+//! way and differ only in how bytes travel.
 
 use std::fmt;
 use std::future::Future;
@@ -18,9 +18,10 @@ use openraft::raft::{
 };
 
 use crate::config::Config;
-use crate::rpc::{Refusal, Request, Response};
+use crate::rpc::{Message, Refusal, Request, Response};
 use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{NodeId, Peer, Vote};
+use kurator_shard::ShardId;
 
 /// Why a request got no answer.
 #[derive(Debug)]
@@ -33,8 +34,9 @@ pub enum Failure {
     Timeout,
 }
 
-/// Opens connections to peers.
-pub trait Transport<C: Config>: Send + Sync + 'static {
+/// Opens connections to peers. Clones open connections from the same
+/// endpoint.
+pub trait Transport<C: Config>: Clone + Send + Sync + 'static {
     /// A connection to one peer.
     type Connection: Connection<C>;
 
@@ -43,34 +45,36 @@ pub trait Transport<C: Config>: Send + Sync + 'static {
     fn connect(&self, target: NodeId, peer: &Peer) -> Self::Connection;
 }
 
-/// Carries requests to one peer and brings back its answers.
+/// Carries messages to one peer and brings back its answers.
 pub trait Connection<C: Config>: Send + Sync + 'static {
-    /// Sends `request` and waits at most `deadline` for the response.
+    /// Sends `message` and waits at most `deadline` for the response.
     fn call(
         &mut self,
-        request: Request<C>,
+        message: Message<C>,
         deadline: Duration,
     ) -> impl Future<Output = Result<Response<C>, Failure>> + Send;
 }
 
-/// The network a replica sends through: `transport`, adapted to `OpenRaft`.
+/// The network one shard's replica sends through: `transport`, adapted to
+/// `OpenRaft`, with every request addressed to the shard.
 #[derive(Debug, Clone)]
-pub struct Network<T> {
+pub(crate) struct Network<T> {
     transport: T,
+    shard: ShardId,
 }
 
 impl<T> Network<T> {
-    /// Sends through `transport`.
-    #[must_use]
-    pub const fn new(transport: T) -> Self {
-        Self { transport }
+    /// Sends `shard`'s requests through `transport`.
+    pub(crate) const fn new(transport: T, shard: ShardId) -> Self {
+        Self { transport, shard }
     }
 }
 
-/// The link to one peer.
+/// The link to one peer's replica of a shard.
 #[derive(Debug)]
 pub struct Link<K> {
     target: NodeId,
+    shard: ShardId,
     connection: K,
 }
 
@@ -80,6 +84,7 @@ impl<C: Config, T: Transport<C>> RaftNetworkFactory<C> for Network<T> {
     async fn new_client(&mut self, target: NodeId, node: &Peer) -> Self::Network {
         Link {
             target,
+            shard: self.shard,
             connection: self.transport.connect(target, node),
         }
     }
@@ -128,7 +133,7 @@ impl<K> Link<K> {
     {
         let response = self
             .connection
-            .call(request, deadline)
+            .call(Message::new(self.shard, request), deadline)
             .await
             .map_err(|failure| match failure {
                 Failure::Unreachable(error) => RPCError::Unreachable(Unreachable::from_string(
@@ -240,8 +245,10 @@ mod tests {
     use openraft::raft::{SnapshotResponse, VoteRequest};
     use openraft_rt_sim::SimRuntime;
 
+    use kurator_shard::ShardId;
+
     use super::{Connection, Failure, Network, Transport};
-    use crate::rpc::{Refusal, Request, Response};
+    use crate::rpc::{Message, Refusal, Response};
     use crate::types::testing::peer;
     use crate::types::{NodeId, Peer, Vote};
 
@@ -267,7 +274,7 @@ mod tests {
     impl Connection<Test> for Canned {
         async fn call(
             &mut self,
-            _request: Request<Test>,
+            _message: Message<Test>,
             _deadline: Duration,
         ) -> Result<Response<Test>, Failure> {
             match self {
@@ -291,7 +298,7 @@ mod tests {
                 (Canned::Fail, true),
                 (Canned::Slow, true),
             ] {
-                let mut network = Network::new(canned);
+                let mut network = Network::new(canned, ShardId::FIRST);
                 let mut link = network.new_client(NodeId::new(2), &peer(2)).await;
                 let request = VoteRequest::new(Vote::new(1, NodeId::new(1)), None);
                 let option = RPCOption::new(Duration::from_secs(1));

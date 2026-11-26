@@ -4,7 +4,7 @@
 use openraft::RaftTypeConfig;
 use openraft::impls::ChangeMembers;
 
-use kurator_storage::Outcome;
+use kurator_shard::Applied;
 
 use crate::proposal::Proposal;
 use crate::types::{LeaderId, Membership, NodeId, Peer, Vote};
@@ -24,7 +24,7 @@ pub type Entry = openraft::Entry<LeaderId, Payload>;
 pub trait Config:
     RaftTypeConfig<
         D = Proposal,
-        R = Outcome,
+        R = Applied,
         NodeId = NodeId,
         Node = Peer,
         Term = u64,
@@ -41,7 +41,7 @@ pub trait Config:
 impl<C> Config for C where
     C: RaftTypeConfig<
             D = Proposal,
-            R = Outcome,
+            R = Applied,
             NodeId = NodeId,
             Node = Peer,
             Term = u64,
@@ -73,7 +73,7 @@ macro_rules! declare_config {
             #[non_exhaustive]
             $vis $name:
                 D = $crate::Proposal,
-                R = $crate::Outcome,
+                R = $crate::Applied,
                 NodeId = $crate::NodeId,
                 Node = $crate::Peer,
                 Term = u64,

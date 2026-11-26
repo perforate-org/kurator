@@ -133,7 +133,7 @@ fn run(seed: u64) -> Tally {
             batch.put(account(index), OPENING.to_le_bytes())
         });
         let outcome = cluster.write(opening).await;
-        assert!(matches!(outcome, Outcome::Acked(_)), "opened: {outcome:?}");
+        assert!(outcome == Outcome::Acked, "opened: {outcome:?}");
         let mut tally = Tally::default();
         for _ in 0..STEPS {
             match rng.below(100) {

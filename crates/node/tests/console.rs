@@ -57,16 +57,20 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     let mut banner = String::new();
     let _: usize = stdout.read_line(&mut banner).unwrap();
     assert!(banner.starts_with("ready"), "banner: {banner}");
-    let mut ask = |line: &str| {
+    // Each answer ends in a line break; one that spans `lines` lines comes
+    // back whole.
+    let mut ask = |line: &str, lines: usize| {
         writeln!(stdin, "{line}").unwrap();
         let mut answer = String::new();
-        let _: usize = stdout.read_line(&mut answer).unwrap();
+        for _ in 0..lines {
+            let _: usize = stdout.read_line(&mut answer).unwrap();
+        }
         answer.trim_end().to_owned()
     };
-    assert!(ask("help").starts_with("commands:"), "help");
+    assert!(ask("help", 1).starts_with("commands:"), "help");
     let started = Instant::now();
     loop {
-        let answer = ask("put greeting hello");
+        let answer = ask("put greeting hello", 1);
         if answer.starts_with("ok at") {
             break;
         }
@@ -76,13 +80,37 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(ask("get greeting"), "hello", "read back");
-    assert_eq!(ask("get missing"), "(none)", "absent");
-    assert!(ask("members").starts_with("voter 1 127.0.0.1:"), "members");
+    assert_eq!(ask("get greeting", 1), "hello", "read back");
+    assert_eq!(ask("get missing", 1), "(none)", "absent");
+    assert_eq!(ask("shards", 1), "s1 [, ..) at e0", "one shard");
+    let members = ask("members", 2);
     assert!(
-        ask("promote 7").starts_with("error: n7 cannot vote yet"),
+        members.starts_with("s1 [, ..) at e0\nvoter 1 127.0.0.1:"),
+        "members: {members}"
+    );
+    assert!(
+        ask("promote 7", 1).starts_with("error on s1: n7 cannot vote yet"),
         "a stranger cannot be promoted"
     );
+    assert_eq!(
+        ask("split m 2", 1),
+        "ok: s1 [, m) at e1 | s2 [m, ..) at e1",
+        "split"
+    );
+    let split = Instant::now();
+    loop {
+        let answer = ask("put melon green", 1);
+        if answer.starts_with("ok at") {
+            break;
+        }
+        assert!(
+            split.elapsed() < Duration::from_secs(20),
+            "the new shard never elected a leader: {answer}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(ask("get melon", 1), "green", "read from the new shard");
+    assert_eq!(ask("get greeting", 1), "hello", "still in the first");
     writeln!(stdin, "quit").unwrap();
     assert!(node.wait().unwrap().success(), "quits cleanly");
     let mut rest = String::new();

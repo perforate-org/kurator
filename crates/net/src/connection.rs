@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_raft::{Connection, Failure, NodeId, Peer, Request, Response, Transport};
+use kurator_raft::{Connection, Failure, Message, NodeId, Peer, Response, Transport};
 use quinn::crypto::rustls::QuicClientConfig;
 
 use crate::Tokio;
@@ -118,10 +118,10 @@ impl QuicLink {
 impl Connection<Tokio> for QuicLink {
     async fn call(
         &mut self,
-        request: Request<Tokio>,
+        message: Message<Tokio>,
         deadline: Duration,
     ) -> Result<Response<Tokio>, Failure> {
-        let bytes = request.encode().map_err(Failure::Unreachable)?;
+        let bytes = message.encode().map_err(Failure::Unreachable)?;
         let reply = match tokio::time::timeout(deadline, self.exchange(&bytes)).await {
             Ok(Ok(reply)) => reply,
             Ok(Err(error)) => {

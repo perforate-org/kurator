@@ -44,6 +44,7 @@ mod codec;
 mod config;
 mod error;
 mod identity;
+mod layout;
 mod log_store;
 mod network;
 mod proposal;
@@ -51,20 +52,22 @@ mod replica;
 mod rpc;
 mod snapshot;
 mod state_machine;
+mod store;
 mod types;
 
 pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
 pub use identity::{KeyPurpose, NodeSecret};
-pub use kurator_storage::Outcome;
+pub use kurator_shard::Applied;
 pub use log_store::LogStore;
-pub use network::{Connection, Failure, Link, Network, Transport};
+pub use network::{Connection, Failure, Link, Transport};
 pub use openraft;
 pub use proposal::Proposal;
-pub use replica::{Inbox, Member, Replica, Role, Status, Txn};
-pub use rpc::{Refusal, Request, Response};
+pub use replica::{Member, Replica, Role, Status, Txn};
+pub use rpc::{Message, Refusal, Request, Response};
 pub use snapshot::{Snapshot, SnapshotBytes};
 pub use state_machine::StateMachine;
+pub use store::{Inbox, Memberships, Store};
 pub use types::{
     LeaderId, LogId, Membership, NodeId, Peer, Progress, SnapshotMeta, StoredMembership, Vote,
 };

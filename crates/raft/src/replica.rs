@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::ops::Bound;
-use std::path::Path;
 use std::sync::Arc;
 
-use kurator_storage::{Command, Draft, KeyValue, KvState, Version, WriteBatch};
+use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
+use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
 use openraft::raft::ClientWriteResponse;
@@ -16,6 +16,7 @@ use openraft::{Raft, RaftNetworkFactory, ReadPolicy, ServerState};
 use crate::config::{Config, MembershipEdit};
 use crate::error::{Error, Result};
 use crate::identity::{KeyPurpose, NodeSecret};
+use crate::layout::Home;
 use crate::log_store::LogStore;
 use crate::proposal::Proposal;
 use crate::rpc::{Refusal, Request, Response};
@@ -57,8 +58,9 @@ impl Member {
     }
 }
 
-/// One Raft node: a [`LogStore`] in `<dir>/log` and a [`StateMachine`]
-/// whose snapshot is in `<dir>/snapshot`.
+/// One node's replica of one shard: a [`LogStore`] and a
+/// [`StateMachine`], in the shard's directory of a
+/// [`Store`](crate::Store).
 ///
 /// A write returns once a quorum holds it durably: every replica syncs its
 /// log before it acknowledges entries, and the leader syncs its own before
@@ -66,6 +68,7 @@ impl Member {
 #[derive(Debug)]
 pub struct Replica<C: Config> {
     id: NodeId,
+    shard: ShardId,
     raft: Raft<C, StateMachine>,
     state: StateMachine,
 }
@@ -143,15 +146,13 @@ impl Status {
 }
 
 impl<C: Config> Replica<C> {
-    /// Opens the replica `member` in `dir`, recovering its log and state,
-    /// and starts it. Other replicas are reached through `network`.
-    ///
-    /// # Errors
-    ///
-    /// When the log or the snapshot is damaged, and when Raft cannot start.
-    pub async fn open<N>(
-        member: Member,
-        dir: &Path,
+    /// Opens `member`'s replica of `shard` at `home`, recovering its log
+    /// and state, and starts it. Other replicas are reached through
+    /// `network`.
+    pub(crate) async fn open<N>(
+        member: &Member,
+        shard: ShardId,
+        home: Home,
         config: Arc<openraft::Config>,
         network: N,
     ) -> Result<Self>
@@ -160,15 +161,16 @@ impl<C: Config> Replica<C> {
         N::Network: NetSnapshot<C, SnapshotData = SnapshotBytes>,
     {
         let log = LogStore::open(
-            &dir.join("log"),
+            &home.log(),
             member.secret.signing_key(KeyPurpose::WalSigning),
         )?;
-        let state = StateMachine::open(&dir.join("snapshot"))?;
+        let state = StateMachine::open(home)?;
         let raft = Raft::new(member.id, config, network, log, state.clone())
             .await
             .map_err(stopped)?;
         Ok(Self {
             id: member.id,
+            shard,
             raft,
             state,
         })
@@ -176,11 +178,10 @@ impl<C: Config> Replica<C> {
 
     /// Makes `voters` the first membership of a new cluster. Call it on one
     /// replica, once.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Initialized`] when this replica already has a log.
-    pub async fn initialize(&self, voters: impl IntoIterator<Item = (NodeId, Peer)>) -> Result<()> {
+    pub(crate) async fn initialize(
+        &self,
+        voters: impl IntoIterator<Item = (NodeId, Peer)>,
+    ) -> Result<()> {
         let members: BTreeMap<NodeId, Peer> = voters.into_iter().collect();
         self.raft
             .initialize(members)
@@ -200,9 +201,58 @@ impl<C: Config> Replica<C> {
     /// [`Error::NotLeader`] when this replica cannot take writes, and
     /// [`Error::Discarded`] when it lost leadership after logging the
     /// write: then nobody knows whether the write commits.
+    ///
+    /// [`Error::Misrouted`] when a key is not in the shard: it split
+    /// meanwhile. Nothing is written.
     pub async fn write(&self, batch: WriteBatch) -> Result<LogId> {
         let proposal = Proposal::new(Command::Kv(batch))?;
-        written(self.raft.client_write(proposal).await).map(|response| response.log_id)
+        let response = written(self.raft.client_write(proposal).await)?;
+        let _version: Version = version(response.data)?;
+        Ok(response.log_id)
+    }
+
+    /// Splits the shard at `at`: once the split applies, the keys from `at`
+    /// on belong to the new shard `right`, replicated by the same members.
+    /// Returns the two halves.
+    ///
+    /// The split is for the shard as this replica last applied it; if the
+    /// shard split since, or `at` is not strictly inside its span, nothing
+    /// changes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Misrouted`] when the split does not apply, and otherwise
+    /// as [`Replica::write`].
+    pub(crate) async fn split(&self, at: &[u8], right: ShardId) -> Result<Halves> {
+        let epoch = self.shard().epoch();
+        let proposal = Proposal::split(Split::new(at, right, epoch))?;
+        let response = written(self.raft.client_write(proposal).await)?;
+        match response.data {
+            Applied::Split(halves) => Ok(halves),
+            Applied::Misrouted(shard) => Err(misrouted(shard)),
+            Applied::Data(_) | _ => Err(Error::Raft("a split applied as a command".into())),
+        }
+    }
+
+    /// The shard as this replica last applied it.
+    #[must_use]
+    pub fn shard(&self) -> Shard {
+        self.state.read(|state| state.shard().clone())
+    }
+
+    /// The id of the shard it replicates.
+    #[must_use]
+    pub const fn shard_id(&self) -> ShardId {
+        self.shard
+    }
+
+    /// Whether the replica holds a state yet: one it was seeded with, a
+    /// snapshot it received, or entries it applied. A replica that a
+    /// message opened holds none until the leader sends it a snapshot, and
+    /// until then [`Replica::shard`] does not describe its shard.
+    #[must_use]
+    pub fn is_initialized(&self) -> bool {
+        self.state.is_initialized()
     }
 
     /// Starts a transaction that reads the newest version this cluster
@@ -224,6 +274,7 @@ impl<C: Config> Replica<C> {
         let read_at = self.read(KvState::version).await?;
         Ok(Txn {
             replica: self,
+            shard: self.shard(),
             draft: Draft::new(read_at),
         })
     }
@@ -303,10 +354,16 @@ impl<C: Config> Replica<C> {
         written(self.raft.change_membership(edit, false).await).map(|response| response.log_id)
     }
 
-    /// The membership this replica knows of, committed or not.
+    /// The membership this replica knows of, committed or not: who may
+    /// send to it.
     #[must_use]
     pub fn membership(&self) -> Membership {
-        self.inbox().membership()
+        self.raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .membership()
+            .clone()
     }
 
     fn not_leader(&self) -> Error {
@@ -317,7 +374,8 @@ impl<C: Config> Replica<C> {
 
     /// Runs `read` against a state that reflects every write that returned
     /// before this call: the leader confirms with a quorum that it still
-    /// leads, and waits until it applied everything committed by then.
+    /// leads, and waits until it applied everything committed by then. The
+    /// state holds the keys of the shard's span only.
     ///
     /// # Errors
     ///
@@ -336,12 +394,12 @@ impl<C: Config> Replica<C> {
                 RaftError::APIError(other) => Error::Raft(Box::new(other)),
                 RaftError::Fatal(fatal) => stopped(fatal),
             })?;
-        Ok(self.state.read(read))
+        Ok(self.state.read(|state| read(state.kv())))
     }
 
-    /// Runs `read` against the state as this replica applied it, which may
-    /// lag the cluster.
-    pub fn read_local<R>(&self, read: impl FnOnce(&KvState) -> R) -> R {
+    /// Runs `read` against the shard's state as this replica applied it,
+    /// which may lag the cluster.
+    pub fn read_local<R>(&self, read: impl FnOnce(&ShardState) -> R) -> R {
         self.state.read(read)
     }
 
@@ -374,46 +432,17 @@ impl<C: Config> Replica<C> {
         self.id
     }
 
-    /// Where messages from other replicas are delivered.
-    #[must_use]
-    pub fn inbox(&self) -> Inbox<C> {
-        Inbox {
-            raft: self.raft.clone(),
-        }
-    }
-
     /// Stops the replica. Everything it acknowledged is already durable, so
     /// stopping and crashing leave the same files behind.
-    ///
-    /// # Errors
-    ///
-    /// When the Raft core panicked.
-    pub async fn shutdown(self) -> Result<()> {
+    pub(crate) async fn shutdown(&self) -> Result<()> {
         self.raft
             .shutdown()
             .await
             .map_err(|error| Error::Stopped(error.to_string().into()))
     }
-}
 
-/// Delivers messages from other replicas to one replica. Clones deliver to
-/// the same replica.
-#[derive(Debug)]
-pub struct Inbox<C: Config> {
-    raft: Raft<C, StateMachine>,
-}
-
-impl<C: Config> Clone for Inbox<C> {
-    fn clone(&self) -> Self {
-        Self {
-            raft: self.raft.clone(),
-        }
-    }
-}
-
-impl<C: Config> Inbox<C> {
-    /// Handles `request` from another replica.
-    pub async fn handle(&self, request: Request<C>) -> Response<C> {
+    /// Handles `request` from another replica of the shard.
+    pub(crate) async fn handle(&self, request: Request<C>) -> Response<C> {
         let response = match request {
             Request::AppendEntries(request) => self
                 .raft
@@ -431,18 +460,6 @@ impl<C: Config> Inbox<C> {
         };
         response.unwrap_or(Response::Refused(Refusal::Stopped))
     }
-
-    /// The membership the replica knows of, committed or not: who may send
-    /// to it.
-    #[must_use]
-    pub fn membership(&self) -> Membership {
-        self.raft
-            .metrics()
-            .borrow_watched()
-            .membership_config
-            .membership()
-            .clone()
-    }
 }
 
 /// A transaction on a replicated state: it reads one version from its
@@ -454,6 +471,8 @@ impl<C: Config> Inbox<C> {
 #[must_use = "a transaction writes nothing until it commits"]
 pub struct Txn<'replica, C: Config> {
     replica: &'replica Replica<C>,
+    /// The shard as the transaction began: it reads only keys in its span.
+    shard: Shard,
     draft: Draft,
 }
 
@@ -468,24 +487,33 @@ impl<C: Config> Txn<'_, C> {
     ///
     /// # Errors
     ///
+    /// [`Error::Misrouted`] when `key` is not in the shard, and
     /// [`Error::Storage`] when so many writes committed since the
     /// transaction began that its version is forgotten.
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let value = self.replica.state.read(|state| self.draft.get(state, key));
+        if !self.shard.span().contains(key) {
+            return Err(misrouted(self.shard.clone()));
+        }
+        let value = self
+            .replica
+            .state
+            .read(|state| self.draft.get(state.kv(), key));
         Ok(value.map_err(kurator_storage::Error::from)?)
     }
 
-    /// The entries between `start` and `end` in key order, with the
-    /// transaction's own writes applied.
+    /// The entries between `start` and `end` that the shard holds, in key
+    /// order, with the transaction's own writes applied.
     ///
     /// # Errors
     ///
-    /// As [`Txn::get`].
+    /// [`Error::Storage`] when the version is forgotten, as for
+    /// [`Txn::get`].
     pub fn range(&mut self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<KeyValue>> {
+        let (start, end) = self.shard.span().clip(start, end);
         let entries = self
             .replica
             .state
-            .read(|state| self.draft.range(state, start, end));
+            .read(|state| self.draft.range(state.kv(), start, end));
         Ok(entries.map_err(kurator_storage::Error::from)?)
     }
 
@@ -508,7 +536,8 @@ impl<C: Config> Txn<'_, C> {
     /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when a
     /// write after the read version touched what it read: it wrote
     /// nothing, and running it again may succeed. Otherwise as
-    /// [`Replica::write`].
+    /// [`Replica::write`]; [`Error::Misrouted`] means the shard split
+    /// before the transaction applied, and a key it touched moved.
     pub async fn commit(self) -> Result<Version> {
         let read_at = self.draft.read_at();
         let Some(transaction) = self.draft.into_transaction() else {
@@ -516,10 +545,25 @@ impl<C: Config> Txn<'_, C> {
         };
         let proposal = Proposal::new(Command::Txn(transaction))?;
         let response = written(self.replica.raft.client_write(proposal).await)?;
-        Ok(response
-            .data
-            .into_result()
-            .map_err(kurator_storage::Error::from)?)
+        version(response.data)
+    }
+}
+
+/// The version a command's writes made, or why it made none.
+fn version(applied: Applied) -> Result<Version> {
+    match applied {
+        Applied::Data(Outcome::Committed(version)) => Ok(version),
+        Applied::Data(Outcome::Aborted(abort)) => Err(kurator_storage::Error::from(abort).into()),
+        Applied::Misrouted(shard) => Err(misrouted(shard)),
+        Applied::Split(_) | Applied::Data(_) | _ => {
+            Err(Error::Raft("a command applied as a split".into()))
+        }
+    }
+}
+
+fn misrouted(shard: Shard) -> Error {
+    Error::Misrouted {
+        shard: Box::new(shard),
     }
 }
 
