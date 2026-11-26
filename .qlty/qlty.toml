@@ -1,0 +1,46 @@
+config_version = "0"
+
+exclude_patterns = ["**/target/**", "**/mutants.out*/**"]
+test_patterns = ["**/tests/**", "**/benches/**"]
+
+[[source]]
+name = "default"
+default = true
+
+# Rust formatting and lints are gated by `cargo fmt` and `cargo clippy` with
+# the workspace configuration (qlty's own runs ignore it), so qlty adds
+# duplication and complexity smells and checks the files cargo does not see.
+[[plugin]]
+name = "actionlint"
+
+[[plugin]]
+name = "markdownlint"
+
+[[plugin]]
+name = "trufflehog"
+
+[[plugin]]
+name = "osv-scanner"
+
+[smells]
+mode = "block"
+
+[smells.identical_code]
+enabled = true
+threshold = 12
+
+[smells.similar_code]
+enabled = true
+threshold = 12
+
+[smells.function_parameters]
+enabled = true
+threshold = 4
+
+[smells.nested_control_flow]
+enabled = true
+threshold = 4
+
+[smells.function_complexity]
+enabled = true
+threshold = 12

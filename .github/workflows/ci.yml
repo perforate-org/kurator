@@ -1,0 +1,113 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy + test + doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      - run: cargo doc --workspace --no-deps --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - name: Unused dependencies
+        run: cargo machete
+
+  deslop:
+    name: deslop-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install && rustup component add rust-analyzer rust-src
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked deslop-please
+      - run: deslop-please
+
+  qlty:
+    name: qlty
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install qlty
+        run: |
+          curl -fsSL https://qlty.sh | bash
+          echo "$HOME/.qlty/bin" >> "$GITHUB_PATH"
+      - run: qlty check --all --no-progress --trigger build
+      - run: qlty smells --all
+
+  kani:
+    name: kani proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: model-checking/kani-github-action@v1
+        with:
+          args: --workspace
+
+  mutants:
+    name: mutation testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Mutants in the diff (pull requests)
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff "origin/${{ github.base_ref }}.." > pr.diff
+          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 60 -j 2
+      - name: All mutants (main)
+        if: github.event_name != 'pull_request'
+        run: cargo mutants --workspace --no-shuffle --timeout 60 -j 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants.out
+          path: mutants.out

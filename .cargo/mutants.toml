@@ -1,0 +1,17 @@
+# Mutants that no in-process test can observe. Each needs a reason.
+exclude_re = [
+    # Kani harnesses and the checksum stand-in they use run under `cargo kani`.
+    "proofs::",
+    # Directory syncs only matter after power loss.
+    "replace sync_dir -> io::Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    # Joining the commit thread on drop is not observable: writes are
+    # synchronous, so none are queued when the handle drops.
+    "<impl Drop for GroupCommit>::drop",
+    # The snapshot writer is flushed through `BufWriter`, which also flushes
+    # on drop; only a failing disk could tell the difference.
+    "Checksummed<W>>::flush",
+    # Failing to delete a file for a reason other than "not found" needs a
+    # broken file system.
+    "match guard error.kind\\(\\) != io::ErrorKind::NotFound with false",
+]
+timeout_multiplier = 3.0
