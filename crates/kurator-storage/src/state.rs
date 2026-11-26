@@ -64,7 +64,7 @@ impl KvState {
     }
 
     /// Every entry, in key order.
-    #[must_use]
+    #[must_use = "iterators do nothing unless consumed"]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> {
         self.entries
             .iter()

@@ -1,0 +1,5 @@
+# Pinned so that lints behave the same locally and in CI; bump deliberately.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
