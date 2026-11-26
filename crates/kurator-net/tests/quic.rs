@@ -125,7 +125,8 @@ async fn write(nodes: &BTreeMap<u64, Node>, key: &str) {
 
 /// How long a whole test may take: a broken replica hangs instead of
 /// failing, and should fail.
-const TEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// A passing run takes well under a second.
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 async fn within(test: impl Future<Output = ()>) {
     tokio::time::timeout(TEST_TIMEOUT, test)
