@@ -3,11 +3,13 @@
 //! partitions, and nodes joining and leaving.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
 use kurator_raft::openraft::{self, AsyncRuntime as _, SnapshotPolicy};
 use kurator_raft::{
     Error, Member, Membership, NodeId, NodeSecret, Peer, Progress, Replica, Role, Status, Store,
@@ -115,9 +117,6 @@ pub struct Cluster {
     up: BTreeMap<NodeId, SimStore>,
     /// Where the client thinks each key is.
     map: Mutex<ShardMap>,
-    /// The id the next split names its new shard. Ids are never reused,
-    /// even when a split's outcome is unknown.
-    next_shard: u64,
 }
 
 /// How long a joining node may take to catch up before it gives up.
@@ -164,7 +163,6 @@ impl Cluster {
             members,
             up: BTreeMap::new(),
             map: Mutex::new(ShardMap::new()),
-            next_shard: ShardId::FIRST.get().saturating_add(1),
         };
         for id in cluster.ids() {
             cluster.restart(id).await?;
@@ -279,10 +277,16 @@ impl Cluster {
     }
 
     /// Splits the shard that holds `at`, so that the keys from `at` on
-    /// move to a new shard. `Rejected` when `at` is where a shard starts.
-    pub async fn split(&mut self, at: &[u8]) -> Outcome {
-        let right = ShardId::new(self.next_shard);
-        self.next_shard = self.next_shard.saturating_add(1);
+    /// move to a new shard, whose id the meta shard allocates. `Rejected`
+    /// when `at` is where a shard starts, or no id could be had; an id
+    /// allocated for a split that then fails is not handed out again.
+    pub async fn split(&self, at: &[u8]) -> Outcome {
+        let Some(right) = self
+            .on_meta(|meta| async move { allocate(&meta).await })
+            .await
+        else {
+            return Outcome::Rejected;
+        };
         self.submit(Op::Split {
             at: at.to_vec(),
             right,
@@ -324,13 +328,22 @@ impl Cluster {
     ///
     /// When the new node cannot start.
     pub async fn add_learner(&mut self, id: NodeId) -> Result<Outcome, SimError> {
-        let joining = member(id);
-        let peer = peer(&joining);
-        let _: Option<Member> = self.members.insert(id, joining);
-        self.restart(id).await?;
+        self.add_node(id).await?;
+        let peer = peer(&member(id));
         Ok(self
             .every_shard(|shard| Op::AddLearner(shard, id, peer.clone()))
             .await)
+    }
+
+    /// Starts the new node `id`, empty and in no shard, for replicas to
+    /// move to. [`Cluster::settle`] forgets it if none did.
+    ///
+    /// # Errors
+    ///
+    /// When the new node cannot start.
+    pub async fn add_node(&mut self, id: NodeId) -> Result<(), SimError> {
+        let _: Option<Member> = self.members.insert(id, member(id));
+        self.restart(id).await
     }
 
     /// Asks the leader of every shard to make the learner `id` a voter.
@@ -339,14 +352,47 @@ impl Cluster {
         self.every_shard(|shard| Op::Promote(shard, id)).await
     }
 
-    /// Takes `id` out of every shard. Once every leader acknowledges the
-    /// change, `id` is shut down and forgotten.
+    /// Moves the replica of `shard` on `from` to `to`, a node already in
+    /// the cluster, the way an operator would: `to` joins the shard as a
+    /// learner, is promoted once it caught up, and `from` is taken out.
+    /// `from`'s replica stays behind, unused. `Rejected` when `to` is in
+    /// the shard's membership already, or the shard has no leader.
+    pub async fn move_replica(&self, shard: ShardId, from: NodeId, to: NodeId) -> Outcome {
+        let held = self
+            .leader_replica(shard)
+            .map(|leader| leader.membership().get_node(&to).is_some());
+        if held != Some(false) {
+            return Outcome::Rejected;
+        }
+        let added = self
+            .submit(Op::AddLearner(shard, to, peer(&member(to))))
+            .await;
+        if added != Outcome::Acked {
+            return added;
+        }
+        let promoted = SimRuntime::timeout(CATCH_UP_TIMEOUT, async {
+            loop {
+                match self.submit(Op::Promote(shard, to)).await {
+                    Outcome::Rejected => SimRuntime::sleep(CATCH_UP_POLL).await,
+                    other @ (Outcome::Acked | Outcome::Unknown) => return other,
+                }
+            }
+        });
+        match promoted.await.unwrap_or(Outcome::Rejected) {
+            Outcome::Acked => self.submit(Op::Remove(shard, from)).await,
+            other @ (Outcome::Rejected | Outcome::Unknown) => other,
+        }
+    }
+
+    /// Takes `id` out of every shard that holds it, the meta shard among
+    /// them. Once every leader acknowledges the change, `id` is shut down
+    /// and forgotten.
     ///
     /// # Errors
     ///
     /// When the removed node fails to stop.
     pub async fn leave(&mut self, id: NodeId) -> Result<Outcome, SimError> {
-        let outcome = self.every_shard(|shard| Op::Remove(shard, id)).await;
+        let outcome = self.holding(id, |shard| Op::Remove(shard, id)).await;
         self.left(id, outcome).await
     }
 
@@ -372,7 +418,13 @@ impl Cluster {
     /// a leader.
     #[must_use]
     pub fn voters(&self) -> Option<Vec<NodeId>> {
-        let leader = self.leader_replica(ShardId::FIRST)?;
+        self.voters_of(ShardId::FIRST)
+    }
+
+    /// The voters of `shard`, as [`Cluster::voters`] finds them.
+    #[must_use]
+    pub fn voters_of(&self, shard: ShardId) -> Option<Vec<NodeId>> {
+        let leader = self.leader_replica(shard)?;
         Some(leader.membership().voter_ids().collect())
     }
 
@@ -456,8 +508,8 @@ impl Cluster {
         for _ in 0..60 {
             self.refresh().await;
             let mut committed = true;
-            for shard in self.shards() {
-                committed &= self.confirm(shard.id()).await;
+            for shard in self.groups() {
+                committed &= self.confirm(shard).await;
             }
             if committed {
                 break;
@@ -465,46 +517,35 @@ impl Cluster {
             SimRuntime::sleep(Duration::from_millis(500)).await;
         }
         self.remove_strays().await;
-        let memberships = self.memberships();
-        let outsiders: Vec<NodeId> = self
-            .ids()
-            .into_iter()
-            .filter(|id| {
-                memberships
-                    .values()
-                    .all(|membership| membership.get_node(id).is_none())
-            })
-            .collect();
-        for id in outsiders {
-            self.forget(id).await?;
-        }
         for _ in 0..600 {
             if let Some(garbled) = self.network.garbled() {
                 return Err(garbled.into());
             }
             // A split whose outcome was unknown may apply only now.
             self.refresh().await;
-            if self.converged() {
+            self.forget_outsiders().await?;
+            if self.converged() && self.registered().await {
                 return Ok(());
             }
             SimRuntime::sleep(Duration::from_millis(100)).await;
         }
         let statuses = self
-            .shards()
+            .groups()
             .into_iter()
             .map(|shard| {
                 let statuses = self
-                    .replicas(shard.id())
+                    .replicas(shard)
                     .map(|(id, replica)| (id, replica.status()))
                     .collect();
-                (shard.id(), statuses)
+                (shard, statuses)
             })
             .collect();
         Err(SimError::Unsettled(statuses))
     }
 
     /// What each node that is up holds: its replica of every shard whose
-    /// membership, as the shard's leader knows it, includes the node.
+    /// membership, as the shard's leader knows it, includes the node. The
+    /// meta shard holds no keys of the cluster's and is left out.
     #[must_use]
     pub fn states(&self) -> BTreeMap<NodeId, Holdings> {
         let memberships = self.memberships();
@@ -513,6 +554,7 @@ impl Cluster {
             .map(|(id, store)| {
                 let held = store.replicas().into_iter().filter(|replica| {
                     replica.is_initialized()
+                        && replica.shard_id() != ShardId::META
                         && memberships
                             .get(&replica.shard_id())
                             .is_some_and(|membership| membership.get_node(id).is_some())
@@ -563,16 +605,50 @@ impl Cluster {
             .map(|(_, replica)| replica)
     }
 
-    /// The membership of each shard's leader, once it committed it.
+    /// The meta shard, then every shard the client knows of.
+    fn groups(&self) -> Vec<ShardId> {
+        std::iter::once(ShardId::META)
+            .chain(self.map.lock().iter().map(Shard::id))
+            .collect()
+    }
+
+    /// The membership of each shard's leader, the meta shard's among them,
+    /// once it committed it. A leader that removed itself steps down: its
+    /// shard has no leader yet.
     fn memberships(&self) -> BTreeMap<ShardId, Membership> {
-        self.shards()
+        self.groups()
             .into_iter()
             .filter_map(|shard| {
-                let membership = self.leader_replica(shard.id())?.membership();
+                let leader = self.leader_of(shard)?;
+                let membership = self.leader_replica(shard)?.membership();
                 // Joint configs exist only while a change is in flight.
-                (membership.get_joint_config().len() == 1).then_some((shard.id(), membership))
+                let settled = membership.get_joint_config().len() == 1
+                    && membership.voter_ids().any(|voter| voter == leader);
+                settled.then_some((shard, membership))
             })
             .collect()
+    }
+
+    /// Forgets the nodes that no shard's membership holds, once every
+    /// shard has a leader to tell.
+    async fn forget_outsiders(&mut self) -> Result<(), SimError> {
+        let memberships = self.memberships();
+        if memberships.len() != self.groups().len() {
+            return Ok(());
+        }
+        let outsiders: Vec<NodeId> = self
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                memberships
+                    .values()
+                    .all(|membership| membership.get_node(id).is_none())
+            })
+            .collect();
+        for id in outsiders {
+            self.forget(id).await?;
+        }
+        Ok(())
     }
 
     /// Shuts `id` down and forgets it.
@@ -587,10 +663,9 @@ impl Cluster {
     /// shard's membership applied the same last entry of it as the leader.
     fn converged(&self) -> bool {
         let memberships = self.memberships();
-        let shards = self.shards();
         self.up.len() == self.members.len()
             && self.mapped(&memberships)
-            && memberships.len() == shards.len()
+            && memberships.len() == self.groups().len()
             && memberships.iter().all(|(shard, membership)| {
                 let applied: Vec<_> = self
                     .replicas(*shard)
@@ -613,6 +688,7 @@ impl Cluster {
                 .iter()
                 .filter(|replica| {
                     replica.is_initialized()
+                        && replica.shard_id() != ShardId::META
                         && memberships
                             .get(&replica.shard_id())
                             .is_none_or(|membership| membership.get_node(id).is_some())
@@ -621,31 +697,154 @@ impl Cluster {
         })
     }
 
-    /// Learns where every shard is from the replicas that are up: the
-    /// newest epoch of each shard wins. The map stays as it was while the
-    /// replicas do not yet tile every key.
+    /// Learns where every shard is from the meta shard, after the leader
+    /// of every shard reported where it is, as a heartbeat would: the
+    /// registry keeps the newest placement of each. The map stays as it
+    /// was while the registry does not tile every key, or is behind a
+    /// split the client saw.
     async fn refresh(&self) {
-        let mut seen = Vec::new();
         for store in self.up.values() {
-            if store.plant().await.is_ok() {
-                seen.extend(
-                    store
-                        .replicas()
-                        .into_iter()
-                        .filter(|replica| replica.is_initialized())
-                        .map(|replica| replica.shard()),
-                );
+            let _planted: Result<(), Error> = store.plant().await;
+        }
+        let Some(recorded) = self.registry().await else {
+            return;
+        };
+        let mut changed = false;
+        for placement in self.heartbeats() {
+            // The first shard's founding record is no report: one at its
+            // first membership replaces it.
+            let known = recorded.placement(placement.id());
+            if known.is_none_or(|known| known != &placement && !known.supersedes(&placement)) {
+                changed |= self.report(&placement).await;
             }
         }
-        let mut newest: BTreeMap<ShardId, Shard> = BTreeMap::new();
-        for shard in seen {
-            let known = newest.get(&shard.id());
-            if known.is_none_or(|known| known.epoch() < shard.epoch()) {
-                drop(newest.insert(shard.id(), shard));
+        let registry = if changed {
+            self.registry().await
+        } else {
+            Some(recorded)
+        };
+        let Some(map) = registry.and_then(|registry| registry.map()) else {
+            return;
+        };
+        let mut current = self.map.lock();
+        let behind = map.iter().any(|shard| {
+            current
+                .get(shard.id())
+                .is_some_and(|known| known.epoch() > shard.epoch())
+        });
+        if !behind {
+            *current = map;
+        }
+    }
+
+    /// Where each shard is, as the replicas that lead it know it.
+    fn heartbeats(&self) -> Vec<Placement> {
+        self.up
+            .values()
+            .flat_map(SimStore::replicas)
+            .filter(|replica| {
+                replica.is_initialized()
+                    && replica.shard_id() != ShardId::META
+                    && replica.status().role() == Role::Leader
+            })
+            .map(|replica| Placement::of(&replica))
+            .collect()
+    }
+
+    /// Records `placement` in the meta shard: whether the registry took
+    /// it.
+    async fn report(&self, placement: &Placement) -> bool {
+        let reported = self
+            .on_meta(|meta| async move { kurator_meta::report(&meta, placement).await })
+            .await;
+        reported == Some(Reported::Recorded)
+    }
+
+    /// Reports both halves of a split that just applied on `store`.
+    async fn report_split(&self, store: &SimStore, halves: &Halves) {
+        for shard in [halves.left(), halves.right()] {
+            if let Ok(Some(replica)) = store.replica(shard.id()).await {
+                let _recorded: bool = self.report(&Placement::of(&replica)).await;
             }
         }
-        if let Some(map) = ShardMap::from_shards(newest.into_values()) {
-            *self.map.lock() = map;
+    }
+
+    /// The registry as the meta shard's leader holds it, if one answers
+    /// in time.
+    pub async fn registry(&self) -> Option<Registry> {
+        self.on_meta(|meta| async move { kurator_meta::registry(&meta).await })
+            .await
+    }
+
+    /// Whether the registry records every shard the client knows of as
+    /// its leader knows it, and tiles the keys as the client's map does.
+    async fn registered(&self) -> bool {
+        let Some(registry) = self.registry().await else {
+            return false;
+        };
+        let placed = self.shards().iter().all(|shard| {
+            self.leader_replica(shard.id()).is_some_and(|leader| {
+                registry.placement(shard.id()) == Some(&Placement::of(&leader))
+            })
+        });
+        placed && registry.map().as_ref() == Some(&*self.map.lock())
+    }
+
+    /// Runs `run` on the meta shard's leader, following leader hints and
+    /// waiting [`ROUTE_BACKOFF`] between tries; `None` when no leader
+    /// answered within [`ROUTE_TRIES`] or [`CLIENT_TIMEOUT`].
+    async fn on_meta<T, F, Fut>(&self, run: F) -> Option<T>
+    where
+        F: Fn(Arc<Replica<Sim>>) -> Fut + Sync,
+        Fut: Future<Output = kurator_meta::Result<T>> + Send,
+        T: Send,
+    {
+        if self.network.garbled().is_some() {
+            return None;
+        }
+        let tries = async {
+            let mut hint = None;
+            for _ in 0..ROUTE_TRIES {
+                let id = hint
+                    .or_else(|| self.leader_of(ShardId::META))
+                    .or_else(|| self.up.keys().next().copied())?;
+                match self.meta_attempt(id, &run).await {
+                    Ok(value) => return Some(value),
+                    Err(next) => hint = next,
+                }
+                SimRuntime::sleep(ROUTE_BACKOFF).await;
+            }
+            None
+        };
+        // Boxed: the refreshes inside routing nest these futures deeper
+        // than the compiler lays out.
+        SimRuntime::timeout(CLIENT_TIMEOUT, Box::pin(tries))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Runs `run` on `id`'s replica of the meta shard: what it returned,
+    /// or the node to try next.
+    async fn meta_attempt<T, F, Fut>(&self, id: NodeId, run: &F) -> Result<T, Option<NodeId>>
+    where
+        F: Fn(Arc<Replica<Sim>>) -> Fut + Sync,
+        Fut: Future<Output = kurator_meta::Result<T>> + Send,
+        T: Send,
+    {
+        let next = self.next_up(id);
+        let Some(store) = self.up.get(&id) else {
+            return Err(next);
+        };
+        let Ok(Some(meta)) = store.replica(ShardId::META).await else {
+            return Err(next);
+        };
+        match run(meta).await {
+            Ok(value) => Ok(value),
+            Err(MetaError::Raft(Error::NotLeader {
+                leader: Some(leader),
+            })) => Err(Some(leader)),
+            Err(_) => Err(next),
         }
     }
 
@@ -684,14 +883,34 @@ impl Cluster {
         let _stale = self.map.lock().split(halves);
     }
 
-    /// Submits `op` to every shard in turn: `Acked` when every shard
-    /// acknowledged it, otherwise the first other outcome.
+    /// Submits `op` to every shard in turn, the meta shard first: `Acked`
+    /// when every shard acknowledged it, otherwise the first other
+    /// outcome.
     async fn every_shard(&self, op: impl Fn(ShardId) -> Op) -> Outcome {
         // A split whose outcome the client did not learn made a shard it
         // does not know of yet.
         self.refresh().await;
-        for shard in self.shards() {
-            let outcome = self.submit(op(shard.id())).await;
+        self.each(self.groups(), op).await
+    }
+
+    /// Submits `op` to every shard whose membership holds `id`, or whose
+    /// membership is not known.
+    async fn holding(&self, id: NodeId, op: impl Fn(ShardId) -> Op) -> Outcome {
+        self.refresh().await;
+        let memberships = self.memberships();
+        let held = self.groups().into_iter().filter(|shard| {
+            memberships
+                .get(shard)
+                .is_none_or(|membership| membership.get_node(&id).is_some())
+        });
+        self.each(held.collect(), op).await
+    }
+
+    /// Submits `op` to each of `shards` in turn: `Acked` when each
+    /// acknowledged it, otherwise the first other outcome.
+    async fn each(&self, shards: Vec<ShardId>, op: impl Fn(ShardId) -> Op) -> Outcome {
+        for shard in shards {
+            let outcome = self.submit(op(shard)).await;
             if outcome != Outcome::Acked {
                 return outcome;
             }
@@ -779,10 +998,14 @@ impl Cluster {
         let splits = matches!(op, Op::Split { .. });
         let result = match op {
             Op::Write(batch) => replica.write(batch).await.map(drop),
-            Op::Split { at, right } => store
-                .split(shard, &at, right)
-                .await
-                .map(|halves| self.learn(&halves)),
+            Op::Split { at, right } => match store.split(shard, &at, right).await {
+                Ok(halves) => {
+                    self.learn(&halves);
+                    self.report_split(store, &halves).await;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
             Op::AddLearner(_, node, peer) => replica.add_learner(node, peer).await.map(drop),
             Op::Promote(_, node) => replica.promote(node).await.map(drop),
             Op::Remove(_, node) => replica.remove(node).await.map(drop),

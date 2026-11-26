@@ -13,6 +13,7 @@ publish = false
 
 [dependencies]
 kurator-codec.workspace = true
+kurator-meta.workspace = true
 kurator-raft.workspace = true
 kurator-shard.workspace = true
 kurator-storage.workspace = true

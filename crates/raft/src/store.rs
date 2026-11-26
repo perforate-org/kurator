@@ -95,22 +95,30 @@ impl<C: Config, T: Transport<C>> Store<C, T> {
         Ok(store)
     }
 
-    /// Starts a new cluster: opens the replica of [`ShardId::FIRST`],
-    /// which holds every key, with `voters` as its first membership. Call
-    /// it on one node, once.
+    /// Starts a new cluster: opens the replicas of [`ShardId::META`], which
+    /// will hold the registry of every shard, and of [`ShardId::FIRST`],
+    /// which holds every key, each with `voters` as its first membership.
+    /// Call it on one node, once.
     ///
     /// # Errors
     ///
     /// [`Error::Initialized`] when the node already holds a shard.
     pub async fn found(&self, voters: impl IntoIterator<Item = (NodeId, Peer)>) -> Result<()> {
-        let first = {
+        let voters: BTreeMap<NodeId, Peer> = voters.into_iter().collect();
+        let founding = {
             let _opening = self.shared.opening.lock().await;
             if !self.shared.replicas.lock().is_empty() {
                 return Err(Error::Initialized);
             }
-            self.shared.open(ShardId::FIRST).await?
+            [
+                self.shared.open(ShardId::META).await?,
+                self.shared.open(ShardId::FIRST).await?,
+            ]
         };
-        first.initialize(voters).await
+        for replica in founding {
+            replica.initialize(voters.clone()).await?;
+        }
+        Ok(())
     }
 
     /// The node's replica of `shard`, if it holds one.

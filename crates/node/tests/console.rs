@@ -130,18 +130,28 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     }
     assert_eq!(ask("get greeting", 1), "hello", "read back");
     assert_eq!(ask("get missing", 1), "(none)", "absent");
-    assert_eq!(ask("shards", 1), "s1 [, ..) at e0", "one shard");
-    let members = ask("members", 2);
+    // The meta shard elects its own leader.
+    let mut shards = ask("shards", 1);
+    while shards.starts_with("error") && started.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(50));
+        shards = ask("shards", 1);
+    }
+    assert_eq!(shards, "s1 [, ..) at e0 on n1", "one shard");
+    let members = ask("members", 4);
     assert!(
-        members.starts_with("s1 [, ..) at e0\nvoter 1 127.0.0.1:"),
-        "members: {members}"
+        members.starts_with("s0 [, ..) at e0\nvoter 1 127.0.0.1:"),
+        "the meta shard: {members}"
     );
     assert!(
-        ask("promote 7", 1).starts_with("error on s1: n7 cannot vote yet"),
+        members.contains("\ns1 [, ..) at e0\nvoter 1 127.0.0.1:"),
+        "the first shard: {members}"
+    );
+    assert!(
+        ask("promote 7", 1).starts_with("error on s0: n7 cannot vote yet"),
         "a stranger cannot be promoted"
     );
     assert_eq!(
-        ask("split m 2", 1),
+        ask("split m", 1),
         "ok: s1 [, m) at e1 | s2 [m, ..) at e1",
         "split"
     );
@@ -159,6 +169,11 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     }
     assert_eq!(ask("get melon", 1), "green", "read from the new shard");
     assert_eq!(ask("get greeting", 1), "hello", "still in the first");
+    assert_eq!(
+        ask("shards", 2),
+        "s1 [, m) at e1 on n1\ns2 [m, ..) at e1 on n1",
+        "the registry records both halves"
+    );
     assert!(console.quit().is_empty(), "says nothing after quit");
 }
 
@@ -166,7 +181,7 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
 fn a_node_that_holds_no_shard_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let mut console = Console::start(&["--id", "2", "--listen", "127.0.0.1:0"], dir.path());
-    for line in ["get k", "put k v", "del k", "split k 2"] {
+    for line in ["get k", "put k v", "del k", "split k"] {
         assert_eq!(
             console.ask(line, 1),
             "error: no shard on this node holds the key",

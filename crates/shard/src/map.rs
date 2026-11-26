@@ -55,7 +55,7 @@ impl ShardMap {
     }
 
     /// The map of `shards`, or `None` unless they hold every key exactly
-    /// once and their ids differ.
+    /// once and their ids differ. The meta shard is in no map.
     #[must_use]
     pub fn from_shards(shards: impl IntoIterator<Item = Shard>) -> Option<Self> {
         let mut by_start: BTreeMap<Vec<u8>, Shard> = BTreeMap::new();
@@ -66,11 +66,11 @@ impl ShardMap {
             }
         }
         let (_, first) = by_start.pop_first()?;
-        if !first.span().start().is_empty() {
+        if !first.span().start().is_empty() || first.id() == ShardId::META {
             return None;
         }
         let mut end = first.span().end().clone();
-        let mut ids = vec![first.id()];
+        let mut ids = vec![ShardId::META, first.id()];
         for shard in by_start.values() {
             if end != End::Before(shard.span().start().to_vec()) || ids.contains(&shard.id()) {
                 return None;
@@ -274,6 +274,15 @@ mod tests {
         let renamed = Shard::new(shards[0].id(), shards[2].span().clone(), shards[2].epoch());
         let same_id = vec![shards[0].clone(), shards[1].clone(), renamed];
         assert_eq!(ShardMap::from_shards(same_id), None, "an id twice");
+        let meta = [Shard::whole(ShardId::META)];
+        assert_eq!(ShardMap::from_shards(meta), None, "the meta shard alone");
+        let mut with_meta = shards.clone();
+        with_meta[1] = Shard::new(ShardId::META, shards[1].span().clone(), shards[1].epoch());
+        assert_eq!(
+            ShardMap::from_shards(with_meta),
+            None,
+            "the meta shard inside"
+        );
     }
 
     #[test]

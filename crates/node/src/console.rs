@@ -1,14 +1,16 @@
 //! The console a node reads commands from, one per line.
 //!
 //! Reads and writes go to the node's replica of the shard that holds the
-//! key; membership changes go to every shard the node holds.
+//! key; membership changes go to every shard the node holds, the meta
+//! shard among them. A split and `shards` ask the meta shard through this
+//! node's replica of it, which must lead.
 //!
 //! ```text
 //! put <key> <value>        write through this node, which must lead the key's shard
 //! del <key>
 //! get <key>                a linearizable read through the leader
-//! split <key> <id>         split the shard that holds <key> there; the new shard is <id>
-//! shards                   the shards this node holds, with their spans and epochs
+//! split <key>              split the shard that holds <key> there, under an id the meta shard allocates
+//! shards                   every shard the meta shard records, with its span, epoch and replicas
 //! status                   role, term, leader and log positions, by shard
 //! members                  voters and learners with their peers, by shard
 //! add <id> <addr> <key>    add a learner to every shard
@@ -19,8 +21,9 @@
 
 use std::sync::Arc;
 
+use kurator_meta::{Placement, allocate, registry, report};
 use kurator_net::{Replica, Store};
-use kurator_raft::{Membership, NodeId, Peer};
+use kurator_raft::{Membership, NodeId, Peer, Role};
 use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
 
@@ -42,13 +45,8 @@ pub enum Command {
     /// Reads a key.
     Get(String),
     /// Splits the shard that holds a key there.
-    Split {
-        /// Where the new shard starts.
-        at: String,
-        /// The new shard; it must name no shard that ever existed.
-        right: ShardId,
-    },
-    /// Lists the shards.
+    Split(String),
+    /// Lists the shards the registry records.
     Shards,
     /// Shows where each replica stands.
     Status,
@@ -74,7 +72,7 @@ pub enum Reply {
     Quit,
 }
 
-const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k> <id> | shards \
+const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k> | shards \
                     | status | members | add <id> <addr> <key> | promote <id> \
                     | remove <id> | quit";
 
@@ -90,10 +88,7 @@ impl Command {
             },
             ["del", key] => Self::Delete((*key).to_owned()),
             ["get", key] => Self::Get((*key).to_owned()),
-            ["split", at, right] => Self::Split {
-                at: (*at).to_owned(),
-                right: ShardId::new(right.parse().ok()?),
-            },
+            ["split", at] => Self::Split((*at).to_owned()),
             ["shards"] => Self::Shards,
             ["status"] => Self::Status,
             ["members"] => Self::Members,
@@ -128,8 +123,8 @@ pub async fn execute(store: &Store, line: &str) -> Reply {
             Some(replica) => get(&replica, &key).await,
             None => unheld(),
         },
-        Command::Split { at, right } => split(store, &at, right).await,
-        Command::Shards => by_shard(store, |_| String::new()),
+        Command::Split(at) => split(store, &at).await,
+        Command::Shards => shards(store).await,
         Command::Status => by_shard(store, |replica| format!(": {:?}", replica.status())),
         Command::Members => by_shard(store, |replica| members(&replica.membership())),
         Command::Add(id, peer) => {
@@ -169,9 +164,21 @@ fn held(store: &Store) -> impl Iterator<Item = Arc<Replica>> {
         .filter(|replica| replica.is_initialized())
 }
 
-/// The replica of the shard that holds `key`, as this node knows it.
+/// The replica of the shard that holds `key`, as this node knows it. The
+/// meta shard holds none of the cluster's keys.
 fn holder(store: &Store, key: &str) -> Option<Arc<Replica>> {
-    held(store).find(|replica| replica.shard().span().contains(key.as_bytes()))
+    held(store).find(|replica| {
+        replica.shard_id() != ShardId::META && replica.shard().span().contains(key.as_bytes())
+    })
+}
+
+/// This node's replica of the meta shard.
+fn meta(store: &Store) -> Option<Arc<Replica>> {
+    held(store).find(|replica| replica.shard_id() == ShardId::META)
+}
+
+fn no_meta() -> String {
+    "error: this node holds no replica of the meta shard".to_owned()
 }
 
 fn unheld() -> String {
@@ -193,12 +200,54 @@ async fn get(replica: &Replica, key: &str) -> String {
     }
 }
 
-async fn split(store: &Store, at: &str, right: ShardId) -> String {
+/// Splits the shard that holds `at` under an id the meta shard allocates,
+/// and reports both halves to it.
+async fn split(store: &Store, at: &str) -> String {
     let Some(replica) = holder(store, at) else {
         return unheld();
     };
-    match store.split(replica.shard_id(), at.as_bytes(), right).await {
-        Ok(halves) => format!("ok: {} | {}", halves.left(), halves.right()),
+    let Some(meta) = meta(store) else {
+        return no_meta();
+    };
+    let right = match allocate(&meta).await {
+        Ok(right) => right,
+        Err(error) => return format!("error: {error}"),
+    };
+    let halves = match store.split(replica.shard_id(), at.as_bytes(), right).await {
+        Ok(halves) => halves,
+        Err(error) => return format!("error: {error}"),
+    };
+    for shard in [halves.left(), halves.right()] {
+        let placement = match store.replica(shard.id()).await {
+            Ok(Some(half)) => Placement::of(&half),
+            Ok(None) | Err(_) => continue,
+        };
+        if let Err(error) = report(&meta, &placement).await {
+            return format!("error: split, but not recorded: {error}");
+        }
+    }
+    format!("ok: {} | {}", halves.left(), halves.right())
+}
+
+/// Reports every shard this node leads to the meta shard, then lists what
+/// the meta shard records, one shard a line.
+async fn shards(store: &Store) -> String {
+    let Some(meta) = meta(store) else {
+        return no_meta();
+    };
+    let leading = held(store).filter(|replica| {
+        replica.shard_id() != ShardId::META && replica.status().role() == Role::Leader
+    });
+    for replica in leading {
+        if let Err(error) = report(&meta, &Placement::of(&replica)).await {
+            return format!("error: {error}");
+        }
+    }
+    match registry(&meta).await {
+        Ok(registry) => {
+            let lines: Vec<String> = registry.placements().map(ToString::to_string).collect();
+            lines.join("\n")
+        }
         Err(error) => format!("error: {error}"),
     }
 }
@@ -254,8 +303,6 @@ mod tests {
 
     use kurator_raft::{KeyPurpose, Membership, NodeId, NodeSecret, Peer};
 
-    use kurator_shard::ShardId;
-
     use super::{Command, members};
 
     fn peer(id: u8) -> Peer {
@@ -275,15 +322,9 @@ mod tests {
                 }),
             ),
             ("del k", Some(Command::Delete("k".to_owned()))),
-            (
-                "split m 2",
-                Some(Command::Split {
-                    at: "m".to_owned(),
-                    right: ShardId::new(2),
-                }),
-            ),
+            ("split m", Some(Command::Split("m".to_owned()))),
             ("shards", Some(Command::Shards)),
-            ("split m two", None),
+            ("split m 2", None),
             ("  get   k ", Some(Command::Get("k".to_owned()))),
             ("status", Some(Command::Status)),
             ("members", Some(Command::Members)),

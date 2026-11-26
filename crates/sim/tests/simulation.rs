@@ -1,7 +1,7 @@
-//! Clusters under random faults, membership changes and splits: whatever
-//! happens, an acknowledged write is never lost, every replica of a shard
-//! ends with the same state, the shards hold every key once, and the same
-//! seed replays the same run.
+//! Clusters under random faults, membership changes, splits and replica
+//! moves: whatever happens, an acknowledged write is never lost, every
+//! replica of a shard ends with the same state, the shards hold every key
+//! once, and the same seed replays the same run.
 //!
 //! `KURATOR_SIM_SEEDS=<n>` runs more seeds than the default, and
 //! `KURATOR_SIM_SEED=<seed>` runs just one, to reproduce a failure.
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use kurator_raft::NodeId;
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_shard::{ShardId, ShardMap, ShardState};
+use kurator_shard::{Shard, ShardId, ShardMap, ShardState};
 use kurator_sim::{Cluster, Faults, Holdings, Outcome, Rng, SimError};
 use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
@@ -71,7 +71,7 @@ fn env_u64(name: &str) -> Option<u64> {
 }
 
 /// Runs a random schedule of writes, crashes, restarts, partitions, joins,
-/// leaves and pauses for `seed`, then settles the cluster.
+/// leaves, splits, moves and pauses for `seed`, then settles the cluster.
 fn run(seed: u64) -> Run {
     SimRuntime::with_seed(seed).block_on(async {
         let mut rng = Rng::new(seed);
@@ -174,6 +174,23 @@ async fn act(
             }
             None => "leave: no replicas".to_owned(),
         },
+        97..99 => {
+            let shard = rng.pick(&cluster.shards()).map(Shard::id);
+            let voters = shard.and_then(|shard| cluster.voters_of(shard));
+            let others: Vec<NodeId> = cluster
+                .ids()
+                .into_iter()
+                .filter(|id| voters.as_ref().is_some_and(|voters| !voters.contains(id)))
+                .collect();
+            let from = voters.as_ref().and_then(|voters| rng.pick(voters).copied());
+            match (shard, from, rng.pick(&others).copied()) {
+                (Some(shard), Some(from), Some(to)) => {
+                    let outcome = cluster.move_replica(shard, from, to).await;
+                    format!("move {shard} {from} -> {to}: {outcome:?}")
+                }
+                _ => "move: nowhere".to_owned(),
+            }
+        }
         _ => {
             let pause = Duration::from_millis(rng.between(10, 2000));
             SimRuntime::sleep(pause).await;
@@ -240,7 +257,11 @@ fn random_faults_never_lose_an_acknowledged_write() {
         acked += run.acked.len();
         for event in &run.trace {
             let kind = event.split_whitespace().nth(1).unwrap_or_default();
-            if ["crash", "restart", "isolate", "join", "leave", "split"].contains(&kind) {
+            if [
+                "crash", "restart", "isolate", "join", "leave", "split", "move",
+            ]
+            .contains(&kind)
+            {
                 let _: bool = faults.insert(kind.to_owned());
             }
             if kind == "split" && event.ends_with("Acked") {
@@ -252,8 +273,8 @@ fn random_faults_never_lose_an_acknowledged_write() {
     assert!(split > 0, "some splits succeed");
     assert_eq!(
         faults.len(),
-        6,
-        "replicas crashed, restarted, were cut off, joined and left, shards split: {faults:?}"
+        7,
+        "replicas crashed, restarted, were cut off, joined, left and moved, shards split: {faults:?}"
     );
 }
 
