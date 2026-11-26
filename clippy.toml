@@ -1,0 +1,12 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = true
+# A bool field or parameter is a state or a mode: give it a type.
+max-struct-bools = 0
+max-fn-params-bools = 0
+# Encourage newtypes over long positional argument lists.
+too-many-arguments-threshold = 5
+cognitive-complexity-threshold = 15
+excessive-nesting-threshold = 4
