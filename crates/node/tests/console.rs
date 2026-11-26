@@ -1,6 +1,13 @@
 //! The `kurator` binary, driven through its console like an operator would.
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::process::{Command, Stdio};
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test code: a failure should panic with context"
+)]
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 const KURATOR: &str = env!("CARGO_BIN_EXE_kurator");
@@ -34,39 +41,80 @@ fn a_bad_command_line_fails_with_a_message() {
     assert!(output.stdout.is_empty(), "nothing on stdout");
 }
 
+/// How long the console may take to answer one line: a node that hangs
+/// fails the test instead of hanging it.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A running node, driven through its console.
+struct Console {
+    node: Child,
+    stdin: ChildStdin,
+    lines: Receiver<String>,
+}
+
+impl Console {
+    /// Runs `kurator run` with `args` and `--dir <dir>`, and waits for it
+    /// to say it is ready.
+    fn start(args: &[&str], dir: &Path) -> Self {
+        let mut node = Command::new(KURATOR)
+            .arg("run")
+            .args(args)
+            .arg("--dir")
+            .arg(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = node.stdin.take().unwrap();
+        let stdout = BufReader::new(node.stdout.take().unwrap());
+        let (send, lines) = mpsc::channel();
+        // Stops at the end of the output, or once the console is gone.
+        drop(std::thread::spawn(move || {
+            let _sent: Result<(), _> = stdout
+                .lines()
+                .map_while(Result::ok)
+                .try_for_each(|line| send.send(line));
+        }));
+        let console = Self { node, stdin, lines };
+        let banner = console.read(1);
+        assert!(banner.starts_with("ready"), "banner: {banner}");
+        console
+    }
+
+    /// Sends `line` and reads an answer of `lines` lines.
+    fn ask(&mut self, line: &str, lines: usize) -> String {
+        writeln!(self.stdin, "{line}").unwrap();
+        self.read(lines)
+    }
+
+    fn read(&self, lines: usize) -> String {
+        let answer: Vec<String> = (0..lines)
+            .map(|_| {
+                self.lines
+                    .recv_timeout(ANSWER_TIMEOUT)
+                    .unwrap_or_else(|error| panic!("no answer: {error}"))
+            })
+            .collect();
+        answer.join("\n")
+    }
+
+    /// Says `quit`, checks that the node stops cleanly, and returns what it
+    /// said after.
+    fn quit(mut self) -> Vec<String> {
+        writeln!(self.stdin, "quit").unwrap();
+        assert!(self.node.wait().unwrap().success(), "quits cleanly");
+        self.lines.iter().collect()
+    }
+}
+
 #[test]
 fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = Command::new(KURATOR)
-        .args([
-            "run",
-            "--id",
-            "1",
-            "--listen",
-            "127.0.0.1:0",
-            "--found",
-            "--dir",
-        ])
-        .arg(dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = node.stdin.take().unwrap();
-    let mut stdout = BufReader::new(node.stdout.take().unwrap());
-    let mut banner = String::new();
-    let _: usize = stdout.read_line(&mut banner).unwrap();
-    assert!(banner.starts_with("ready"), "banner: {banner}");
-    // Each answer ends in a line break; one that spans `lines` lines comes
-    // back whole.
-    let mut ask = |line: &str, lines: usize| {
-        writeln!(stdin, "{line}").unwrap();
-        let mut answer = String::new();
-        for _ in 0..lines {
-            let _: usize = stdout.read_line(&mut answer).unwrap();
-        }
-        answer.trim_end().to_owned()
-    };
+    let mut console = Console::start(
+        &["--id", "1", "--listen", "127.0.0.1:0", "--found"],
+        dir.path(),
+    );
+    let mut ask = |line: &str, lines: usize| console.ask(line, lines);
     assert!(ask("help", 1).starts_with("commands:"), "help");
     let started = Instant::now();
     loop {
@@ -111,38 +159,19 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     }
     assert_eq!(ask("get melon", 1), "green", "read from the new shard");
     assert_eq!(ask("get greeting", 1), "hello", "still in the first");
-    writeln!(stdin, "quit").unwrap();
-    assert!(node.wait().unwrap().success(), "quits cleanly");
-    let mut rest = String::new();
-    let _: usize = stdout.read_to_string(&mut rest).unwrap();
-    assert_eq!(rest, "", "says nothing after quit");
+    assert!(console.quit().is_empty(), "says nothing after quit");
 }
 
 #[test]
 fn a_node_that_holds_no_shard_says_so() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = Command::new(KURATOR)
-        .args(["run", "--id", "2", "--listen", "127.0.0.1:0", "--dir"])
-        .arg(dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = node.stdin.take().unwrap();
-    let mut stdout = BufReader::new(node.stdout.take().unwrap());
-    let mut banner = String::new();
-    let _: usize = stdout.read_line(&mut banner).unwrap();
-    assert!(banner.starts_with("ready"), "banner: {banner}");
+    let mut console = Console::start(&["--id", "2", "--listen", "127.0.0.1:0"], dir.path());
     for line in ["get k", "put k v", "del k", "split k 2"] {
-        writeln!(stdin, "{line}").unwrap();
-        let mut answer = String::new();
-        let _: usize = stdout.read_line(&mut answer).unwrap();
         assert_eq!(
-            answer.trim_end(),
+            console.ask(line, 1),
             "error: no shard on this node holds the key",
             "{line}"
         );
     }
-    writeln!(stdin, "quit").unwrap();
-    assert!(node.wait().unwrap().success(), "quits cleanly");
+    assert!(console.quit().is_empty(), "nothing more");
 }

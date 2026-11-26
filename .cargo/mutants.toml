@@ -32,6 +32,10 @@ exclude_re = [
     # A forgotten node stays in a shard only when a leave races a split
     # that no replica up applied yet; no seed in the default set does.
     "replace Cluster::remove_strays with \\(\\)",
+    # Preferring an older epoch only leaves the client's map stale, which
+    # a Misrouted answer corrects, and settling waits until every replica
+    # holds the same epoch, so no test can tell the choice.
+    "replace < with (==|>|<=) in Cluster::refresh",
 ]
 timeout_multiplier = 3.0
 # The replica code is exercised mostly by kurator-sim's cluster tests, so

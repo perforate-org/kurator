@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc eb3c2ee4607961b648eccbd6e4748f3d1ab4925ec46e33acc066eed58ebfa06a # shrinks to request = AppendEntries(AppendEntriesRequest { vote: Vote { leader_id: LeaderId { term: 0, node_id: NodeId(0) }, committed: false }, prev_log_id: None, entries: [], leader_commit: None }), shard = 2
