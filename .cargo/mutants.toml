@@ -21,3 +21,6 @@ exclude_re = [
     "replace Network::disconnect with \\(\\)",
 ]
 timeout_multiplier = 3.0
+# The replica code is exercised mostly by kurator-sim's cluster tests, so
+# every mutant runs the whole workspace's tests, not only its own crate's.
+test_workspace = true
