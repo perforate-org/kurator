@@ -24,22 +24,24 @@ pub(crate) fn reference(parts: &[&[u8]]) -> u32 {
     !crc
 }
 
-/// Stand-in checksum for proofs.
-///
-/// Kani cannot model the CPU feature detection and SIMD of the `crc32c`
-/// crate, and a symbolic CRC makes the solver time out. Proofs are about
-/// framing (bounds, lengths, round trips), which hold for any deterministic
-/// checksum, so they run against this cheap one. CRC-32C itself is checked
-/// by the unit tests.
 #[cfg(kani)]
-pub(crate) use proof_checksum as crc32c;
+pub(crate) use proofs::crc32c;
 
 #[cfg(kani)]
-fn proof_checksum(parts: &[&[u8]]) -> u32 {
-    parts
-        .iter()
-        .flat_map(|part| part.iter())
-        .fold(0, |sum, byte| sum.rotate_left(5) ^ u32::from(*byte))
+mod proofs {
+    /// Stand-in checksum for proofs.
+    ///
+    /// Kani cannot model the CPU feature detection and SIMD of the `crc32c`
+    /// crate, and a symbolic CRC makes the solver time out. Proofs are about
+    /// framing (bounds, lengths, round trips), which hold for any
+    /// deterministic checksum, so they run against this cheap one. CRC-32C
+    /// itself is checked by the unit tests.
+    pub(crate) fn crc32c(parts: &[&[u8]]) -> u32 {
+        parts
+            .iter()
+            .flat_map(|part| part.iter())
+            .fold(0, |sum, byte| sum.rotate_left(5) ^ u32::from(*byte))
+    }
 }
 
 #[cfg(test)]

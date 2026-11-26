@@ -2,7 +2,6 @@
 exclude_re = [
     # Kani harnesses and the checksum stand-in they use run under `cargo kani`.
     "proofs::",
-    "proof_checksum",
     # Directory syncs only matter after power loss.
     "replace sync_dir -> io::Result<\\(\\)> with Ok\\(\\(\\)\\)",
     # Joining the commit thread on drop is not observable: writes are

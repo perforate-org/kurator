@@ -4,7 +4,8 @@
 
 ## Design principles
 
-- DRY: one definition per rule or format (e.g. `kurator_wal::LsnFiles` names every LSN-numbered file).
+- DRY: one definition per rule or format (e.g. `kurator_wal::LsnFiles` names every
+  LSN-numbered file).
 - Behaviour lives in types: enums, newtypes and typestates, not `bool` or strings
   (`Health`, `Place`, `TailDamage`, `Encoded`). `max-struct-bools = 0` and
   `max-fn-params-bools = 0` enforce part of this.
@@ -13,7 +14,8 @@
 - RAII for resources: `DirLock`, `GroupCommit` (joins its thread on drop),
   temporary snapshot files.
 - No `mod.rs`; use `foo.rs` + `foo/`.
-- Library code never panics: no `unwrap`, `expect`, indexing or unchecked arithmetic.
+- Library code never panics: no `unwrap`, `expect`, indexing or unchecked
+  arithmetic.
 - Decide performance questions with benchmarks (`cargo bench`).
 
 ## Gate (all must pass; CI runs them)

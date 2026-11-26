@@ -7,15 +7,9 @@ test_patterns = ["**/tests/**", "**/benches/**"]
 name = "default"
 default = true
 
-# Rust code is also checked by `cargo fmt` and `cargo clippy` in CI with the
-# workspace lints; qlty adds duplication and complexity smells, and checks
-# the files cargo does not see.
-[[plugin]]
-name = "clippy"
-
-[[plugin]]
-name = "rustfmt"
-
+# Rust formatting and lints are gated by `cargo fmt` and `cargo clippy` with
+# the workspace configuration (qlty's own runs ignore it), so qlty adds
+# duplication and complexity smells and checks the files cargo does not see.
 [[plugin]]
 name = "actionlint"
 
