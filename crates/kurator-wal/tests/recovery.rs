@@ -11,7 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use kurator_wal::{Corruption, Error, InvalidFrame, Lsn, Options, TailDamage, Wal};
+use kurator_wal::{Corruption, Error, InvalidFrame, Lsn, Options, Start, TailDamage, Wal};
 use proptest as _;
 
 type Records = Vec<(u64, Vec<u8>)>;
@@ -26,10 +26,15 @@ fn open_with(
     after: u64,
 ) -> Result<(Wal, Records, kurator_wal::RecoveryReport), Error> {
     let mut records = Vec::new();
-    let (wal, report) = Wal::open(dir, options, Lsn::new(after), |lsn, payload| {
-        records.push((lsn.get(), payload.to_vec()));
-        Ok::<(), Infallible>(())
-    })?;
+    let (wal, report) = Wal::open(
+        dir,
+        options,
+        Start::After(Lsn::new(after)),
+        |lsn, payload| {
+            records.push((lsn.get(), payload.to_vec()));
+            Ok::<(), Infallible>(())
+        },
+    )?;
     Ok((wal, records, report))
 }
 
@@ -279,9 +284,12 @@ fn replay_errors_stop_opening() {
         let (mut wal, _, _) = open(dir.path(), 0).unwrap();
         let _ = wal.append_batch([b"a"]).unwrap();
     }
-    let result = Wal::open(dir.path(), Options::default(), Lsn::ZERO, |_, _| {
-        Err::<(), _>(std::io::Error::other("bad record"))
-    });
+    let result = Wal::open(
+        dir.path(),
+        Options::default(),
+        Start::After(Lsn::ZERO),
+        |_, _| Err::<(), _>(std::io::Error::other("bad record")),
+    );
     assert!(
         matches!(result, Err(Error::Replay { lsn, .. }) if lsn == Lsn::new(1)),
         "callback error surfaces"

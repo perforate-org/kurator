@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_wal::{Lsn, LsnRange, RecoveryReport, Wal};
+use kurator_wal::{Lsn, LsnRange, RecoveryReport, Start, Wal};
 use parking_lot::{Mutex, RwLock};
 
 use crate::batch::{Command, Encoded};
@@ -29,12 +29,17 @@ impl Core {
     pub(crate) fn recover(dir: &Path, wal: kurator_wal::Options) -> Result<(Self, RecoveryReport)> {
         let snapshots = Snapshots::open(dir.join("snapshots"))?;
         let mut state = snapshots.load_latest()?.unwrap_or_default();
-        let (wal, report) = Wal::open(dir.join("wal"), wal, state.applied(), |lsn, payload| {
-            let command =
-                Command::decode(payload).map_err(|source| Error::Record { lsn, source })?;
-            state.apply(lsn, command);
-            Ok::<(), Error>(())
-        })?;
+        let (wal, report) = Wal::open(
+            dir.join("wal"),
+            wal,
+            Start::After(state.applied()),
+            |lsn, payload| {
+                let command =
+                    Command::decode(payload).map_err(|source| Error::Record { lsn, source })?;
+                state.apply(lsn, command);
+                Ok::<(), Error>(())
+            },
+        )?;
         let core = Self {
             state: RwLock::new(state),
             wal: Mutex::new(wal),

@@ -16,6 +16,8 @@ categories = ["database-implementations"]
 kurator-wal = { path = "crates/kurator-wal" }
 kurator-codec = { path = "crates/kurator-codec" }
 crc32c = "0.6.9"
+blake3 = "1.8.7"
+ed25519-dalek = "3.0.0"
 parking_lot = "0.12"
 thiserror = "2.0.17"
 criterion = "0.8"

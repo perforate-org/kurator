@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::lsn::Lsn;
+use crate::seal::{Protection, SealDamage};
 
 /// Result of a log operation.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -86,6 +87,24 @@ pub enum Corruption {
     /// A record frame is damaged before the end of the log.
     #[error("{0}")]
     Frame(InvalidFrame),
+    /// The segment protects its records differently from what the log was
+    /// opened with.
+    #[error("segment is {found}, but the log was opened as {expected}")]
+    Protection {
+        /// What the log was opened with.
+        expected: Protection,
+        /// What the segment header says.
+        found: Protection,
+    },
+    /// A signed record, or the anchor of a signed segment, does not check
+    /// out. A crash cannot cause this: the log was changed.
+    #[error("record {lsn}: {damage}")]
+    Seal {
+        /// The record, or the first record of the segment.
+        lsn: Lsn,
+        /// What is wrong.
+        damage: SealDamage,
+    },
 }
 
 /// Why the bytes at some offset are not a valid frame.
