@@ -1,5 +1,5 @@
 //! The `kurator` binary, driven through its console like an operator would.
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -85,4 +85,7 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     );
     writeln!(stdin, "quit").unwrap();
     assert!(node.wait().unwrap().success(), "quits cleanly");
+    let mut rest = String::new();
+    let _: usize = stdout.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "", "says nothing after quit");
 }

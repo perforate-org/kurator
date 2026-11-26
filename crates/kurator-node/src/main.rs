@@ -9,11 +9,11 @@ use kurator_node::args::{self, Invocation};
 async fn main() -> ExitCode {
     let outcome = match args::parse(std::env::args().skip(1)) {
         Ok(Invocation::Key(dir)) => kurator_node::key(&dir)
-            .map(|key| key.to_string())
+            .map(|key| Some(key.to_string()))
             .map_err(|error| error.to_string()),
         Ok(Invocation::Run(settings)) => kurator_node::run(settings)
             .await
-            .map(|()| String::new())
+            .map(|()| None)
             .map_err(|error| error.to_string()),
         Ok(_) => Err("unsupported command".to_owned()),
         Err(usage) => Err(usage.to_string()),
@@ -21,11 +21,12 @@ async fn main() -> ExitCode {
     report(outcome).unwrap_or(ExitCode::FAILURE)
 }
 
-/// Shows the outcome: what to show on stdout, or the error on stderr.
-fn report(outcome: Result<String, String>) -> std::io::Result<ExitCode> {
+/// Shows the outcome: what to show on stdout, if anything, or the error on
+/// stderr.
+fn report(outcome: Result<Option<String>, String>) -> std::io::Result<ExitCode> {
     match outcome {
-        Ok(shown) if shown.is_empty() => Ok(ExitCode::SUCCESS),
-        Ok(shown) => {
+        Ok(None) => Ok(ExitCode::SUCCESS),
+        Ok(Some(shown)) => {
             writeln!(std::io::stdout(), "{shown}")?;
             Ok(ExitCode::SUCCESS)
         }
