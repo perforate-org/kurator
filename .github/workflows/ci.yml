@@ -99,9 +99,15 @@ jobs:
           KURATOR_SIM_SEEDS: 500
 
   mutants:
-    name: mutation testing
+    name: mutation testing (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # Every mutant runs the whole workspace's tests, the simulations
+    # among them, so the mutants are spread over four runners.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,12 +123,12 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git diff "origin/${{ github.base_ref }}.." > pr.diff
-          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 60 -j 2
+          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 60 -j 2 --shard ${{ matrix.shard }}/4
       - name: All mutants (main)
         if: github.event_name != 'pull_request'
-        run: cargo mutants --workspace --no-shuffle --timeout 60 -j 2
+        run: cargo mutants --workspace --no-shuffle --timeout 60 -j 2 --shard ${{ matrix.shard }}/4
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutants.out
+          name: mutants.out-${{ matrix.shard }}
           path: mutants.out

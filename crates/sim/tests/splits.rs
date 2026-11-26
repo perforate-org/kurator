@@ -9,10 +9,12 @@
 
 use std::collections::BTreeSet;
 
-use kurator_raft::NodeId;
+use std::ops::Bound::Unbounded;
+
 use kurator_raft::openraft::AsyncRuntime as _;
+use kurator_raft::{Error, NodeId};
 use kurator_shard::ShardId;
-use kurator_sim::{Cluster, Faults, Holdings, Outcome};
+use kurator_sim::{Cluster, Faults, Holdings, Outcome, Transacted};
 use kurator_storage::{Version, WriteBatch};
 use openraft_rt_sim::SimRuntime;
 
@@ -182,6 +184,40 @@ fn a_node_that_joins_after_a_split_joins_every_shard() {
         let held = agreed(&cluster, &acked);
         assert_eq!(cluster.states().len(), 4, "four nodes");
         assert_eq!(held.shards().count(), 2, "both halves on each");
+        cluster.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn a_transaction_reads_only_the_keys_of_its_shard() {
+    SimRuntime::with_seed(16).block_on(async {
+        let mut cluster = Cluster::start(16, 3, Faults::default()).await.unwrap();
+        cluster.settle().await.unwrap();
+        let _acked = write_keys(&cluster, 0..20).await;
+        assert_eq!(cluster.split(b"key-010").await, Outcome::Acked, "split");
+        let mut seen = Vec::new();
+        let mut beyond = None;
+        let outcome = cluster
+            .transact(|txn| {
+                txn.put("key-0055", "mine");
+                seen = txn.range(Unbounded, Unbounded)?;
+                beyond = Some(txn.get(b"key-015"));
+                Ok(())
+            })
+            .await;
+        assert!(matches!(outcome, Transacted::Committed(_)), "{outcome:?}");
+        let keys: Vec<String> = seen
+            .iter()
+            .map(|(key, _)| String::from_utf8_lossy(key).into_owned())
+            .collect();
+        let mut expected: Vec<String> = (0..10).map(|index| format!("key-{index:03}")).collect();
+        expected.push("key-0055".to_owned());
+        expected.sort();
+        assert_eq!(keys, expected, "the first shard's keys and its own write");
+        assert!(
+            matches!(beyond, Some(Err(Error::Misrouted { .. }))),
+            "a key of the other shard: {beyond:?}"
+        );
         cluster.shutdown().await.unwrap();
     });
 }

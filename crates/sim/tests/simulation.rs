@@ -51,8 +51,18 @@ fn seeds() -> Vec<u64> {
     if let Some(seed) = env_u64("KURATOR_SIM_SEED") {
         return vec![seed];
     }
-    (0..env_u64("KURATOR_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS)).collect()
+    let count = env_u64("KURATOR_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS);
+    let mut seeds: Vec<u64> = (0..count).collect();
+    seeds.extend(REGRESSIONS.iter().filter(|seed| **seed >= count));
+    seeds
 }
+
+/// Seeds that once failed, run every time:
+/// - 16: a leave ran before the client learned of a split, and missed the
+///   new shard.
+/// - 205: a split whose outcome was unknown applied after settle first
+///   looked.
+const REGRESSIONS: [u64; 2] = [16, 205];
 
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)

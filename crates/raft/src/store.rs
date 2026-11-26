@@ -336,3 +336,6 @@ impl<C: Config> Memberships<C> {
         nodes
     }
 }
+
+#[cfg(test)]
+mod tests;

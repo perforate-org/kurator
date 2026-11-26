@@ -117,3 +117,32 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     let _: usize = stdout.read_to_string(&mut rest).unwrap();
     assert_eq!(rest, "", "says nothing after quit");
 }
+
+#[test]
+fn a_node_that_holds_no_shard_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = Command::new(KURATOR)
+        .args(["run", "--id", "2", "--listen", "127.0.0.1:0", "--dir"])
+        .arg(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = node.stdin.take().unwrap();
+    let mut stdout = BufReader::new(node.stdout.take().unwrap());
+    let mut banner = String::new();
+    let _: usize = stdout.read_line(&mut banner).unwrap();
+    assert!(banner.starts_with("ready"), "banner: {banner}");
+    for line in ["get k", "put k v", "del k", "split k 2"] {
+        writeln!(stdin, "{line}").unwrap();
+        let mut answer = String::new();
+        let _: usize = stdout.read_line(&mut answer).unwrap();
+        assert_eq!(
+            answer.trim_end(),
+            "error: no shard on this node holds the key",
+            "{line}"
+        );
+    }
+    writeln!(stdin, "quit").unwrap();
+    assert!(node.wait().unwrap().success(), "quits cleanly");
+}
