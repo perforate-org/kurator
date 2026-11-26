@@ -16,15 +16,15 @@
   メンバー変更は learner として追いつかせてから voter に昇格し、ノード除去もできる。
   QUIC とシミュレーションは同じ `kurator_raft::Transport` 境界で差し替わる。
 
-| crate | 役割 |
-| --- | --- |
-| `crates/kurator-codec` | 共通のバイナリ符号化(`Reader`、ファイル枠 `Format`) |
-| `crates/kurator-wal` | 追記型 WAL。チェックサム版と署名版 |
-| `crates/kurator-storage` | メモリ上の状態、group commit、スナップショット、`Db` |
-| `crates/kurator-raft` | Raft ログストア・状態機械・スナップショット・`Replica` |
-| `crates/kurator-sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱) |
-| `crates/kurator-net` | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証) |
-| `crates/kurator-node` | `kurator` バイナリ: レプリカ 1 つをプロセスとして動かすコンソール |
+| crate            | 役割                                                               |
+| ---------------- | ------------------------------------------------------------------ |
+| `crates/codec`   | 共通のバイナリ符号化(`Reader`、ファイル枠 `Format`)                |
+| `crates/wal`     | 追記型 WAL。チェックサム版と署名版                                 |
+| `crates/storage` | メモリ上の状態、group commit、スナップショット、`Db`               |
+| `crates/raft`    | Raft ログストア・状態機械・スナップショット・`Replica`             |
+| `crates/sim`     | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱) |
+| `crates/net`     | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証)      |
+| `crates/node`    | `kurator` バイナリ: レプリカ 1 つをプロセスとして動かすコンソール  |
 
 シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`
 で増やし、失敗したシードは `KURATOR_SIM_SEED=<seed>` で再現する。

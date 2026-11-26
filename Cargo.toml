@@ -13,12 +13,12 @@ keywords = ["database", "storage", "wal", "p2p"]
 categories = ["database-implementations"]
 
 [workspace.dependencies]
-kurator-wal = { path = "crates/kurator-wal" }
-kurator-codec = { path = "crates/kurator-codec" }
-kurator-storage = { path = "crates/kurator-storage" }
-kurator-raft = { path = "crates/kurator-raft" }
-kurator-sim = { path = "crates/kurator-sim" }
-kurator-net = { path = "crates/kurator-net" }
+kurator-wal = { path = "crates/wal" }
+kurator-codec = { path = "crates/codec" }
+kurator-storage = { path = "crates/storage" }
+kurator-raft = { path = "crates/raft" }
+kurator-sim = { path = "crates/sim" }
+kurator-net = { path = "crates/net" }
 crc32c = "0.6.9"
 blake3 = "1.8.7"
 ed25519-dalek = "3.0.0"
@@ -31,8 +31,14 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 openraft = { version = "0.10.1", default-features = false }
 openraft-rt-sim = "0.10.1"
 openraft-rt-tokio = "0.10.1"
-quinn = { version = "0.11.12", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+quinn = { version = "0.11.12", default-features = false, features = [
+    "rustls-ring",
+    "runtime-tokio",
+] }
+rustls = { version = "0.23.46", default-features = false, features = [
+    "ring",
+    "std",
+] }
 tokio = { version = "1.54", features = ["rt", "net", "time", "sync", "macros"] }
 
 [workspace.lints.rust]
@@ -57,7 +63,7 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 multiple_crate_versions = "allow"
-redundant_pub_crate = "allow" # conflicts with rustc's `unreachable_pub`, which we keep # dev-dependencies (criterion, proptest) pull duplicates we cannot control
+redundant_pub_crate = "allow"                # conflicts with rustc's `unreachable_pub`, which we keep # dev-dependencies (criterion, proptest) pull duplicates we cannot control
 
 # Layout: `foo.rs` + `foo/`, never `mod.rs`.
 mod_module_files = "deny"
@@ -69,7 +75,7 @@ exhaustive_enums = "deny"
 exhaustive_structs = "deny"
 partial_pub_fields = "deny"
 pub_without_shorthand = "deny"
-module_name_repetitions = "allow" # `wal::WalOptions`-style names are what we want to avoid, but the lint fires on re-exports too
+module_name_repetitions = "allow"          # `wal::WalOptions`-style names are what we want to avoid, but the lint fires on re-exports too
 multiple_inherent_impl = "deny"
 same_name_method = "deny"
 
@@ -108,7 +114,7 @@ allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 undocumented_unsafe_blocks = "deny"
 missing_assert_message = "deny"
-missing_docs_in_private_items = "allow" # private items are documented where they are not obvious
+missing_docs_in_private_items = "allow"  # private items are documented where they are not obvious
 clone_on_ref_ptr = "deny"
 if_then_some_else_none = "deny"
 let_underscore_must_use = "deny"
@@ -133,7 +139,7 @@ string_lit_chars_any = "deny"
 filetype_is_file = "deny"
 create_dir = "deny"
 large_include_file = "deny"
-impl_trait_in_params = "allow" # `impl Into<PathBuf>` keeps call sites simple
+impl_trait_in_params = "allow"           # `impl Into<PathBuf>` keeps call sites simple
 
 [profile.bench]
 debug = true
