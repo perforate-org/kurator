@@ -69,7 +69,7 @@ jobs:
           curl -fsSL https://qlty.sh | bash
           echo "$HOME/.qlty/bin" >> "$GITHUB_PATH"
       - run: qlty check --all --no-progress --trigger build
-      - run: qlty smells --all --no-progress
+      - run: qlty smells --all
 
   kani:
     name: kani proofs
