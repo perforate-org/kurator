@@ -2,10 +2,13 @@
 //! async runtime by [`declare_config!`](crate::declare_config).
 
 use openraft::RaftTypeConfig;
-use openraft::impls::EmptyNode;
+use openraft::impls::ChangeMembers;
 
 use crate::proposal::Proposal;
-use crate::types::{LeaderId, Membership, NodeId, Vote};
+use crate::types::{LeaderId, Membership, NodeId, Peer, Vote};
+
+/// How a membership change is described.
+pub type MembershipEdit = ChangeMembers<NodeId, Peer>;
 
 /// What an entry carries.
 pub type Payload = openraft::EntryPayload<Proposal, Membership>;
@@ -21,11 +24,12 @@ pub trait Config:
         D = Proposal,
         R = (),
         NodeId = NodeId,
-        Node = EmptyNode,
+        Node = Peer,
         Term = u64,
         LeaderId = LeaderId,
         Vote = Vote,
         Membership = Membership,
+        MembershipEdit = MembershipEdit,
         Payload = Payload,
         Entry = Entry,
     >
@@ -37,11 +41,12 @@ impl<C> Config for C where
             D = Proposal,
             R = (),
             NodeId = NodeId,
-            Node = EmptyNode,
+            Node = Peer,
             Term = u64,
             LeaderId = LeaderId,
             Vote = Vote,
             Membership = Membership,
+            MembershipEdit = MembershipEdit,
             Payload = Payload,
             Entry = Entry,
         >
@@ -68,11 +73,12 @@ macro_rules! declare_config {
                 D = $crate::Proposal,
                 R = (),
                 NodeId = $crate::NodeId,
-                Node = $crate::openraft::impls::EmptyNode,
+                Node = $crate::Peer,
                 Term = u64,
                 LeaderId = $crate::LeaderId,
                 Vote = $crate::Vote,
                 Membership = $crate::Membership,
+                MembershipEdit = $crate::MembershipEdit,
                 Payload = $crate::Payload,
                 Entry = $crate::Entry,
                 AsyncRuntime = $runtime,

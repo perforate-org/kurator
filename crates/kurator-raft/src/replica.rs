@@ -1,46 +1,58 @@
 //! A replica: one Raft node with its log store and state machine.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use kurator_storage::{Command, KvState, WriteBatch};
-use kurator_wal::SigningKey;
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
-use openraft::raft::{
-    AppendEntriesRequest, AppendResult, SnapshotResponse, VoteRequest, VoteResponse,
-};
+use openraft::raft::ClientWriteResponse;
 use openraft::type_config::async_runtime::WatchReceiver as _;
 use openraft::{Raft, RaftNetworkFactory, ReadPolicy, ServerState};
 
-use crate::config::Config;
+use crate::config::{Config, MembershipEdit};
 use crate::error::{Error, Result};
+use crate::identity::{KeyPurpose, NodeSecret};
 use crate::log_store::LogStore;
 use crate::proposal::Proposal;
-use crate::snapshot::{Snapshot, SnapshotBytes};
+use crate::rpc::{Refusal, Request, Response};
+use crate::snapshot::SnapshotBytes;
 use crate::state_machine::StateMachine;
-use crate::types::{LogId, NodeId, Vote};
+use crate::types::{LogId, Membership, NodeId, Peer, Progress};
 
-/// Who a replica is: its id in the cluster and the key it signs its log
-/// with.
+/// Who a replica is: its id in the cluster and the secret its keys come
+/// from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     id: NodeId,
-    key: SigningKey,
+    secret: NodeSecret,
 }
 
 impl Member {
-    /// The member `id`, signing with `key`.
+    /// The member `id`, holding `secret`.
     #[must_use]
-    pub const fn new(id: NodeId, key: SigningKey) -> Self {
-        Self { id, key }
+    pub const fn new(id: NodeId, secret: NodeSecret) -> Self {
+        Self { id, secret }
     }
 
     /// Its id.
     #[must_use]
     pub const fn id(&self) -> NodeId {
         self.id
+    }
+
+    /// Its secret.
+    #[must_use]
+    pub const fn secret(&self) -> &NodeSecret {
+        &self.secret
+    }
+
+    /// How others reach it when it listens on `addr`.
+    #[must_use]
+    pub fn peer(&self, addr: SocketAddr) -> Peer {
+        Peer::new(addr, self.secret.public_key(KeyPurpose::Transport))
     }
 }
 
@@ -146,7 +158,10 @@ impl<C: Config> Replica<C> {
         N: RaftNetworkFactory<C>,
         N::Network: NetSnapshot<C, SnapshotData = SnapshotBytes>,
     {
-        let log = LogStore::open(&dir.join("log"), member.key)?;
+        let log = LogStore::open(
+            &dir.join("log"),
+            member.secret.signing_key(KeyPurpose::WalSigning),
+        )?;
         let state = StateMachine::open(&dir.join("snapshot"))?;
         let raft = Raft::new(member.id, config, network, log, state.clone())
             .await
@@ -164,8 +179,8 @@ impl<C: Config> Replica<C> {
     /// # Errors
     ///
     /// [`Error::Initialized`] when this replica already has a log.
-    pub async fn initialize(&self, voters: impl IntoIterator<Item = NodeId>) -> Result<()> {
-        let members: BTreeSet<NodeId> = voters.into_iter().collect();
+    pub async fn initialize(&self, voters: impl IntoIterator<Item = (NodeId, Peer)>) -> Result<()> {
+        let members: BTreeMap<NodeId, Peer> = voters.into_iter().collect();
         self.raft
             .initialize(members)
             .await
@@ -186,20 +201,93 @@ impl<C: Config> Replica<C> {
     /// write: then nobody knows whether the write commits.
     pub async fn write(&self, batch: WriteBatch) -> Result<LogId> {
         let proposal = Proposal::new(Command::Kv(batch))?;
-        match self.raft.client_write(proposal).await {
-            Ok(response) => Ok(response.log_id),
-            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
-                Err(Error::NotLeader {
-                    leader: forward.leader_id,
-                })
+        written(self.raft.client_write(proposal).await)
+    }
+
+    /// Adds `id`, reached as `peer`, as a learner: the leader starts sending
+    /// it the log, or its snapshot when the log is purged, but it does not
+    /// vote. Returns once the membership with the learner committed;
+    /// [`Replica::progress`] then tells when it caught up.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`] when this replica cannot change the membership.
+    pub async fn add_learner(&self, id: NodeId, peer: Peer) -> Result<LogId> {
+        written(self.raft.add_learner(id, peer, false).await)
+    }
+
+    /// How far `id` is from holding everything the leader committed.
+    #[must_use]
+    pub fn progress(&self, id: NodeId) -> Progress {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow_watched();
+        let membership = metrics.membership_config.membership();
+        if membership.voter_ids().any(|voter| voter == id) {
+            return Progress::Voter;
+        }
+        if membership.get_node(&id).is_none() {
+            return Progress::Stranger;
+        }
+        let Some(replication) = metrics.replication.as_ref() else {
+            return Progress::Unknown;
+        };
+        let matched = replication.get(&id).copied().flatten();
+        let committed = metrics.cluster_committed;
+        if matched.map(|log_id| log_id.index) >= committed.map(|log_id| log_id.index) {
+            Progress::CaughtUp
+        } else {
+            Progress::Behind { matched, committed }
+        }
+    }
+
+    /// Makes the learner `id` a voter, once it caught up: a voter that is
+    /// behind would hold back every commit until it caught up.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotCaughtUp`] when `id` is not a learner that caught up, and
+    /// [`Error::NotLeader`] when this replica cannot change the membership.
+    pub async fn promote(&self, id: NodeId) -> Result<LogId> {
+        match self.progress(id) {
+            Progress::CaughtUp => {}
+            Progress::Unknown => return Err(self.not_leader()),
+            progress @ (Progress::Stranger | Progress::Voter | Progress::Behind { .. }) => {
+                return Err(Error::NotCaughtUp { node: id, progress });
             }
-            Err(RaftError::APIError(ClientWriteError::LogEntryDiscarded(forward))) => {
-                Err(Error::Discarded {
-                    leader: forward.leader_id,
-                })
+        }
+        let edit = MembershipEdit::AddVoterIds(BTreeSet::from([id]));
+        written(self.raft.change_membership(edit, false).await)
+    }
+
+    /// Removes `id` from the cluster, voter or learner. Once the change
+    /// commits, `id` gets no more entries and its votes no longer count; it
+    /// should be shut down.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`] when this replica cannot change the membership,
+    /// and [`Error::Raft`] when `id` is the last voter.
+    pub async fn remove(&self, id: NodeId) -> Result<LogId> {
+        let ids = BTreeSet::from([id]);
+        let edit = match self.progress(id) {
+            Progress::Voter => MembershipEdit::RemoveVoters(ids),
+            Progress::Unknown => return Err(self.not_leader()),
+            Progress::Stranger | Progress::Behind { .. } | Progress::CaughtUp => {
+                MembershipEdit::RemoveNodes(ids)
             }
-            Err(RaftError::APIError(other)) => Err(Error::Raft(Box::new(other))),
-            Err(RaftError::Fatal(fatal)) => Err(stopped(fatal)),
+        };
+        written(self.raft.change_membership(edit, false).await)
+    }
+
+    /// The membership this replica knows of, committed or not.
+    #[must_use]
+    pub fn membership(&self) -> Membership {
+        self.inbox().membership()
+    }
+
+    fn not_leader(&self) -> Error {
+        Error::NotLeader {
+            leader: self.status().leader(),
         }
     }
 
@@ -300,47 +388,57 @@ impl<C: Config> Clone for Inbox<C> {
 }
 
 impl<C: Config> Inbox<C> {
-    /// Handles an append-entries request from the leader.
-    ///
-    /// # Errors
-    ///
-    /// When the replica has stopped.
-    pub async fn append_entries(
-        &self,
-        request: AppendEntriesRequest<C>,
-    ) -> Result<AppendResult<C>, RaftError<C>> {
-        self.raft.append_entries(request).await
+    /// Handles `request` from another replica.
+    pub async fn handle(&self, request: Request<C>) -> Response<C> {
+        let response = match request {
+            Request::AppendEntries(request) => self
+                .raft
+                .append_entries(request)
+                .await
+                .map(Response::AppendEntries),
+            Request::Vote(request) => self.raft.vote(request).await.map(Response::Vote),
+            Request::PreVote(request) => self.raft.pre_vote(request).await.map(Response::PreVote),
+            Request::InstallSnapshot { vote, snapshot } => self
+                .raft
+                .install_full_snapshot(vote, snapshot)
+                .await
+                .map(Response::InstallSnapshot)
+                .map_err(RaftError::Fatal),
+        };
+        response.unwrap_or(Response::Refused(Refusal::Stopped))
     }
 
-    /// Handles a vote request from a candidate.
-    ///
-    /// # Errors
-    ///
-    /// When the replica has stopped.
-    pub async fn vote(&self, request: VoteRequest<C>) -> Result<VoteResponse<C>, RaftError<C>> {
-        self.raft.vote(request).await
+    /// The membership the replica knows of, committed or not: who may send
+    /// to it.
+    #[must_use]
+    pub fn membership(&self) -> Membership {
+        self.raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .membership()
+            .clone()
     }
+}
 
-    /// Handles a pre-vote request: would this replica grant the vote?
-    ///
-    /// # Errors
-    ///
-    /// When the replica has stopped.
-    pub async fn pre_vote(&self, request: VoteRequest<C>) -> Result<VoteResponse<C>, RaftError<C>> {
-        self.raft.pre_vote(request).await
-    }
-
-    /// Installs a snapshot sent by the leader.
-    ///
-    /// # Errors
-    ///
-    /// When the replica has stopped.
-    pub async fn install_snapshot(
-        &self,
-        vote: Vote,
-        snapshot: Snapshot,
-    ) -> Result<SnapshotResponse<C>, Fatal<C>> {
-        self.raft.install_full_snapshot(vote, snapshot).await
+/// The log position of a write, or why it failed.
+fn written<C: Config>(
+    result: Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>>,
+) -> Result<LogId> {
+    match result {
+        Ok(response) => Ok(response.log_id),
+        Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
+            Err(Error::NotLeader {
+                leader: forward.leader_id,
+            })
+        }
+        Err(RaftError::APIError(ClientWriteError::LogEntryDiscarded(forward))) => {
+            Err(Error::Discarded {
+                leader: forward.leader_id,
+            })
+        }
+        Err(RaftError::APIError(other)) => Err(Error::Raft(Box::new(other))),
+        Err(RaftError::Fatal(fatal)) => Err(stopped(fatal)),
     }
 }
 

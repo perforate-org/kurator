@@ -1,6 +1,6 @@
-//! Clusters under random faults: whatever happens, an acknowledged write is
-//! never lost, every replica ends with the same state, and the same seed
-//! replays the same run.
+//! Clusters under random faults and membership changes: whatever happens,
+//! an acknowledged write is never lost, every replica ends with the same
+//! state, and the same seed replays the same run.
 //!
 //! `KURATOR_SIM_SEEDS=<n>` runs more seeds than the default, and
 //! `KURATOR_SIM_SEED=<seed>` runs just one, to reproduce a failure.
@@ -36,7 +36,14 @@ struct Run {
     unknown: BTreeSet<Vec<u8>>,
     /// The state of every replica after the cluster settled.
     states: BTreeMap<NodeId, KvState>,
+    /// The id the next node to join gets. Ids are never reused: a node
+    /// that left keeps its directory.
+    next_id: u64,
 }
+
+/// The fewest and the most nodes the schedule keeps in the cluster.
+const MIN_NODES: usize = 3;
+const MAX_NODES: usize = 5;
 
 fn seeds() -> Vec<u64> {
     if let Some(seed) = env_u64("KURATOR_SIM_SEED") {
@@ -51,8 +58,8 @@ fn env_u64(name: &str) -> Option<u64> {
         .map(|value| value.parse().expect(name))
 }
 
-/// Runs a random schedule of writes, crashes, restarts, partitions and
-/// pauses for `seed`, then settles the cluster.
+/// Runs a random schedule of writes, crashes, restarts, partitions, joins,
+/// leaves and pauses for `seed`, then settles the cluster.
 fn run(seed: u64) -> Run {
     SimRuntime::with_seed(seed).block_on(async {
         let mut rng = Rng::new(seed);
@@ -62,6 +69,7 @@ fn run(seed: u64) -> Run {
             acked: BTreeSet::new(),
             unknown: BTreeSet::new(),
             states: BTreeMap::new(),
+            next_id: 4,
         };
         for step in 0..STEPS {
             let event = act(&mut cluster, &mut rng, step, &mut run).await.unwrap();
@@ -88,7 +96,7 @@ async fn act(
 ) -> Result<String, SimError> {
     let roll = rng.below(100);
     let event = match roll {
-        0..60 => {
+        0..56 => {
             let key = format!("key-{step}").into_bytes();
             let outcome = cluster
                 .write(WriteBatch::new().put(key.clone(), b"value".to_vec()))
@@ -101,7 +109,7 @@ async fn act(
             }
             format!("write -> {outcome:?}")
         }
-        60..70 => match rng.pick(&cluster.up()).copied() {
+        56..66 => match rng.pick(&cluster.up()).copied() {
             Some(id) => {
                 cluster.crash(id).await?;
                 assert!(cluster.down().contains(&id), "{id} is down");
@@ -109,25 +117,25 @@ async fn act(
             }
             None => "crash: none up".to_owned(),
         },
-        70..82 => match rng.pick(&cluster.down()).copied() {
+        66..78 => match rng.pick(&cluster.down()).copied() {
             Some(id) => {
                 cluster.restart(id).await?;
                 format!("restart {id}")
             }
             None => "restart: none down".to_owned(),
         },
-        82..88 => rng.pick(&cluster.ids()).copied().map_or_else(
+        78..84 => rng.pick(&cluster.ids()).copied().map_or_else(
             || "isolate: no replicas".to_owned(),
             |id| {
                 cluster.isolate(id);
                 format!("isolate {id}")
             },
         ),
-        88..94 => {
+        84..90 => {
             cluster.heal();
             "heal".to_owned()
         }
-        94..96 => {
+        90..92 => {
             for id in cluster.up() {
                 cluster.crash(id).await?;
             }
@@ -136,6 +144,19 @@ async fn act(
             }
             "restart all".to_owned()
         }
+        92..95 if cluster.ids().len() < MAX_NODES => {
+            let id = NodeId::new(run.next_id);
+            run.next_id = run.next_id.saturating_add(1);
+            let outcome = cluster.join(id).await?;
+            format!("join {id} -> {outcome:?}")
+        }
+        95..97 if cluster.ids().len() > MIN_NODES => match rng.pick(&cluster.ids()).copied() {
+            Some(id) => {
+                let outcome = cluster.leave(id).await?;
+                format!("leave {id} -> {outcome:?}")
+            }
+            None => "leave: no replicas".to_owned(),
+        },
         _ => {
             let pause = Duration::from_millis(rng.between(10, 2000));
             SimRuntime::sleep(pause).await;
@@ -179,7 +200,7 @@ fn random_faults_never_lose_an_acknowledged_write() {
         acked += run.acked.len();
         for event in &run.trace {
             let kind = event.split_whitespace().nth(1).unwrap_or_default();
-            if ["crash", "restart", "isolate"].contains(&kind) {
+            if ["crash", "restart", "isolate", "join", "leave"].contains(&kind) {
                 let _: bool = faults.insert(kind.to_owned());
             }
         }
@@ -187,8 +208,8 @@ fn random_faults_never_lose_an_acknowledged_write() {
     assert!(acked > 0, "some writes succeed");
     assert_eq!(
         faults.len(),
-        3,
-        "replicas crashed, restarted and were cut off: {faults:?}"
+        5,
+        "replicas crashed, restarted, were cut off, joined and left: {faults:?}"
     );
 }
 

@@ -113,7 +113,14 @@ impl VerifyingKey {
 
 impl fmt::Debug for VerifyingKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VerifyingKey({})", Digest(self.to_bytes()))
+        write!(f, "VerifyingKey({self})")
+    }
+}
+
+/// Lowercase hex, as [`Digest`] shows itself.
+impl fmt::Display for VerifyingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Digest(self.to_bytes()).fmt(f)
     }
 }
 

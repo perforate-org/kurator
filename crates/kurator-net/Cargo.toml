@@ -1,0 +1,30 @@
+[package]
+name = "kurator-net"
+description = "QUIC transport for Kurator replicas: persistent connections, binary RPC, Ed25519 raw-public-key authentication"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kurator-raft.workspace = true
+kurator-wal.workspace = true
+openraft-rt-tokio.workspace = true
+parking_lot.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+kurator-storage.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true
