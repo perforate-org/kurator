@@ -274,6 +274,30 @@ fn old_versions_and_removed_keys_are_forgotten() {
 }
 
 #[test]
+fn untouched_keys_are_swept_once_per_window() {
+    let mut state = KvState::new(retention(3));
+    let _put = state.apply(
+        Version::new(1),
+        Command::Kv(WriteBatch::new().put("k", "1")),
+    );
+    let _delete = state.apply(Version::new(2), Command::Kv(WriteBatch::new().delete("k")));
+    let swept = |state: &KvState| !state.keys.contains_key(b"k".as_slice());
+    for version in 3..=5 {
+        let _other = state.apply(
+            Version::new(version),
+            Command::Kv(WriteBatch::new().put("other", "x")),
+        );
+    }
+    assert_eq!(state.horizon(), Version::new(2), "the removal is behind");
+    assert!(!swept(&state), "not swept inside the window");
+    let _next = state.apply(
+        Version::new(6),
+        Command::Kv(WriteBatch::new().put("other", "y")),
+    );
+    assert!(swept(&state), "swept on entering the next window");
+}
+
+#[test]
 fn encoding_roundtrips() {
     let state = state();
     assert_eq!(roundtrip(&state), Some(state), "roundtrip");

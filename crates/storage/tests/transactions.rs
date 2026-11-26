@@ -85,6 +85,9 @@ fn a_key_that_appears_in_a_scanned_range_aborts() {
         "no users yet"
     );
     txn.put("user/first", "admin");
+    txn.put("user/temp", "x");
+    txn.delete("user/temp");
+    assert_eq!(txn.get(b"user/temp").unwrap(), None, "its own removal");
     let _: Version = db.put("user/other", "admin").unwrap();
     assert!(
         matches!(txn.commit(), Err(Error::Aborted(Abort::Conflict { .. }))),
