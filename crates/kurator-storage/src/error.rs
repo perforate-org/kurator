@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use kurator_wal::Lsn;
 
-use crate::codec::DecodeError;
+use kurator_codec::DecodeError;
 
 /// Result of a storage operation.
 pub type Result<T, E = Error> = std::result::Result<T, E>;

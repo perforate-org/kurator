@@ -1,38 +1,27 @@
-//! The in-memory state: every key and value, and the last applied record.
+//! The in-memory state: every key and value.
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::ops::Bound;
 
+use kurator_codec::{DecodeError, Reader, put_bytes};
 use kurator_wal::Lsn;
 
 use crate::batch::{Command, KvOp};
 
-/// The key-value state as of [`KvState::applied`].
+/// The key-value state: every key and its value.
+///
+/// A state changes only by [`KvState::apply`], one [`Command`] at a time,
+/// so replicas that apply the same commands in the same order hold the same
+/// state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvState {
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
-    applied: Lsn,
 }
 
 impl KvState {
-    /// A state restored from a snapshot taken at `applied`.
-    pub(crate) fn restore<'a>(
-        applied: Lsn,
-        entries: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
-    ) -> Self {
-        Self {
-            entries: entries
-                .into_iter()
-                .map(|(key, value)| (key.to_vec(), value.to_vec()))
-                .collect(),
-            applied,
-        }
-    }
-
-    /// Applies the command logged at `lsn`, which must come after
-    /// [`KvState::applied`].
-    pub(crate) fn apply(&mut self, lsn: Lsn, command: Command) {
-        debug_assert!(lsn > self.applied, "records apply in log order");
+    /// Applies `command`.
+    pub fn apply(&mut self, command: Command) {
         let Command::Kv(batch) = command;
         for op in batch.into_ops() {
             match op {
@@ -40,7 +29,38 @@ impl KvState {
                 KvOp::Delete { key } => drop(self.entries.remove(&key)),
             }
         }
-        self.applied = lsn;
+    }
+
+    /// Writes every entry as `count u64` followed by that many length
+    /// prefixed `key | value` pairs, in key order.
+    ///
+    /// # Errors
+    ///
+    /// When `out` fails or a key or value is too long for its prefix.
+    pub fn encode(&self, out: &mut impl Write) -> io::Result<()> {
+        let count = u64::try_from(self.len()).map_err(io::Error::other)?;
+        out.write_all(&count.to_le_bytes())?;
+        for (key, value) in self.iter() {
+            put_bytes(out, key)?;
+            put_bytes(out, value)?;
+        }
+        Ok(())
+    }
+
+    /// Reads entries written by [`KvState::encode`] off the front of
+    /// `reader`.
+    ///
+    /// # Errors
+    ///
+    /// [`DecodeError::Truncated`] when the input ends early.
+    pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let count = reader.u64()?;
+        let mut entries = BTreeMap::new();
+        for _ in 0..count {
+            let (key, value) = (reader.bytes()?, reader.bytes()?);
+            drop(entries.insert(key.to_vec(), value.to_vec()));
+        }
+        Ok(Self { entries })
     }
 
     /// The value of `key`.
@@ -71,12 +91,6 @@ impl KvState {
             .map(|(key, value)| (key.as_slice(), value.as_slice()))
     }
 
-    /// The last record applied, or [`Lsn::ZERO`].
-    #[must_use]
-    pub const fn applied(&self) -> Lsn {
-        self.applied
-    }
-
     /// How many keys there are.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -87,6 +101,36 @@ impl KvState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// A [`KvState`] and the last log record applied to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LoggedState {
+    state: KvState,
+    applied: Lsn,
+}
+
+impl LoggedState {
+    pub(crate) const fn new(state: KvState, applied: Lsn) -> Self {
+        Self { state, applied }
+    }
+
+    /// Applies the command logged at `lsn`, which must come after
+    /// [`LoggedState::applied`].
+    pub(crate) fn apply(&mut self, lsn: Lsn, command: Command) {
+        debug_assert!(lsn > self.applied, "records apply in log order");
+        self.state.apply(command);
+        self.applied = lsn;
+    }
+
+    pub(crate) const fn state(&self) -> &KvState {
+        &self.state
+    }
+
+    /// The last record applied, or [`Lsn::ZERO`].
+    pub(crate) const fn applied(&self) -> Lsn {
+        self.applied
     }
 }
 
@@ -109,12 +153,13 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::KvState;
+    use super::{KvState, LoggedState};
     use crate::batch::{Command, WriteBatch};
+    use kurator_codec::Reader;
     use kurator_wal::Lsn;
 
-    fn state() -> KvState {
-        let mut state = KvState::default();
+    fn logged() -> LoggedState {
+        let mut state = LoggedState::default();
         state.apply(
             Lsn::new(1),
             Command::Kv(WriteBatch::new().put("a", "1").put("b", "2").put("c", "3")),
@@ -126,16 +171,20 @@ mod tests {
         state
     }
 
+    fn state() -> KvState {
+        logged().state().clone()
+    }
+
     fn keys<'a>(entries: impl Iterator<Item = (&'a [u8], &'a [u8])>) -> Vec<&'a [u8]> {
         entries.map(|(key, _)| key).collect()
     }
 
     #[test]
     fn batches_apply_in_order() {
+        assert_eq!(logged().applied(), Lsn::new(2), "applied");
         let state = state();
         assert_eq!(state.get(b"a"), Some(b"9".as_slice()), "overwritten");
         assert_eq!(state.get(b"b"), None, "deleted");
-        assert_eq!(state.applied(), Lsn::new(2), "applied");
         assert_eq!((state.len(), state.is_empty()), (2, false), "size");
         assert!(KvState::default().is_empty(), "empty");
     }
@@ -171,7 +220,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn encoding_roundtrips() {
+        let state = state();
+        let mut out = Vec::new();
+        state.encode(&mut out).unwrap();
+        let mut reader = Reader::new(&out);
+        assert_eq!(KvState::decode(&mut reader), Ok(state), "roundtrip");
+        assert_eq!(reader.finish(), Ok(()), "every byte read");
+    }
+
     proptest! {
+        #[test]
+        fn decoding_arbitrary_bytes_never_panics(buf in proptest::collection::vec(any::<u8>(), 0..64)) {
+            drop(KvState::decode(&mut Reader::new(&buf)));
+        }
+
         #[test]
         fn range_never_panics(start in proptest::option::of(any::<(bool, u8)>()), end in proptest::option::of(any::<(bool, u8)>())) {
             let state = state();

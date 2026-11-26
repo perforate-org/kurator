@@ -18,9 +18,10 @@ use std::path::PathBuf;
 
 use kurator_wal::{Lsn, LsnFiles, sync_dir};
 
-use crate::codec::{DecodeError, Reader, put_bytes};
+use kurator_codec::{DecodeError, Reader};
+
 use crate::error::{Error, Result, SnapshotDamage};
-use crate::state::KvState;
+use crate::state::{KvState, LoggedState};
 
 const MAGIC: [u8; 4] = *b"KRSN";
 const VERSION: u16 = 1;
@@ -53,7 +54,7 @@ impl Snapshots {
     }
 
     /// Loads the newest snapshot, if there is one.
-    pub(crate) fn load_latest(&self) -> Result<Option<KvState>> {
+    pub(crate) fn load_latest(&self) -> Result<Option<LoggedState>> {
         let Some((named, path)) = self.list()?.pop() else {
             return Ok(None);
         };
@@ -79,7 +80,7 @@ impl Snapshots {
     }
 
     /// Writes `state` as the newest snapshot and deletes the older ones.
-    pub(crate) fn write(&self, state: &KvState) -> Result<Lsn> {
+    pub(crate) fn write(&self, state: &LoggedState) -> Result<Lsn> {
         let applied = state.applied();
         let mut file = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
@@ -125,21 +126,15 @@ impl Snapshots {
     }
 }
 
-fn encode(state: &KvState, out: &mut impl Write) -> io::Result<()> {
-    let count = u64::try_from(state.len()).map_err(io::Error::other)?;
+fn encode(state: &LoggedState, out: &mut impl Write) -> io::Result<()> {
     for part in [&MAGIC[..], &VERSION.to_le_bytes(), &FLAGS.to_le_bytes()] {
         out.write_all(part)?;
     }
     out.write_all(&state.applied().get().to_le_bytes())?;
-    out.write_all(&count.to_le_bytes())?;
-    for (key, value) in state.iter() {
-        put_bytes(out, key)?;
-        put_bytes(out, value)?;
-    }
-    Ok(())
+    state.state().encode(out)
 }
 
-fn decode(body: &[u8]) -> Result<KvState, DecodeError> {
+fn decode(body: &[u8]) -> Result<LoggedState, DecodeError> {
     let mut reader = Reader::new(body);
     if reader.exact::<4>()? != MAGIC {
         return Err(DecodeError::Magic);
@@ -149,13 +144,9 @@ fn decode(body: &[u8]) -> Result<KvState, DecodeError> {
         return Err(DecodeError::Version(version.to_le_bytes()[0]));
     }
     let applied = Lsn::new(reader.u64()?);
-    let count = reader.u64()?;
-    let mut entries = Vec::new();
-    for _ in 0..count {
-        entries.push((reader.bytes()?, reader.bytes()?));
-    }
+    let state = KvState::decode(&mut reader)?;
     reader.finish()?;
-    Ok(KvState::restore(applied, entries))
+    Ok(LoggedState::new(state, applied))
 }
 
 /// A writer that keeps a CRC-32C of everything written through it.
@@ -193,11 +184,11 @@ mod tests {
     use super::Snapshots;
     use crate::batch::{Command, WriteBatch};
     use crate::error::{Error, SnapshotDamage};
-    use crate::state::KvState;
+    use crate::state::LoggedState;
     use kurator_wal::Lsn;
 
-    fn state(lsn: u64) -> KvState {
-        let mut state = KvState::default();
+    fn state(lsn: u64) -> LoggedState {
+        let mut state = LoggedState::default();
         state.apply(
             Lsn::new(lsn),
             Command::Kv(WriteBatch::new().put("k", "v").put("", "")),

@@ -10,7 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::batch::{Command, Encoded};
 use crate::error::{Error, Result};
 use crate::snapshot::Snapshots;
-use crate::state::KvState;
+use crate::state::{KvState, LoggedState};
 
 /// Everything a database shares between the commit thread and callers.
 ///
@@ -18,7 +18,7 @@ use crate::state::KvState;
 /// takes `wal` and `state` one after the other, never both.
 #[derive(Debug)]
 pub(crate) struct Core {
-    state: RwLock<KvState>,
+    state: RwLock<LoggedState>,
     wal: Mutex<Wal>,
     snapshots: Snapshots,
     checkpointing: Mutex<()>,
@@ -65,12 +65,17 @@ impl Core {
 
     /// A copy of the current value of `key`.
     pub(crate) fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.state.read().get(key).map(<[u8]>::to_vec)
+        self.state.read().state().get(key).map(<[u8]>::to_vec)
     }
 
     /// Runs `read` against the current state.
     pub(crate) fn read<R>(&self, read: impl FnOnce(&KvState) -> R) -> R {
-        read(&self.state.read())
+        read(self.state.read().state())
+    }
+
+    /// The last record applied to the state.
+    pub(crate) fn applied(&self) -> Lsn {
+        self.state.read().applied()
     }
 
     /// Writes a snapshot of the current state and purges the log segments

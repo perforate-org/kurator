@@ -2,7 +2,8 @@
 
 use std::io::Write as _;
 
-use crate::codec::{DecodeError, Reader, put_bytes};
+use kurator_codec::{DecodeError, Reader, put_bytes};
+
 use crate::error::{Error, Result};
 
 /// One change to the key-value model.
@@ -77,26 +78,50 @@ impl WriteBatch {
 /// Later phases add one variant per data model (documents, graph, ...);
 /// the model tag in the encoding keeps their records apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Command {
+#[non_exhaustive]
+pub enum Command {
+    /// Changes to the key-value model.
     Kv(WriteBatch),
 }
 
 /// A [`Command`] together with its log payload, ready to be committed.
 ///
-/// Only [`Command::encode`] makes one, so a committed payload always fits
-/// the log and decodes back to its command.
-#[derive(Debug)]
-pub(crate) struct Encoded {
+/// Only [`Command::encode`] and [`Encoded::decode`] make one, so a payload
+/// always fits one log record and decodes back to its command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoded {
     command: Command,
     payload: Vec<u8>,
 }
 
 impl Encoded {
-    pub(crate) fn payload(&self) -> &[u8] {
+    /// Decodes `payload`, keeping it alongside its command.
+    ///
+    /// # Errors
+    ///
+    /// When `payload` is not something [`Command::encode`] wrote.
+    pub fn decode(payload: Vec<u8>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            command: Command::decode(&payload)?,
+            payload,
+        })
+    }
+
+    /// The bytes that go into the log.
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
-    pub(crate) fn into_command(self) -> Command {
+    /// The command.
+    #[must_use]
+    pub const fn command(&self) -> &Command {
+        &self.command
+    }
+
+    /// Consumes the encoding, keeping the command.
+    #[must_use]
+    pub fn into_command(self) -> Command {
         self.command
     }
 }
@@ -114,7 +139,7 @@ impl Command {
     /// # Errors
     ///
     /// [`Error::EmptyBatch`] and [`Error::BatchTooLarge`].
-    pub(crate) fn encode(self) -> Result<Encoded> {
+    pub fn encode(self) -> Result<Encoded> {
         let Self::Kv(batch) = &self;
         if batch.ops.is_empty() {
             return Err(Error::EmptyBatch);
@@ -146,7 +171,12 @@ impl Command {
     }
 
     /// Decodes a payload written by [`Command::encode`].
-    pub(crate) fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
+    ///
+    /// # Errors
+    ///
+    /// When `payload` is truncated, has bytes left over, or names a version,
+    /// model or operation this build does not know.
+    pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
         match reader.u8()? {
             VERSION => {}
@@ -178,9 +208,9 @@ impl Command {
 mod tests {
     use proptest::prelude::*;
 
-    use super::{Command, KvOp, WriteBatch};
-    use crate::codec::DecodeError;
+    use super::{Command, Encoded, KvOp, WriteBatch};
     use crate::error::Error;
+    use kurator_codec::DecodeError;
 
     fn op() -> impl Strategy<Value = KvOp> {
         let bytes = || proptest::collection::vec(any::<u8>(), 0..16);
@@ -257,6 +287,7 @@ mod tests {
             let command = Command::Kv(WriteBatch { ops });
             let encoded = command.clone().encode().unwrap();
             prop_assert_eq!(Command::decode(encoded.payload()), Ok(command));
+            prop_assert_eq!(Encoded::decode(encoded.payload().to_vec()), Ok(encoded));
         }
 
         #[test]

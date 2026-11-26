@@ -32,7 +32,6 @@
 //! ```
 
 mod batch;
-mod codec;
 mod commit;
 mod core;
 mod db;
@@ -41,9 +40,9 @@ mod lock;
 mod snapshot;
 mod state;
 
-pub use batch::{KvOp, WriteBatch};
-pub use codec::DecodeError;
+pub use batch::{Command, Encoded, KvOp, WriteBatch};
 pub use db::{Db, Options};
 pub use error::{Error, Result, SnapshotDamage};
+pub use kurator_codec::DecodeError;
 pub use kurator_wal::{Lsn, RecoveryReport};
 pub use state::KvState;

@@ -109,6 +109,12 @@ impl Db {
         self.core.read(read)
     }
 
+    /// The log position of the last write applied to the state.
+    #[must_use]
+    pub fn applied(&self) -> Lsn {
+        self.core.applied()
+    }
+
     /// Writes a snapshot and deletes the log segments it makes unneeded.
     /// Returns the log position the snapshot holds.
     ///

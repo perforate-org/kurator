@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 kurator-wal.workspace = true
+kurator-codec.workspace = true
 crc32c.workspace = true
 parking_lot.workspace = true
 tempfile.workspace = true

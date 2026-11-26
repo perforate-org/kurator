@@ -410,11 +410,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-codec"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "kurator-storage"
 version = "0.0.1"
 dependencies = [
  "crc32c",
  "criterion",
+ "kurator-codec",
  "kurator-wal",
  "parking_lot",
  "proptest",
