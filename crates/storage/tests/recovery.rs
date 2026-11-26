@@ -12,7 +12,7 @@ use std::path::Path;
 use std::thread;
 
 use criterion as _;
-use kurator_storage::{Db, Error, Lsn, Options, WriteBatch};
+use kurator_storage::{Db, Error, Lsn, Options, Version, WriteBatch};
 use kurator_wal::{InvalidFrame, TailDamage};
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -69,8 +69,8 @@ fn contents(db: &Db) -> BTreeMap<Vec<u8>, Vec<u8>> {
 fn acknowledged_writes_survive_a_crash() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), Options::default()).unwrap();
-    assert_eq!(db.put("a", "1").unwrap(), Lsn::new(1), "first record");
-    let _: Lsn = db
+    assert_eq!(db.put("a", "1").unwrap(), Version::new(1), "first record");
+    let _: Version = db
         .write(WriteBatch::new().put("b", "2").delete("a"))
         .unwrap();
     let image = crash_image(dir.path());
@@ -90,7 +90,7 @@ fn acknowledged_writes_survive_a_crash() {
 fn a_torn_write_at_the_crash_is_discarded() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), Options::default()).unwrap();
-    let _: Lsn = db.put("a", "1").unwrap();
+    let _: Version = db.put("a", "1").unwrap();
     let image = crash_image(dir.path());
     tear_tail(image.path(), &[9, 0, 0, 0, 0xAB]);
 
@@ -108,7 +108,7 @@ fn a_torn_write_at_the_crash_is_discarded() {
     );
     assert_eq!(
         recovered.put("b", "2").unwrap(),
-        Lsn::new(2),
+        Version::new(2),
         "log continues"
     );
 }
@@ -121,10 +121,10 @@ fn checkpoints_bound_the_log_and_recover() {
     {
         let db = Db::open(dir.path(), options.clone()).unwrap();
         for i in 0_u32..100 {
-            let _: Lsn = db.put(i.to_le_bytes(), [7; 32]).unwrap();
+            let _: Version = db.put(i.to_le_bytes(), [7; 32]).unwrap();
         }
         assert_eq!(db.checkpoint().unwrap(), Lsn::new(100), "snapshot position");
-        let _: Lsn = db.delete(0_u32.to_le_bytes()).unwrap();
+        let _: Version = db.delete(0_u32.to_le_bytes()).unwrap();
         let segments = fs::read_dir(dir.path().join("wal")).unwrap().count();
         assert!(segments <= 2, "old segments purged, {segments} left");
     }
@@ -147,7 +147,7 @@ fn concurrent_writers_share_commits() {
     let db = Db::open(dir.path(), Options::default()).unwrap();
     let write_all = |writer: u8| {
         for i in 0_u8..50 {
-            let _: Lsn = db.put([writer, i], [i]).unwrap();
+            let _: Version = db.put([writer, i], [i]).unwrap();
         }
     };
     thread::scope(|scope| {
@@ -200,7 +200,11 @@ fn invalid_batches_are_rejected() {
         ),
         "too large"
     );
-    assert_eq!(db.put("k", "v").unwrap(), Lsn::new(1), "nothing consumed");
+    assert_eq!(
+        db.put("k", "v").unwrap(),
+        Version::new(1),
+        "nothing consumed"
+    );
 }
 
 #[test]
@@ -208,7 +212,7 @@ fn a_damaged_snapshot_stops_recovery() {
     let dir = tempfile::tempdir().unwrap();
     {
         let db = Db::open(dir.path(), Options::default()).unwrap();
-        let _: Lsn = db.put("k", "v").unwrap();
+        let _: Version = db.put("k", "v").unwrap();
         let _: Lsn = db.checkpoint().unwrap();
     }
     let snapshot = fs::read_dir(dir.path().join("snapshots"))
@@ -264,11 +268,11 @@ proptest! {
         for step in steps {
             match step {
                 Step::Put(key, value) => {
-                    let _: Lsn = db.put([key], [value]).unwrap();
+                    let _: Version = db.put([key], [value]).unwrap();
                     drop(model.insert(vec![key], vec![value]));
                 }
                 Step::Delete(key) => {
-                    let _: Lsn = db.delete([key]).unwrap();
+                    let _: Version = db.delete([key]).unwrap();
                     drop(model.remove(&vec![key]));
                 }
                 Step::Checkpoint => {

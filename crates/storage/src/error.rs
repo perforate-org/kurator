@@ -7,6 +7,8 @@ use kurator_wal::Lsn;
 
 use kurator_codec::DecodeError;
 
+use crate::outcome::{Abort, Unreadable};
+
 /// Result of a storage operation.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -53,9 +55,22 @@ pub enum Error {
     /// The encoded batch exceeds [`kurator_wal::MAX_PAYLOAD_LEN`].
     #[error("write batch is too large for one log record")]
     BatchTooLarge,
+    /// The transaction aborted and wrote nothing.
+    #[error("transaction aborted: {0}")]
+    Aborted(#[from] Abort),
+    /// A transaction's read version is not readable.
+    #[error(transparent)]
+    Unreadable(#[from] Unreadable),
     /// The commit thread is gone.
     #[error("the commit thread has stopped")]
     Closed,
+}
+
+impl Error {
+    /// A key or value too long for its length prefix.
+    pub(crate) fn too_large(_: std::io::Error) -> Self {
+        Self::BatchTooLarge
+    }
 }
 
 /// What is wrong with a snapshot.

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::{Stream, TryStreamExt as _};
-use kurator_storage::KvState;
+use kurator_storage::{KvState, Outcome, Version};
 use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
 use parking_lot::Mutex;
@@ -84,15 +84,20 @@ impl StateMachine {
 }
 
 impl Machine {
-    fn apply(&mut self, entry: Entry) {
+    /// Applies `entry`. A command applies at the version of its index; an
+    /// entry without one leaves the state as it is.
+    fn apply(&mut self, entry: Entry) -> Outcome {
+        self.applied = Some(entry.log_id);
         match entry.payload {
-            EntryPayload::Blank => {}
-            EntryPayload::Normal(proposal) => self.state.apply(proposal.into_command()),
+            EntryPayload::Normal(proposal) => self
+                .state
+                .apply(Version::new(entry.log_id.index), proposal.into_command()),
+            EntryPayload::Blank => Outcome::Committed(self.state.version()),
             EntryPayload::Membership(membership) => {
                 self.membership = StoredMembership::new(Some(entry.log_id), membership);
+                Outcome::Committed(self.state.version())
             }
         }
-        self.applied = Some(entry.log_id);
     }
 
     fn snapshot(&mut self) -> Result<(SnapshotMeta, SnapshotBytes)> {
@@ -145,9 +150,9 @@ impl<C: Config> RaftStateMachine<C> for StateMachine {
         Strm: Stream<Item = io::Result<EntryResponder<C>>> + Unpin + OptionalSend,
     {
         while let Some((entry, responder)) = entries.try_next().await? {
-            self.machine.lock().apply(entry);
+            let outcome = self.machine.lock().apply(entry);
             if let Some(responder) = responder {
-                responder.send(());
+                responder.send(outcome);
             }
         }
         Ok(())

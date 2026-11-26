@@ -3,9 +3,9 @@
 //! File `<applied lsn as 20 digits>.snap`:
 //!
 //! ```text
-//! kurator_codec::Format "KRSN", version 1, around:
-//! applied lsn u64 | entries u64
-//! (key, value)*   each length prefixed, in key order
+//! kurator_codec::Format "KRSN", version 2, around:
+//! applied lsn u64
+//! state           KvState::encode: every key with its readable versions
 //! ```
 //!
 //! A snapshot is written to a temporary file, synced, renamed into place,
@@ -23,7 +23,8 @@ use kurator_codec::{DecodeError, Format};
 use crate::error::{Error, Result, SnapshotDamage};
 use crate::state::{KvState, LoggedState};
 
-const FORMAT: Format = Format::new(*b"KRSN", 1);
+/// Version 2 keeps every readable version of each key.
+const FORMAT: Format = Format::new(*b"KRSN", 2);
 const FILES: LsnFiles = LsnFiles::new(".snap");
 const TEMP_PREFIX: &str = ".snapshot-";
 
@@ -132,14 +133,15 @@ mod tests {
     use kurator_codec::DecodeError;
 
     use super::Snapshots;
-    use crate::batch::{Command, WriteBatch};
+    use crate::batch::WriteBatch;
+    use crate::command::Command;
     use crate::error::{Error, SnapshotDamage};
     use crate::state::LoggedState;
     use kurator_wal::Lsn;
 
     fn state(lsn: u64) -> LoggedState {
         let mut state = LoggedState::default();
-        state.apply(
+        let _committed = state.apply(
             Lsn::new(lsn),
             Command::Kv(WriteBatch::new().put("k", "v").put("", "")),
         );

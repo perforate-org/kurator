@@ -32,17 +32,27 @@
 //! ```
 
 mod batch;
+mod command;
 mod commit;
 mod core;
 mod db;
+mod draft;
 mod error;
 mod lock;
+mod outcome;
 mod snapshot;
 mod state;
+mod txn;
+mod version;
 
-pub use batch::{Command, Encoded, KvOp, WriteBatch};
-pub use db::{Db, Options};
+pub use batch::{KvOp, WriteBatch};
+pub use command::{Command, Encoded};
+pub use db::{Db, Options, Txn};
+pub use draft::{Draft, KeyValue};
 pub use error::{Error, Result, SnapshotDamage};
 pub use kurator_codec::DecodeError;
 pub use kurator_wal::{Lsn, RecoveryReport};
-pub use state::KvState;
+pub use outcome::{Abort, Outcome, Unreadable};
+pub use state::{KvState, View};
+pub use txn::Transaction;
+pub use version::{Retention, Version};

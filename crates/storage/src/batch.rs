@@ -1,10 +1,11 @@
-//! Writes, and how they are encoded as log records.
-
-use std::io::Write as _;
+//! Writes: changes to the key-value model, applied together.
 
 use kurator_codec::{DecodeError, Reader, put_bytes};
 
 use crate::error::{Error, Result};
+
+const OP_PUT: u8 = 1;
+const OP_DELETE: u8 = 2;
 
 /// One change to the key-value model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,121 +72,33 @@ impl WriteBatch {
     pub(crate) fn into_ops(self) -> impl Iterator<Item = KvOp> {
         self.ops.into_iter()
     }
-}
 
-/// Everything that can be written to the log.
-///
-/// Later phases add one variant per data model (documents, graph, ...);
-/// the model tag in the encoding keeps their records apart.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Command {
-    /// Changes to the key-value model.
-    Kv(WriteBatch),
-}
-
-/// A [`Command`] together with its log payload, ready to be committed.
-///
-/// Only [`Command::encode`] and [`Encoded::decode`] make one, so a payload
-/// always fits one log record and decodes back to its command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Encoded {
-    command: Command,
-    payload: Vec<u8>,
-}
-
-impl Encoded {
-    /// Decodes `payload`, keeping it alongside its command.
-    ///
-    /// # Errors
-    ///
-    /// When `payload` is not something [`Command::encode`] wrote.
-    pub fn decode(payload: Vec<u8>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            command: Command::decode(&payload)?,
-            payload,
-        })
-    }
-
-    /// The bytes that go into the log.
-    #[must_use]
-    pub fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
-    /// The command.
-    #[must_use]
-    pub const fn command(&self) -> &Command {
-        &self.command
-    }
-
-    /// Consumes the encoding, keeping the command.
-    #[must_use]
-    pub fn into_command(self) -> Command {
-        self.command
-    }
-}
-
-const VERSION: u8 = 1;
-const MODEL_KV: u8 = 1;
-const OP_PUT: u8 = 1;
-const OP_DELETE: u8 = 2;
-
-impl Command {
-    /// Encodes the command as `version u8 | model u8 | body`. A key-value
-    /// body is `count u32` followed by that many `op u8 | key | value?`,
-    /// keys and values length prefixed.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::EmptyBatch`] and [`Error::BatchTooLarge`].
-    pub fn encode(self) -> Result<Encoded> {
-        let Self::Kv(batch) = &self;
-        if batch.ops.is_empty() {
+    /// Appends `count u32 | (op u8 | key | value?)*`: put 1 with a value,
+    /// delete 2 without; keys and values length prefixed.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
+        if self.ops.is_empty() {
             return Err(Error::EmptyBatch);
         }
-        let count = u32::try_from(batch.ops.len()).map_err(|_| Error::BatchTooLarge)?;
-        let mut payload = vec![VERSION, MODEL_KV];
-        payload.extend_from_slice(&count.to_le_bytes());
-        let too_large = |_| Error::BatchTooLarge;
-        for op in &batch.ops {
+        let count = u32::try_from(self.ops.len()).map_err(|_| Error::BatchTooLarge)?;
+        out.extend_from_slice(&count.to_le_bytes());
+        for op in &self.ops {
             match op {
                 KvOp::Put { key, value } => {
-                    payload.write_all(&[OP_PUT]).map_err(too_large)?;
-                    put_bytes(&mut payload, key).map_err(too_large)?;
-                    put_bytes(&mut payload, value).map_err(too_large)?;
+                    out.push(OP_PUT);
+                    put_bytes(out, key).map_err(Error::too_large)?;
+                    put_bytes(out, value).map_err(Error::too_large)?;
                 }
                 KvOp::Delete { key } => {
-                    payload.write_all(&[OP_DELETE]).map_err(too_large)?;
-                    put_bytes(&mut payload, key).map_err(too_large)?;
+                    out.push(OP_DELETE);
+                    put_bytes(out, key).map_err(Error::too_large)?;
                 }
             }
         }
-        if payload.len() > kurator_wal::MAX_PAYLOAD_LEN {
-            return Err(Error::BatchTooLarge);
-        }
-        Ok(Encoded {
-            command: self,
-            payload,
-        })
+        Ok(())
     }
 
-    /// Decodes a payload written by [`Command::encode`].
-    ///
-    /// # Errors
-    ///
-    /// When `payload` is truncated, has bytes left over, or names a version,
-    /// model or operation this build does not know.
-    pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(payload);
-        match reader.read::<u8>()? {
-            VERSION => {}
-            other => return Err(DecodeError::Version(other)),
-        }
-        match reader.read::<u8>()? {
-            MODEL_KV => {}
-            other => return Err(DecodeError::Tag(other)),
-        }
+    /// Reads a batch written by [`WriteBatch::encode`].
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let mut ops = Vec::new();
         for _ in 0..reader.read::<u32>()? {
             let tag = reader.read::<u8>()?;
@@ -199,100 +112,6 @@ impl Command {
                 other => return Err(DecodeError::Tag(other)),
             });
         }
-        reader.finish()?;
-        Ok(Self::Kv(WriteBatch { ops }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use proptest::prelude::*;
-
-    use super::{Command, Encoded, KvOp, WriteBatch};
-    use crate::error::Error;
-    use kurator_codec::DecodeError;
-
-    fn op() -> impl Strategy<Value = KvOp> {
-        let bytes = || proptest::collection::vec(any::<u8>(), 0..16);
-        prop_oneof![
-            (bytes(), bytes()).prop_map(|(key, value)| KvOp::Put { key, value }),
-            bytes().prop_map(|key| KvOp::Delete { key }),
-        ]
-    }
-
-    #[test]
-    fn empty_batches_are_rejected() {
-        assert!(
-            matches!(
-                Command::Kv(WriteBatch::new()).encode(),
-                Err(Error::EmptyBatch)
-            ),
-            "empty"
-        );
-    }
-
-    #[test]
-    fn unknown_versions_models_and_ops_are_rejected() {
-        let payload = Command::Kv(WriteBatch::new().delete("k"))
-            .encode()
-            .unwrap()
-            .payload()
-            .to_vec();
-        for (at, error) in [
-            (0, DecodeError::Version(0xFF)),
-            (1, DecodeError::Tag(0xFF)),
-            (6, DecodeError::Tag(0xFF)),
-        ] {
-            let mut bad = payload.clone();
-            bad[at] = 0xFF;
-            assert_eq!(Command::decode(&bad), Err(error), "byte {at}");
-        }
-        assert_eq!(
-            Command::decode(&payload[..payload.len() - 1]),
-            Err(DecodeError::Truncated),
-            "short"
-        );
-    }
-
-    #[test]
-    fn a_batch_may_fill_a_whole_record() {
-        // version, model, count, op tag, key length, "k", value length
-        let overhead = 1 + 1 + 4 + 1 + 4 + 1 + 4;
-        let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - overhead];
-        let encoded = Command::Kv(WriteBatch::new().put("k", value))
-            .encode()
-            .unwrap();
-        assert_eq!(
-            encoded.payload().len(),
-            kurator_wal::MAX_PAYLOAD_LEN,
-            "exactly full"
-        );
-    }
-
-    #[test]
-    fn oversized_batches_are_rejected() {
-        let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - 15];
-        assert!(
-            matches!(
-                Command::Kv(WriteBatch::new().put("k", value)).encode(),
-                Err(Error::BatchTooLarge)
-            ),
-            "too large"
-        );
-    }
-
-    proptest! {
-        #[test]
-        fn roundtrip(ops in proptest::collection::vec(op(), 1..8)) {
-            let command = Command::Kv(WriteBatch { ops });
-            let encoded = command.clone().encode().unwrap();
-            prop_assert_eq!(Command::decode(encoded.payload()), Ok(command));
-            prop_assert_eq!(Encoded::decode(encoded.payload().to_vec()), Ok(encoded));
-        }
-
-        #[test]
-        fn arbitrary_payloads_never_panic(payload in proptest::collection::vec(any::<u8>(), 0..64)) {
-            drop(Command::decode(&payload));
-        }
+        Ok(Self { ops })
     }
 }

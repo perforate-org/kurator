@@ -1,106 +1,382 @@
-//! The in-memory state: every key and value.
+//! The in-memory state: every key with the versions of its value that are
+//! still readable.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::num::NonZeroU64;
 use std::ops::Bound;
 
 use kurator_codec::{DecodeError, Reader, put_bytes};
 use kurator_wal::Lsn;
 
-use crate::batch::{Command, KvOp};
+use crate::batch::KvOp;
+use crate::command::Command;
+use crate::outcome::{Abort, Outcome, Unreadable};
+use crate::txn::Transaction;
+use crate::version::{Retention, Version};
 
-/// The key-value state: every key and its value.
+/// The key-value state, versioned: each key keeps the values it had at
+/// every version its [`Retention`] still reads.
 ///
 /// A state changes only by [`KvState::apply`], one [`Command`] at a time,
-/// so replicas that apply the same commands in the same order hold the same
-/// state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// each at a version above the last, so replicas that apply the same
+/// commands at the same versions hold the same state. A
+/// [`Transaction`] command commits or aborts by what the state holds when
+/// it applies, so they also make the same decisions.
+///
+/// Reads look at one version through a [`View`]: [`KvState::latest`] for
+/// the newest, [`KvState::view`] for an older one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvState {
-    entries: BTreeMap<Vec<u8>, Vec<u8>>,
+    keys: BTreeMap<Vec<u8>, History>,
+    version: Version,
+    retention: Retention,
+}
+
+impl Default for KvState {
+    fn default() -> Self {
+        Self::new(Retention::DEFAULT)
+    }
 }
 
 impl KvState {
-    /// Applies `command`.
-    pub fn apply(&mut self, command: Command) {
-        let Command::Kv(batch) = command;
-        for op in batch.into_ops() {
-            match op {
-                KvOp::Put { key, value } => drop(self.entries.insert(key, value)),
-                KvOp::Delete { key } => drop(self.entries.remove(&key)),
-            }
+    /// An empty state that keeps `retention` versions readable.
+    #[must_use]
+    pub const fn new(retention: Retention) -> Self {
+        Self {
+            keys: BTreeMap::new(),
+            version: Version::ZERO,
+            retention,
         }
     }
 
-    /// Writes every entry as `count u64` followed by that many length
-    /// prefixed `key | value` pairs, in key order.
-    ///
-    /// # Errors
-    ///
-    /// When `out` fails or a key or value is too long for its prefix.
-    pub fn encode(&self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
-        let count = u64::try_from(self.len()).map_err(io::Error::other)?;
-        out.write_all(&count.to_le_bytes())?;
-        for (key, value) in self.iter() {
-            put_bytes(out, key)?;
-            put_bytes(out, value)?;
+    /// Applies `command` at `version`, which must be above
+    /// [`KvState::version`]. A write batch always commits; a transaction
+    /// commits unless a command after its read version wrote what it read.
+    pub fn apply(&mut self, version: Version, command: Command) -> Outcome {
+        debug_assert!(version > self.version, "versions only grow");
+        let writes = match command {
+            Command::Kv(batch) => batch,
+            Command::Txn(transaction) => match self.check(&transaction) {
+                Ok(()) => transaction.into_writes(),
+                Err(abort) => return Outcome::Aborted(abort),
+            },
+        };
+        let entering = self.retention.window(version) != self.retention.window(self.version);
+        self.version = version;
+        let horizon = self.horizon();
+        for op in writes.into_ops() {
+            let (key, value) = match op {
+                KvOp::Put { key, value } => (key, Some(value)),
+                KvOp::Delete { key } => (key, None),
+            };
+            let history = self.keys.entry(key).or_default();
+            history.write(version, value);
+            history.forget(horizon);
+        }
+        if entering {
+            self.keys.retain(|_, history| {
+                history.forget(horizon);
+                !history.is_gone(horizon)
+            });
+        }
+        Outcome::Committed(version)
+    }
+
+    /// Whether `transaction` may commit now: its read version is readable
+    /// and nothing it read was written after it.
+    fn check(&self, transaction: &Transaction) -> Result<(), Abort> {
+        let read_at = transaction.read_at();
+        self.readable(read_at)?;
+        let written_since = |key: &[u8], history: &History| {
+            let version = history.newest();
+            (version > read_at).then(|| Abort::Conflict {
+                key: key.to_vec(),
+                version,
+            })
+        };
+        let reads = transaction.reads();
+        let keys = reads
+            .keys()
+            .iter()
+            .filter_map(|key| Some((key.as_slice(), self.keys.get(key)?)));
+        let ranges = reads
+            .ranges()
+            .iter()
+            .flat_map(|range| self.histories(range.start(), range.end()));
+        keys.chain(ranges)
+            .find_map(|(key, history)| written_since(key, history))
+            .map_or(Ok(()), Err)
+    }
+
+    /// The newest version.
+    #[must_use]
+    pub const fn version(&self) -> Version {
+        self.version
+    }
+
+    /// How many versions stay readable.
+    #[must_use]
+    pub const fn retention(&self) -> Retention {
+        self.retention
+    }
+
+    /// The oldest version that still reads as it was.
+    #[must_use]
+    pub const fn horizon(&self) -> Version {
+        self.retention.horizon(self.version)
+    }
+
+    fn readable(&self, at: Version) -> Result<(), Unreadable> {
+        if at > self.version {
+            return Err(Unreadable::Ahead {
+                at,
+                newest: self.version,
+            });
+        }
+        let horizon = self.horizon();
+        if at < horizon {
+            return Err(Unreadable::Forgotten { at, horizon });
         }
         Ok(())
     }
 
-    /// Reads entries written by [`KvState::encode`] off the front of
-    /// `reader`.
+    /// The state as it was at version `at`.
     ///
     /// # Errors
     ///
-    /// [`DecodeError::Truncated`] when the input ends early.
-    pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
-        let count = reader.read::<u64>()?;
-        let mut entries = BTreeMap::new();
-        for _ in 0..count {
-            let (key, value) = (reader.bytes()?, reader.bytes()?);
-            drop(entries.insert(key.to_vec(), value.to_vec()));
-        }
-        Ok(Self { entries })
+    /// When `at` is behind [`KvState::horizon`] or ahead of
+    /// [`KvState::version`].
+    pub fn view(&self, at: Version) -> Result<View<'_>, Unreadable> {
+        self.readable(at)?;
+        Ok(View { state: self, at })
     }
 
-    /// The value of `key`.
+    /// The state at its newest version.
+    #[must_use]
+    pub const fn latest(&self) -> View<'_> {
+        View {
+            state: self,
+            at: self.version,
+        }
+    }
+
+    /// The newest value of `key`; see [`View::get`].
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        self.entries.get(key).map(Vec::as_slice)
+        self.latest().get(key)
     }
 
-    /// The entries with keys between `start` and `end`, in key order. An
-    /// empty or reversed range yields nothing.
+    /// The newest entries between `start` and `end`; see [`View::range`].
     pub fn range<'a>(
         &'a self,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
-        is_ordered(start, end)
-            .then(|| self.entries.range::<[u8], _>((start, end)))
-            .into_iter()
-            .flatten()
-            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+        self.latest().range(start, end)
     }
 
-    /// Every entry, in key order.
+    /// Every entry at the newest version, in key order.
     #[must_use = "iterators do nothing unless consumed"]
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> {
-        self.entries
-            .iter()
-            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.latest().range(Bound::Unbounded, Bound::Unbounded)
     }
 
-    /// How many keys there are.
+    /// How many keys have a value at the newest version.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.iter().count()
     }
 
-    /// Whether there are no keys.
+    /// Whether no key has a value at the newest version.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.iter().next().is_none()
+    }
+
+    /// The keys between `start` and `end` with their histories. An empty or
+    /// reversed range yields nothing.
+    fn histories<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> impl Iterator<Item = (&'a [u8], &'a History)> + 'a {
+        is_ordered(start, end)
+            .then(|| self.keys.range::<[u8], _>((start, end)))
+            .into_iter()
+            .flatten()
+            .map(|(key, history)| (key.as_slice(), history))
+    }
+
+    /// Writes the state as
+    ///
+    /// ```text
+    /// retention u64 | version u64 | keys u64
+    /// (key | versions u32 | (version u64 | tag u8 | value?)*)*
+    /// ```
+    ///
+    /// keys in order and each key's versions oldest first; tag 1 carries a
+    /// length prefixed value, tag 0 marks a removal.
+    ///
+    /// # Errors
+    ///
+    /// When `out` fails or a key or value is too long for its prefix.
+    pub fn encode(&self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        out.write_all(&self.retention.get().get().to_le_bytes())?;
+        out.write_all(&self.version.get().to_le_bytes())?;
+        let keys = u64::try_from(self.keys.len()).map_err(io::Error::other)?;
+        out.write_all(&keys.to_le_bytes())?;
+        for (key, history) in &self.keys {
+            put_bytes(out, key)?;
+            history.encode(out)?;
+        }
+        Ok(())
+    }
+
+    /// Reads a state written by [`KvState::encode`] off the front of
+    /// `reader`.
+    ///
+    /// # Errors
+    ///
+    /// [`DecodeError::Truncated`] when the input ends early, and
+    /// [`DecodeError::Invalid`] when the retention is zero, keys are out of
+    /// order, or a key's versions are empty, out of order or newer than
+    /// the state.
+    pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let retention = NonZeroU64::new(reader.read()?).ok_or(DecodeError::Invalid)?;
+        let version = Version::new(reader.read()?);
+        let count = reader.read::<u64>()?;
+        let mut keys = BTreeMap::new();
+        for _ in 0..count {
+            let key = reader.bytes()?.to_vec();
+            let history = History::decode(reader, version)?;
+            if keys.last_key_value().is_some_and(|(last, _)| *last >= key) {
+                return Err(DecodeError::Invalid);
+            }
+            drop(keys.insert(key, history));
+        }
+        Ok(Self {
+            keys,
+            version,
+            retention: Retention::new(retention),
+        })
+    }
+}
+
+/// The state as it was at one version.
+#[derive(Debug, Clone, Copy)]
+pub struct View<'a> {
+    state: &'a KvState,
+    at: Version,
+}
+
+impl<'a> View<'a> {
+    /// The version it shows.
+    #[must_use]
+    pub const fn at(self) -> Version {
+        self.at
+    }
+
+    /// The value of `key` at this version.
+    #[must_use]
+    pub fn get(self, key: &[u8]) -> Option<&'a [u8]> {
+        self.state.keys.get(key)?.at(self.at)
+    }
+
+    /// The entries with keys between `start` and `end` at this version, in
+    /// key order. An empty or reversed range yields nothing.
+    pub fn range(
+        self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+        let at = self.at;
+        self.state
+            .histories(start, end)
+            .filter_map(move |(key, history)| Some((key, history.at(at)?)))
+    }
+}
+
+/// The versions of one key's value, oldest first; `None` where the key was
+/// removed. Never empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct History(Vec<(Version, Option<Vec<u8>>)>);
+
+impl History {
+    /// The value at version `at`: the one written last at or before it.
+    fn at(&self, at: Version) -> Option<&[u8]> {
+        let written = self.0.partition_point(|(version, _)| *version <= at);
+        let (_, value) = self.0.get(written.checked_sub(1)?)?;
+        value.as_deref()
+    }
+
+    /// The version that wrote the key last.
+    fn newest(&self) -> Version {
+        self.0.last().map_or(Version::ZERO, |(version, _)| *version)
+    }
+
+    /// Records `value` at `version`, the newest. A batch that writes a
+    /// key twice keeps the last write.
+    fn write(&mut self, version: Version, value: Option<Vec<u8>>) {
+        match self.0.last_mut() {
+            Some((last, written)) if *last == version => *written = value,
+            Some(_) | None => self.0.push((version, value)),
+        }
+    }
+
+    /// Drops the versions no read at `horizon` or later can see: all but
+    /// the newest at or before it.
+    fn forget(&mut self, horizon: Version) {
+        let seen = self.0.partition_point(|(version, _)| *version <= horizon);
+        drop(self.0.drain(..seen.saturating_sub(1)));
+    }
+
+    /// Whether every readable version sees the key removed, so the key can
+    /// go. A transaction that read it at a readable version cannot
+    /// conflict with the removal either: the removal is not after it.
+    fn is_gone(&self, horizon: Version) -> bool {
+        match self.0.as_slice() {
+            [(version, None)] => *version <= horizon,
+            _ => false,
+        }
+    }
+
+    fn encode(&self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        let count = u32::try_from(self.0.len()).map_err(io::Error::other)?;
+        out.write_all(&count.to_le_bytes())?;
+        for (version, value) in &self.0 {
+            out.write_all(&version.get().to_le_bytes())?;
+            match value {
+                Some(value) => {
+                    out.write_all(&[1])?;
+                    put_bytes(out, value)?;
+                }
+                None => out.write_all(&[0])?,
+            }
+        }
+        Ok(())
+    }
+
+    fn decode(reader: &mut Reader<'_>, newest: Version) -> Result<Self, DecodeError> {
+        let count = reader.read::<u32>()?;
+        let mut versions: Vec<(Version, Option<Vec<u8>>)> = Vec::new();
+        for _ in 0..count {
+            let version = Version::new(reader.read()?);
+            let value = match reader.read::<u8>()? {
+                0 => None,
+                1 => Some(reader.bytes()?.to_vec()),
+                other => return Err(DecodeError::Tag(other)),
+            };
+            let ordered = versions.last().is_none_or(|(last, _)| *last < version);
+            if !ordered || version > newest {
+                return Err(DecodeError::Invalid);
+            }
+            versions.push((version, value));
+        }
+        if versions.is_empty() {
+            return Err(DecodeError::Invalid);
+        }
+        Ok(Self(versions))
     }
 }
 
@@ -117,11 +393,11 @@ impl LoggedState {
     }
 
     /// Applies the command logged at `lsn`, which must come after
-    /// [`LoggedState::applied`].
-    pub(crate) fn apply(&mut self, lsn: Lsn, command: Command) {
+    /// [`LoggedState::applied`], at the version `lsn` names.
+    pub(crate) fn apply(&mut self, lsn: Lsn, command: Command) -> Outcome {
         debug_assert!(lsn > self.applied, "records apply in log order");
-        self.state.apply(command);
         self.applied = lsn;
+        self.state.apply(Version::from(lsn), command)
     }
 
     pub(crate) const fn state(&self) -> &KvState {
@@ -148,108 +424,46 @@ fn is_ordered(start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::ops::Bound::{Excluded, Included, Unbounded};
+mod tests;
 
-    use proptest::prelude::*;
+#[cfg(kani)]
+mod proofs {
+    use super::History;
+    use crate::version::Version;
 
-    use super::{KvState, LoggedState};
-    use crate::batch::{Command, WriteBatch};
-    use kurator_codec::Reader;
-    use kurator_wal::Lsn;
-
-    fn logged() -> LoggedState {
-        let mut state = LoggedState::default();
-        state.apply(
-            Lsn::new(1),
-            Command::Kv(WriteBatch::new().put("a", "1").put("b", "2").put("c", "3")),
-        );
-        state.apply(
-            Lsn::new(2),
-            Command::Kv(WriteBatch::new().delete("b").put("a", "9")),
-        );
-        state
+    fn entry(version: u8, removed: bool) -> (Version, Option<Vec<u8>>) {
+        let value = if removed { None } else { Some(vec![version]) };
+        (Version::new(u64::from(version)), value)
     }
 
-    fn state() -> KvState {
-        logged().state().clone()
-    }
-
-    fn keys<'a>(entries: impl Iterator<Item = (&'a [u8], &'a [u8])>) -> Vec<&'a [u8]> {
-        entries.map(|(key, _)| key).collect()
-    }
-
-    #[test]
-    fn batches_apply_in_order() {
-        assert_eq!(logged().applied(), Lsn::new(2), "applied");
-        let state = state();
-        assert_eq!(state.get(b"a"), Some(b"9".as_slice()), "overwritten");
-        assert_eq!(state.get(b"b"), None, "deleted");
-        assert_eq!((state.len(), state.is_empty()), (2, false), "size");
-        assert!(KvState::default().is_empty(), "empty");
-    }
-
-    #[test]
-    fn ranges_follow_their_bounds() {
-        let state = state();
-        assert_eq!(keys(state.range(Unbounded, Unbounded)), [b"a", b"c"], "all");
-        assert_eq!(
-            keys(state.range(Excluded(b"a"), Unbounded)),
-            [b"c"],
-            "after a"
+    /// Forgetting what the horizon cannot see changes no read at or after
+    /// the horizon, nor the version that wrote the key last; and a key is
+    /// gone only when every such read finds it removed.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn forgetting_keeps_every_readable_version() {
+        let versions: [u8; 3] = kani::any();
+        kani::assume(versions[0] < versions[1] && versions[1] < versions[2]);
+        let removed: [bool; 3] = kani::any();
+        let kept: usize = kani::any_where(|kept| (1..=3).contains(kept));
+        let mut history = History(
+            versions
+                .iter()
+                .zip(removed)
+                .take(kept)
+                .map(|(version, removed)| entry(*version, removed))
+                .collect(),
         );
-        assert_eq!(
-            keys(state.range(Included(b"a"), Excluded(b"c"))),
-            [b"a"],
-            "half open"
-        );
-        assert_eq!(
-            keys(state.range(Included(b"c"), Included(b"a"))),
-            Vec::<&[u8]>::new(),
-            "reversed"
-        );
-        assert_eq!(
-            keys(state.range(Excluded(b"a"), Excluded(b"a"))),
-            Vec::<&[u8]>::new(),
-            "empty"
-        );
-        assert_eq!(
-            keys(state.range(Included(b"a"), Excluded(b"a"))),
-            Vec::<&[u8]>::new(),
-            "empty half open"
-        );
-    }
-
-    #[test]
-    fn encoding_roundtrips() {
-        let state = state();
-        let mut out = Vec::new();
-        state.encode(&mut out).unwrap();
-        let mut reader = Reader::new(&out);
-        assert_eq!(KvState::decode(&mut reader), Ok(state), "roundtrip");
-        assert_eq!(reader.finish(), Ok(()), "every byte read");
-    }
-
-    proptest! {
-        #[test]
-        fn decoding_arbitrary_bytes_never_panics(buf in proptest::collection::vec(any::<u8>(), 0..64)) {
-            drop(KvState::decode(&mut Reader::new(&buf)));
-        }
-
-        #[test]
-        fn range_never_panics(start in proptest::option::of(any::<(bool, u8)>()), end in proptest::option::of(any::<(bool, u8)>())) {
-            let state = state();
-            let bound = |bound: Option<(bool, u8)>, byte: &[u8; 1]| -> std::ops::Bound<Vec<u8>> {
-                match bound {
-                    None => Unbounded,
-                    Some((true, _)) => Included(byte.to_vec()),
-                    Some((false, _)) => Excluded(byte.to_vec()),
-                }
-            };
-            let (start_key, end_key) = ([start.map_or(0, |(_, b)| b)], [end.map_or(0, |(_, b)| b)]);
-            let (start, end) = (bound(start, &start_key), bound(end, &end_key));
-            let found = keys(state.range(start.as_ref().map(Vec::as_slice), end.as_ref().map(Vec::as_slice))).len();
-            prop_assert!(found <= state.len(), "subset");
+        let before = history.clone();
+        let horizon = Version::new(u64::from(kani::any::<u8>()));
+        let at = Version::new(u64::from(kani::any::<u8>()));
+        kani::assume(at >= horizon);
+        history.forget(horizon);
+        assert_eq!(history.at(at), before.at(at), "same read");
+        assert_eq!(history.newest(), before.newest(), "same last write");
+        assert!(!history.0.is_empty(), "never empty");
+        if history.is_gone(horizon) {
+            assert!(before.at(at).is_none(), "gone only when removed");
         }
     }
 }

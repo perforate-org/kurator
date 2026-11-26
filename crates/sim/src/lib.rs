@@ -30,7 +30,7 @@ mod cluster;
 mod network;
 mod rng;
 
-pub use cluster::{Cluster, Outcome, SimError};
+pub use cluster::{Cluster, Outcome, SimError, Transacted};
 pub use network::{Endpoint, Faults, Garbled, Network, Wire};
 pub use rng::Rng;
 
