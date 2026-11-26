@@ -110,10 +110,11 @@ impl Placement {
         let mut replicas = BTreeSet::new();
         for _ in 0..count {
             let id = NodeId::new(reader.read()?);
-            let ascending = replicas.last().is_none_or(|last| *last < id);
-            if !ascending || !replicas.insert(id) {
+            // Strictly ascending, so no id comes twice.
+            if replicas.last().is_some_and(|last| *last >= id) {
                 return Err(DecodeError::Invalid);
             }
+            let _new: bool = replicas.insert(id);
         }
         reader.finish()?;
         Ok(Self::new(shard, replicas, membership))
