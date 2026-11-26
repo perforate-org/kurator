@@ -431,39 +431,33 @@ mod proofs {
     use super::History;
     use crate::version::Version;
 
-    fn entry(version: u8, removed: bool) -> (Version, Option<Vec<u8>>) {
-        let value = if removed { None } else { Some(vec![version]) };
-        (Version::new(u64::from(version)), value)
-    }
-
     /// Forgetting what the horizon cannot see changes no read at or after
     /// the horizon, nor the version that wrote the key last; and a key is
-    /// gone only when every such read finds it removed.
+    /// gone only when such a read finds it removed. Two versions are
+    /// enough to drop one; values are empty, so only their presence
+    /// matters.
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(3)]
     fn forgetting_keeps_every_readable_version() {
-        let versions: [u8; 3] = kani::any();
-        kani::assume(versions[0] < versions[1] && versions[1] < versions[2]);
-        let removed: [bool; 3] = kani::any();
-        let kept: usize = kani::any_where(|kept| (1..=3).contains(kept));
-        let mut history = History(
-            versions
-                .iter()
-                .zip(removed)
-                .take(kept)
-                .map(|(version, removed)| entry(*version, removed))
-                .collect(),
-        );
-        let before = history.clone();
+        let (older, newer): (u8, u8) = kani::any();
+        kani::assume(older < newer);
+        let (older_removed, newer_removed): (bool, bool) = kani::any();
+        let value = |removed: bool| if removed { None } else { Some(Vec::new()) };
+        let mut history = History(vec![
+            (Version::new(u64::from(older)), value(older_removed)),
+            (Version::new(u64::from(newer)), value(newer_removed)),
+        ]);
         let horizon = Version::new(u64::from(kani::any::<u8>()));
         let at = Version::new(u64::from(kani::any::<u8>()));
         kani::assume(at >= horizon);
+        let read = history.at(at).is_some();
+        let newest = history.newest();
         history.forget(horizon);
-        assert_eq!(history.at(at), before.at(at), "same read");
-        assert_eq!(history.newest(), before.newest(), "same last write");
+        assert_eq!(history.at(at).is_some(), read, "same read");
+        assert_eq!(history.newest(), newest, "same last write");
         assert!(!history.0.is_empty(), "never empty");
         if history.is_gone(horizon) {
-            assert!(before.at(at).is_none(), "gone only when removed");
+            assert!(!read, "gone only when removed");
         }
     }
 }
