@@ -160,11 +160,7 @@ fn concurrent_writers_share_commits() {
         400,
         "every write applied"
     );
-    assert_eq!(
-        db.read(kurator_storage::KvState::applied),
-        Lsn::new(400),
-        "every record"
-    );
+    assert_eq!(db.applied(), Lsn::new(400), "every record");
     drop(db);
     let db = Db::open(dir.path(), Options::default()).unwrap();
     assert_eq!(

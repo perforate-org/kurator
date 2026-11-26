@@ -11,7 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+blake3.workspace = true
 crc32c.workspace = true
+ed25519-dalek.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

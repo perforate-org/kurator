@@ -21,7 +21,30 @@
 //! ```
 //!
 //! Integers are little endian. The checksum covers the length, the lsn and
-//! the payload. `flags` is reserved for signed records.
+//! the payload.
+//!
+//! # Signed logs
+//!
+//! A log opened with [`Integrity::Signed`] chains its records: each one ends
+//! with the [`Digest`] of the record before it, and the last record of
+//! every batch that [`Wal::append_batch`] syncs also carries an Ed25519
+//! signature over its own digest, `BLAKE3(lsn | prev | payload)`. Through
+//! the chain, that signature covers the whole batch, so signing costs one
+//! signature per sync rather than one per record. Flag bit 0 of the segment
+//! header marks such a segment, and its header ends with the digest its
+//! chain starts from, so purging old segments keeps the rest checkable.
+//!
+//! [`Wal::open`] replays a batch only once its signature checks out. A
+//! newest segment that ends inside a batch was cut short by a crash before
+//! the batch was synced: that batch is cut off and reported as
+//! [`TailDamage::Unsigned`]. Any other mismatch is [`Error::Corrupt`] with
+//! [`Corruption::Seal`], because a crash cannot explain it.
+//!
+//! ```text
+//! signed header: magic | version | flags = 1 | first lsn | anchor [32]
+//! linked frame:  len | crc32c | lsn | payload | prev [32] | 0
+//! signed frame:  len | crc32c | lsn | payload | prev [32] | signature [64] | 1
+//! ```
 
 mod bytes;
 mod checksum;
@@ -29,10 +52,12 @@ mod error;
 mod frame;
 mod log;
 mod lsn;
+mod seal;
 mod segment;
 
 pub use error::{Corruption, Error, InvalidFrame, Result};
 pub use frame::MAX_PAYLOAD_LEN;
-pub use log::{Options, RecoveryReport, TailDamage, TruncatedTail, Wal};
+pub use log::{Options, RecoveryReport, Start, TailDamage, TruncatedTail, Wal};
 pub use lsn::{Lsn, LsnFiles, LsnRange};
+pub use seal::{Digest, Integrity, Protection, SealDamage, SigningKey, VerifyingKey};
 pub use segment::sync_dir;

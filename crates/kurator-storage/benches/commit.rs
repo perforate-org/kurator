@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kurator_storage::{Db, Lsn, Options};
-use kurator_wal::Wal;
+use kurator_wal::{Integrity, SigningKey, Start, Wal};
 use proptest as _;
 use tempfile as _;
 
@@ -58,26 +58,30 @@ fn time_writers(db: &Db, writers: u64) -> Duration {
 
 fn wal_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_append_batch");
-    for batch in [1_u64, 16, 256] {
-        let _: &mut _ = group.throughput(Throughput::Elements(batch));
-        let _: &mut _ = group.bench_with_input(
-            BenchmarkId::new("records", batch),
-            &batch,
-            |bench, &batch| {
-                let dir = tempfile::tempdir().unwrap();
-                let (mut wal, _) = Wal::open(
-                    dir.path(),
-                    kurator_wal::Options::default(),
-                    Lsn::ZERO,
-                    |_, _| Ok::<(), std::convert::Infallible>(()),
-                )
-                .unwrap();
-                let payloads = vec![[0_u8; 64]; usize::try_from(batch).unwrap()];
-                bench.iter(|| wal.append_batch(black_box(&payloads)).unwrap());
-            },
-        );
+    let integrities = [
+        ("checksum", Integrity::Checksum),
+        ("signed", Integrity::Signed(SigningKey::from_seed([1; 32]))),
+    ];
+    for (name, integrity) in integrities {
+        for batch in [1_u64, 16, 256] {
+            let _: &mut _ = group.throughput(Throughput::Elements(batch));
+            let _: &mut _ =
+                group.bench_with_input(BenchmarkId::new(name, batch), &batch, |bench, &batch| {
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut wal = empty_wal(dir.path(), integrity.clone());
+                    let payloads = vec![[0_u8; 64]; usize::try_from(batch).unwrap()];
+                    bench.iter(|| wal.append_batch(black_box(&payloads)).unwrap());
+                });
+        }
     }
     group.finish();
+}
+
+fn empty_wal(dir: &std::path::Path, integrity: Integrity) -> Wal {
+    let mut options = kurator_wal::Options::default();
+    options.integrity = integrity;
+    let ignore = |_, _: &[u8]| Ok::<(), std::convert::Infallible>(());
+    Wal::open(dir, options, Start::Oldest, ignore).unwrap().0
 }
 
 criterion_group! {

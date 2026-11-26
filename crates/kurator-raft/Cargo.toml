@@ -1,0 +1,28 @@
+[package]
+name = "kurator-raft"
+description = "Raft replication for Kurator: a signed-WAL log store and a memory-first state machine for OpenRaft"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+kurator-codec.workspace = true
+kurator-storage.workspace = true
+kurator-wal.workspace = true
+openraft.workspace = true
+parking_lot.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+openraft-rt-sim.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

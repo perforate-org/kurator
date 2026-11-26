@@ -4,13 +4,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_wal::{Lsn, LsnRange, RecoveryReport, Wal};
+use kurator_wal::{Lsn, LsnRange, RecoveryReport, Start, Wal};
 use parking_lot::{Mutex, RwLock};
 
 use crate::batch::{Command, Encoded};
 use crate::error::{Error, Result};
 use crate::snapshot::Snapshots;
-use crate::state::KvState;
+use crate::state::{KvState, LoggedState};
 
 /// Everything a database shares between the commit thread and callers.
 ///
@@ -18,7 +18,7 @@ use crate::state::KvState;
 /// takes `wal` and `state` one after the other, never both.
 #[derive(Debug)]
 pub(crate) struct Core {
-    state: RwLock<KvState>,
+    state: RwLock<LoggedState>,
     wal: Mutex<Wal>,
     snapshots: Snapshots,
     checkpointing: Mutex<()>,
@@ -29,12 +29,17 @@ impl Core {
     pub(crate) fn recover(dir: &Path, wal: kurator_wal::Options) -> Result<(Self, RecoveryReport)> {
         let snapshots = Snapshots::open(dir.join("snapshots"))?;
         let mut state = snapshots.load_latest()?.unwrap_or_default();
-        let (wal, report) = Wal::open(dir.join("wal"), wal, state.applied(), |lsn, payload| {
-            let command =
-                Command::decode(payload).map_err(|source| Error::Record { lsn, source })?;
-            state.apply(lsn, command);
-            Ok::<(), Error>(())
-        })?;
+        let (wal, report) = Wal::open(
+            dir.join("wal"),
+            wal,
+            Start::After(state.applied()),
+            |lsn, payload| {
+                let command =
+                    Command::decode(payload).map_err(|source| Error::Record { lsn, source })?;
+                state.apply(lsn, command);
+                Ok::<(), Error>(())
+            },
+        )?;
         let core = Self {
             state: RwLock::new(state),
             wal: Mutex::new(wal),
@@ -65,12 +70,17 @@ impl Core {
 
     /// A copy of the current value of `key`.
     pub(crate) fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.state.read().get(key).map(<[u8]>::to_vec)
+        self.state.read().state().get(key).map(<[u8]>::to_vec)
     }
 
     /// Runs `read` against the current state.
     pub(crate) fn read<R>(&self, read: impl FnOnce(&KvState) -> R) -> R {
-        read(&self.state.read())
+        read(self.state.read().state())
+    }
+
+    /// The last record applied to the state.
+    pub(crate) fn applied(&self) -> Lsn {
+        self.state.read().applied()
     }
 
     /// Writes a snapshot of the current state and purges the log segments

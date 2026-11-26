@@ -14,12 +14,21 @@ categories = ["database-implementations"]
 
 [workspace.dependencies]
 kurator-wal = { path = "crates/kurator-wal" }
+kurator-codec = { path = "crates/kurator-codec" }
+kurator-storage = { path = "crates/kurator-storage" }
+kurator-raft = { path = "crates/kurator-raft" }
+kurator-sim = { path = "crates/kurator-sim" }
 crc32c = "0.6.9"
+blake3 = "1.8.7"
+ed25519-dalek = "3.0.0"
 parking_lot = "0.12"
 thiserror = "2.0.17"
 criterion = "0.8"
 tempfile = "3.20"
 proptest = "1.7"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+openraft = { version = "0.10.1", default-features = false }
+openraft-rt-sim = "0.10.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -123,3 +132,8 @@ impl_trait_in_params = "allow" # `impl Into<PathBuf>` keeps call sites simple
 
 [profile.bench]
 debug = true
+
+# Signing, hashing and the simulator are dozens of times slower unoptimized,
+# which makes the simulation tests too slow for `cargo test` and mutants.
+[profile.dev.package."*"]
+opt-level = 3

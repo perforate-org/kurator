@@ -1,0 +1,24 @@
+[package]
+name = "kurator-sim"
+description = "Deterministic simulation of Kurator clusters: a seeded network with partitions, loss and delay, crashes and restarts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+kurator-raft.workspace = true
+kurator-storage.workspace = true
+kurator-wal.workspace = true
+openraft-rt-sim.workspace = true
+parking_lot.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
