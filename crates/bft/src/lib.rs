@@ -28,6 +28,11 @@
 //! [`Core::recover`] restarts without voting twice in a view, and a
 //! [`Ledger`] applies the decided blocks' commands to the shard's state.
 //!
+//! A [`Replica`] puts these together on a node: its [`Host`] carries the
+//! messages and timers, and it is the shard's
+//! [`Replicated`](kurator_consensus::Replicated) replica, so the layers
+//! above see a BFT shard as they see a Raft one.
+//!
 //! Signatures are [`kurator_crypto`]'s, tagged with their algorithm, so a
 //! certificate is a set of signatures that can move to a post-quantum
 //! algorithm as a whole.
@@ -37,10 +42,9 @@ mod committee;
 mod core;
 #[cfg(test)]
 mod fixture;
-mod journal;
-mod ledger;
 mod message;
 mod rejection;
+mod replica;
 mod step;
 mod timeout;
 mod view;
@@ -50,11 +54,10 @@ mod wire;
 pub use block::{Block, Proposal};
 pub use committee::{Committee, Domain};
 pub use core::{Config, Core, Event};
-pub use journal::{Journal, Recovered};
-pub use ledger::{Ledger, Settled};
 pub use message::Message;
 pub use rejection::Rejection;
-pub use step::{Effects, Outgoing, Safety, Step, Timer, To};
+pub use replica::{Host, Journal, Ledger, Replica, Settled, Txn};
+pub use step::{Act, Effects, Recovered, Safety, Step, Timer, To};
 pub use timeout::{Timeout, TimeoutCertificate};
 pub use view::View;
 pub use vote::{BlockId, Certificate, Justify, Vote};

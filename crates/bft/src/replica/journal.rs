@@ -23,7 +23,6 @@
 //! prefix that still makes sense: a decided block whose ancestors are all
 //! recorded, and a safety state the replica had not acted on yet.
 
-use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
@@ -31,8 +30,7 @@ use kurator_codec::{DecodeError, Format};
 use kurator_wal::{Lsn, Options, Start, Wal};
 
 use crate::block::Block;
-use crate::step::{Effects, Record, Safety, Step};
-use crate::view::View;
+use crate::step::{Effects, Record, Recovered, Safety, Step};
 use crate::vote::{BlockId, Justify};
 use crate::wire::{put_view, read_view};
 
@@ -78,58 +76,6 @@ impl Record {
         };
         reader.finish()?;
         Ok(record)
-    }
-}
-
-/// What a replica remembers from before it stopped: enough to rejoin
-/// without voting twice in a view, voting against its lock or deciding a
-/// block again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Recovered {
-    safety: Safety,
-    blocks: BTreeMap<BlockId, Block>,
-    committed: (BlockId, View),
-}
-
-impl Default for Recovered {
-    /// A replica that never ran.
-    fn default() -> Self {
-        Self {
-            safety: Safety::new(View::GENESIS, Justify::Genesis),
-            blocks: BTreeMap::new(),
-            committed: (BlockId::GENESIS, View::GENESIS),
-        }
-    }
-}
-
-impl Recovered {
-    /// Takes in `record`, written after every record before it.
-    pub(crate) fn note(&mut self, record: Record) {
-        match record {
-            Record::Block(block) => {
-                let _stored: &mut Block = self.blocks.entry(block.id()).or_insert(block);
-            }
-            Record::Safety(safety) => self.safety = safety,
-            Record::Committed(block, view) => self.committed = (block, view),
-        }
-    }
-
-    /// The blocks the replica decided, oldest first, so that a state
-    /// machine can apply them again.
-    #[must_use]
-    pub fn decided(&self) -> Vec<&Block> {
-        let mut chain = Vec::new();
-        let mut id = self.committed.0;
-        while let Some(block) = self.blocks.get(&id) {
-            chain.push(block);
-            id = block.parent();
-        }
-        chain.reverse();
-        chain
-    }
-
-    pub(crate) fn into_parts(self) -> (Safety, BTreeMap<BlockId, Block>, (BlockId, View)) {
-        (self.safety, self.blocks, self.committed)
     }
 }
 
@@ -183,9 +129,8 @@ impl Journal {
 mod tests {
     use proptest::prelude::*;
 
-    use super::Recovered;
     use crate::block::Block;
-    use crate::step::{Record, Safety};
+    use crate::step::{Record, Recovered, Safety};
     use crate::view::View;
     use crate::vote::{BlockId, Justify};
 

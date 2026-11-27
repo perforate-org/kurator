@@ -11,9 +11,9 @@ use kurator_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Proposal};
 use crate::committee::{Committee, Domain};
-use crate::journal::Recovered;
 use crate::message::Message;
 use crate::rejection::Rejection;
+use crate::step::Recovered;
 use crate::step::{Effects, Record, Safety, Step, Timer, To};
 use crate::timeout::{Timeout, TimeoutCertificate};
 use crate::view::View;
@@ -158,6 +158,18 @@ impl Core {
     #[must_use]
     pub const fn view(&self) -> View {
         self.view
+    }
+
+    /// Whom it decides with.
+    #[must_use]
+    pub const fn committee(&self) -> &Committee {
+        &self.config.committee
+    }
+
+    /// The leader of the view it is in.
+    #[must_use]
+    pub fn leader(&self) -> Option<NodeId> {
+        self.config.committee.leader(self.view)
     }
 
     /// The last block it decided.
