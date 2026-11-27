@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use tempfile::TempDir;
 
 use super::{Host, Journal, Ledger, Replica};
+use crate::checkpoint::{Height, Interval};
 use crate::core::{Config, Core};
 use crate::fixture::{DOMAIN, committee, key};
 use crate::message::Message;
@@ -49,9 +50,21 @@ struct Cluster {
 }
 
 fn open(dir: &TempDir, wire: &Wire, node: NodeId) -> Replica<Loopback> {
+    open_on(dir, wire, node, ShardState::default(), Interval::DEFAULT)
+}
+
+/// Opens node `node`'s replica, starting from `state`, with a checkpoint
+/// at every `interval`.
+fn open_on(
+    dir: &TempDir,
+    wire: &Wire,
+    node: NodeId,
+    state: ShardState,
+    interval: Interval,
+) -> Replica<Loopback> {
     let path = dir.path().join(node.to_string());
     let (journal, recovered) = Journal::open(path, Options::default()).unwrap();
-    let ledger = Ledger::replay(ShardState::default(), &recovered);
+    let ledger = Ledger::replay(state, &recovered).every(interval);
     let config = Config::new(node, key(node.get()), committee(), DOMAIN);
     let core = Core::recover(config, recovered);
     let host = Loopback {
@@ -64,11 +77,17 @@ fn open(dir: &TempDir, wire: &Wire, node: NodeId) -> Replica<Loopback> {
 
 impl Cluster {
     fn new() -> Self {
+        Self::starting(|_| ShardState::default(), Interval::DEFAULT)
+    }
+
+    /// Four replicas, each starting from the state `state` gives its node,
+    /// with a checkpoint at every `interval`.
+    fn starting(state: impl Fn(NodeId) -> ShardState, interval: Interval) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let wire = Wire::default();
         let replicas = (1..=4)
             .map(NodeId::new)
-            .map(|node| (node, open(&dir, &wire, node)))
+            .map(|node| (node, open_on(&dir, &wire, node, state(node), interval)))
             .collect();
         Self {
             dir,
@@ -89,7 +108,8 @@ impl Cluster {
         }
     }
 
-    /// Runs `future` to its end, delivering messages while it waits.
+    /// Runs `future` to its end, delivering messages while it waits, and
+    /// firing the timers armed last once none are in flight.
     fn run<T>(&self, future: impl Future<Output = T>) -> T {
         let mut future = pin!(future);
         let mut context = Context::from_waker(noop_waker_ref());
@@ -98,8 +118,21 @@ impl Cluster {
                 return value;
             }
             self.pump(50);
+            if self.wire.lock().is_empty() {
+                self.expire();
+            }
         }
         panic!("never finished");
+    }
+
+    /// Fires the timer each replica armed last.
+    fn expire(&self) {
+        for replica in self.replicas.values() {
+            let armed = replica.host.wakes.lock().last().copied();
+            if let Some((view, _after)) = armed {
+                replica.expire(view);
+            }
+        }
     }
 
     fn replica(&self, node: u64) -> &Replica<Loopback> {
@@ -229,4 +262,73 @@ fn a_view_without_progress_times_out_ever_more_slowly() {
             .any(|(_, _, message)| matches!(message, Message::Timeout(_))),
         "tells the others"
     );
+}
+
+/// A checkpoint at every decided block.
+fn every_block() -> Interval {
+    Interval::new(std::num::NonZeroU64::MIN)
+}
+
+#[test]
+fn the_committee_certifies_the_state_it_decided() {
+    let cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let _put = cluster
+        .run(cluster.replica(1).propose(put("a", "1")))
+        .unwrap();
+    cluster.pump(2000);
+    for replica in cluster.replicas.values() {
+        let certificate = replica.checkpoint().unwrap();
+        let checkpoint = certificate.checkpoint();
+        assert!(checkpoint.height() >= Height::new(1), "{}", replica.node());
+        assert_eq!(
+            certificate.verify(&committee(), DOMAIN),
+            Ok(()),
+            "{}",
+            replica.node()
+        );
+        let state = cluster.run(replica.read(Clone::clone)).unwrap();
+        assert!(state.get(b"a").is_some(), "applied");
+        assert!(
+            cluster.run(replica.propose(put("b", "2"))).is_ok(),
+            "still serves"
+        );
+    }
+}
+
+#[test]
+fn a_replica_whose_state_differs_stops() {
+    let odd = NodeId::new(4);
+    let cluster = Cluster::starting(
+        |node| {
+            let mut state = ShardState::default();
+            if node == odd {
+                let _applied = state.apply(kurator_storage::Version::new(1), put("x", "y"));
+            }
+            state
+        },
+        every_block(),
+    );
+    let _put = cluster
+        .run(cluster.replica(1).propose(put("a", "1")))
+        .unwrap();
+    cluster.pump(2000);
+    let replica = cluster.replica(4);
+    let certified = replica.checkpoint().unwrap();
+    assert_eq!(
+        certified.verify(&committee(), DOMAIN),
+        Ok(()),
+        "the others certified theirs"
+    );
+    let refused = cluster.run(replica.propose(put("b", "2")));
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("is not the one the committee certified"),
+        "stopped"
+    );
+    // The others go on without it.
+    let _again = cluster
+        .run(cluster.replica(2).propose(put("c", "3")))
+        .unwrap();
 }

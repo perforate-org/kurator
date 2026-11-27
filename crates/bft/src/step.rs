@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use crate::block::Block;
+use crate::checkpoint::CheckpointCertificate;
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::view::View;
@@ -107,6 +108,10 @@ pub trait Act {
     /// decides the same blocks in the same order.
     fn decide(&mut self, block: &Block);
 
+    /// Learns that a quorum certified `certificate`'s checkpoint, which
+    /// the state it applied must match at that height.
+    fn certify(&mut self, certificate: &CheckpointCertificate);
+
     /// Sends `message` where `to` says.
     fn send(&mut self, to: To, message: &Message);
 
@@ -120,6 +125,7 @@ pub trait Act {
 pub struct Effects {
     messages: Vec<Outgoing>,
     decided: Vec<Block>,
+    certified: Option<CheckpointCertificate>,
     timer: Option<Timer>,
     rejected: Option<Rejection>,
 }
@@ -131,6 +137,18 @@ impl Effects {
 
     pub(crate) fn decide(&mut self, block: Block) {
         self.decided.push(block);
+    }
+
+    /// Hands on `certificate`. Should a step certify two checkpoints,
+    /// the newer one says all the older one does.
+    pub(crate) fn certify(&mut self, certificate: CheckpointCertificate) {
+        let newer = self
+            .certified
+            .as_ref()
+            .is_none_or(|older| certificate.supersedes(older));
+        if newer {
+            self.certified = Some(certificate);
+        }
     }
 
     /// Arms `timer`. A step waits in one view only, the newest it
@@ -145,10 +163,14 @@ impl Effects {
     }
 
     /// Has `act` carry the effects out: apply the decided blocks, in
-    /// order, then send the messages, in order, then arm the timer.
+    /// order, then take in the certified checkpoint, then send the
+    /// messages, in order, then arm the timer.
     pub fn carry_out(&self, act: &mut impl Act) {
         for block in &self.decided {
             act.decide(block);
+        }
+        if let Some(certificate) = &self.certified {
+            act.certify(certificate);
         }
         for outgoing in &self.messages {
             act.send(outgoing.to, &outgoing.message);
@@ -162,6 +184,12 @@ impl Effects {
     #[cfg(test)]
     pub(crate) fn messages(&self) -> &[Outgoing] {
         &self.messages
+    }
+
+    /// The checkpoint certified, if one was.
+    #[cfg(test)]
+    pub(crate) const fn certified(&self) -> Option<&CheckpointCertificate> {
+        self.certified.as_ref()
     }
 
     /// The blocks decided, in the order to apply them.

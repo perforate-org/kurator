@@ -5,6 +5,7 @@ use std::io;
 use kurator_codec::{DecodeError, Format, Reader};
 
 use crate::block::{Block, Proposal};
+use crate::checkpoint::Share;
 use crate::timeout::{Timeout, TimeoutCertificate};
 use crate::vote::{BlockId, Vote};
 use crate::wire::{put_commands, read_commands};
@@ -19,6 +20,7 @@ const FETCH: u8 = 4;
 const DELIVER: u8 = 5;
 const SKIP: u8 = 6;
 const FORWARD: u8 = 7;
+const CHECKPOINT: u8 = 8;
 
 /// A message between the replicas of a shard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,8 @@ pub enum Message {
     /// Commands submitted to a replica, for the leader of its view to
     /// propose.
     Forward(Vec<Vec<u8>>),
+    /// A member's share of a checkpoint, to every replica.
+    Checkpoint(Share),
 }
 
 impl Message {
@@ -78,6 +82,10 @@ impl Message {
                 out.write_all(&[FORWARD])?;
                 put_commands(out, commands)
             }
+            Self::Checkpoint(share) => {
+                out.write_all(&[CHECKPOINT])?;
+                share.encode(out)
+            }
         })
     }
 
@@ -103,6 +111,7 @@ impl Message {
             DELIVER => Ok(Self::Deliver(Block::decode(reader)?)),
             SKIP => Ok(Self::Skip(TimeoutCertificate::decode(reader)?)),
             FORWARD => Ok(Self::Forward(read_commands(reader)?)),
+            CHECKPOINT => Ok(Self::Checkpoint(Share::decode(reader)?)),
             other => Err(DecodeError::Tag(other)),
         }
     }
@@ -119,6 +128,7 @@ mod tests {
 
     use super::Message;
     use crate::block::{Block, Proposal};
+    use crate::checkpoint::{Checkpoint, Height, Share, StateRoot};
     use crate::timeout::{Timeout, TimeoutCertificate};
     use crate::view::View;
     use crate::vote::{BlockId, Certificate, Justify, Vote};
@@ -220,6 +230,21 @@ mod tests {
             certificate().prop_map(Message::Skip),
             proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..12), 0..4)
                 .prop_map(Message::Forward),
+            (any::<u64>(), any::<[u8; 32]>(), any::<[u8; 32]>(), 1..6_u64).prop_map(
+                |(height, block, root, node)| {
+                    let checkpoint = Checkpoint::new(
+                        Height::new(height),
+                        BlockId::new(block),
+                        StateRoot::new(root),
+                    );
+                    Message::Checkpoint(Share::sign(
+                        &key(node),
+                        DOMAIN,
+                        NodeId::new(node),
+                        checkpoint,
+                    ))
+                }
+            ),
         ]
     }
 

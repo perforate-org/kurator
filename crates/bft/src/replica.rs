@@ -11,6 +11,7 @@
 //! replica's own decided state ([`Reads::Decided`]).
 
 use std::collections::BTreeMap;
+use std::mem;
 use std::ops::Bound;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version};
 use parking_lot::Mutex;
 
 use crate::block::Block;
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Own};
 use crate::core::{Core, Event};
 use crate::message::Message;
 use crate::step::{Act, Timer, To};
@@ -30,9 +32,11 @@ use crate::view::View;
 
 pub use self::journal::Journal;
 pub use self::ledger::{Ledger, Settled};
+pub use self::manifest::Manifest;
 
 mod journal;
 mod ledger;
+mod manifest;
 
 /// How long a view's timer runs before its first timeout. Each timeout
 /// in a row doubles it, up to eight times as long.
@@ -60,6 +64,28 @@ enum Health {
     /// Its journal failed to write: it might forget what it would send,
     /// so it sends nothing until it is opened again.
     Stopped,
+    /// Its state differs from the one the committee certified at the
+    /// same height: it is not the shard's, and serves nothing more.
+    Diverged(Checkpoint),
+}
+
+impl Health {
+    /// Why it no longer runs, if it does not.
+    fn check(&self) -> Result<()> {
+        match self {
+            Self::Running => Ok(()),
+            Self::Stopped => Err(Error::Failed(
+                "the replica stopped: its journal failed to write".into(),
+            )),
+            Self::Diverged(mine) => Err(Error::Failed(
+                format!(
+                    "the replica stopped: its state at {} is not the one the committee certified",
+                    mine.height()
+                )
+                .into(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -70,6 +96,13 @@ struct Inner {
     /// The commands submitted here, by their bytes, with whoever waits for
     /// each to apply.
     waiting: BTreeMap<Vec<u8>, Vec<oneshot::Sender<Settled>>>,
+    /// The checkpoints its state reached, for the core to share.
+    reached: Vec<Checkpoint>,
+    /// Those past the newest certified one, to judge against the
+    /// certificates to come.
+    own: Own,
+    /// The newest checkpoint the committee certified.
+    certified: Option<CheckpointCertificate>,
     health: Health,
 }
 
@@ -82,10 +115,27 @@ impl Inner {
         }
     }
 
+    /// Stops the replica if its own checkpoint differs from the certified
+    /// one at the same height.
+    fn judge(&mut self) {
+        let diverged = self
+            .certified
+            .as_ref()
+            .and_then(|certified| self.own.judge(certified));
+        if let Some(mine) = diverged {
+            self.halt(Health::Diverged(mine));
+        }
+    }
+
+    /// Stops the replica: whoever waits learns it stopped.
+    fn halt(&mut self, health: Health) {
+        self.health = health;
+        self.waiting.clear();
+    }
+
     /// The shard and the version of its decided state.
     fn position(&self) -> (Shard, Version) {
-        let state = self.ledger.state();
-        (state.shard().clone(), state.kv().version())
+        (self.ledger.shard().clone(), self.ledger.kv().version())
     }
 }
 
@@ -101,6 +151,17 @@ impl<H: Host> Act for Acting<'_, H> {
         for (command, settled) in block.commands().iter().zip(outcomes) {
             self.inner.tell(command, &settled);
         }
+        // A state that does not encode never took its keys in.
+        if let Ok(Some(checkpoint)) = self.inner.ledger.checkpoint() {
+            self.inner.own.take(checkpoint);
+            self.inner.reached.push(checkpoint);
+            self.inner.judge();
+        }
+    }
+
+    fn certify(&mut self, certificate: &CheckpointCertificate) {
+        self.inner.certified = Some(certificate.clone());
+        self.inner.judge();
     }
 
     fn send(&mut self, to: To, message: &Message) {
@@ -150,6 +211,9 @@ impl<H: Host> Replica<H> {
                 journal,
                 ledger,
                 waiting: BTreeMap::new(),
+                reached: Vec::new(),
+                own: Own::default(),
+                certified: None,
                 health: Health::Running,
             }),
         };
@@ -169,7 +233,7 @@ impl<H: Host> Replica<H> {
 
     /// Handles `event`, writes down what it changed, and only then acts.
     fn handle(&self, inner: &mut Inner, event: Event) {
-        if matches!(inner.health, Health::Stopped) {
+        if inner.health.check().is_err() {
             return;
         }
         let step = inner.core.handle(event);
@@ -179,24 +243,37 @@ impl<H: Host> Replica<H> {
                 inner,
             });
         } else {
-            inner.health = Health::Stopped;
-            // Whoever waits learns the replica stopped.
-            inner.waiting.clear();
+            inner.halt(Health::Stopped);
         }
+        // The core shares the checkpoints the decided blocks reached.
+        for checkpoint in mem::take(&mut inner.reached) {
+            self.handle(inner, Event::Reached(checkpoint));
+        }
+    }
+
+    /// The newest checkpoint the committee certified, if any.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<CheckpointCertificate> {
+        self.inner.lock().certified.clone()
     }
 
     /// Submits `command` and waits until a decided block applied it.
     async fn submit(&self, command: Command) -> Result<Settled> {
         let bytes = command.encode()?.payload().to_vec();
         let receiver = self.enqueue(&mut self.inner.lock(), bytes)?;
-        receiver.await.map_err(|_| stopped())
+        receiver.await.map_err(|_closed| {
+            self.inner
+                .lock()
+                .health
+                .check()
+                .err()
+                .unwrap_or_else(|| Error::Failed("the replica stopped".into()))
+        })
     }
 
     /// Waits for `command` and hands it to the core.
     fn enqueue(&self, inner: &mut Inner, command: Vec<u8>) -> Result<oneshot::Receiver<Settled>> {
-        if matches!(inner.health, Health::Stopped) {
-            return Err(stopped());
-        }
+        inner.health.check()?;
         let (sender, receiver) = oneshot::channel();
         inner
             .waiting
@@ -221,7 +298,7 @@ impl<H: Host> Replicated for Replica<H> {
     }
 
     fn shard(&self) -> Shard {
-        self.inner.lock().ledger.state().shard().clone()
+        self.inner.lock().ledger.shard().clone()
     }
 
     /// Here: every replica takes writes.
@@ -256,7 +333,7 @@ impl<H: Host> Replicated for Replica<H> {
     }
 
     async fn read<R: Send>(&self, read: impl FnOnce(&KvState) -> R + Send) -> Result<R> {
-        Ok(read(self.inner.lock().ledger.state().kv()))
+        Ok(read(self.inner.lock().ledger.kv()))
     }
 
     async fn propose(&self, command: Command) -> Result<Outcome> {
@@ -284,9 +361,7 @@ impl<H: Host> Transaction for Txn<'_, H> {
         if !self.shard.span().contains(key) {
             return Err(misrouted(self.shard.clone()));
         }
-        let value = self
-            .draft
-            .get(self.replica.inner.lock().ledger.state().kv(), key);
+        let value = self.draft.get(self.replica.inner.lock().ledger.kv(), key);
         Ok(value.map_err(kurator_storage::Error::from)?)
     }
 
@@ -294,7 +369,7 @@ impl<H: Host> Transaction for Txn<'_, H> {
         let (start, end) = self.shard.span().clip(start, end);
         let entries = self
             .draft
-            .range(self.replica.inner.lock().ledger.state().kv(), start, end);
+            .range(self.replica.inner.lock().ledger.kv(), start, end);
         Ok(entries.map_err(kurator_storage::Error::from)?)
     }
 
@@ -325,10 +400,6 @@ fn misrouted(shard: Shard) -> Error {
     Error::Misrouted {
         shard: Box::new(shard),
     }
-}
-
-fn stopped() -> Error {
-    Error::Failed("the replica stopped: its journal failed to write".into())
 }
 
 #[cfg(test)]
