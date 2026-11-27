@@ -74,7 +74,7 @@
 | `crates/meta` | メタシャード: シャード ID の割り当て、配置の登録簿 `Registry`、配置の報告。合意層には `Replicated` 越しにだけ触れる |
 | `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica`、シャードごとのレプリカを束ねる `Store` |
 | `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱、分割、レプリカ移動、シャード横断トランザクションの調整役) |
-| `crates/net` | QUIC トランスポート(quinn、Raw Public Key の相互認証。署名方式は鍵のアルゴリズムに従う) |
+| `crates/net` | QUIC トランスポート(quinn、Raw Public Key の相互認証。署名方式は鍵のアルゴリズムに従う。鍵交換は耐量子のハイブリッド X25519MLKEM768 のみ、暗号は aws-lc-rs) |
 | `crates/node` | `kurator` バイナリ: ノード 1 つ(全シャードのレプリカ)をプロセスとして動かすコンソール |
 
 シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`
