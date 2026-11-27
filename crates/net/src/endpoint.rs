@@ -6,10 +6,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_crypto::{NodeSecret, VerifyingKey};
 use kurator_meta::{Answer, Call};
-use kurator_raft::{Message, NodeId, NodeSecret, Refusal, Response};
+use kurator_raft::{Message, NodeId, Refusal, Response};
 use kurator_shard::ShardId;
-use kurator_wal::VerifyingKey;
 use quinn::crypto::rustls::QuicServerConfig;
 
 use crate::connection::{Channel, MAX_MESSAGE, Quic};

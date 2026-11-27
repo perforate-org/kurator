@@ -298,7 +298,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use kurator_consensus::{Members, NodeId, Peer};
-    use kurator_raft::{KeyPurpose, NodeSecret};
+    use kurator_crypto::{KeyPurpose, NodeSecret};
 
     use super::{Command, members};
 

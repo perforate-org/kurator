@@ -27,8 +27,8 @@
 //!
 //! A log opened with [`Integrity::Signed`] chains its records: each one ends
 //! with the [`Digest`] of the record before it, and the last record of
-//! every batch that [`Wal::append_batch`] syncs also carries an Ed25519
-//! signature over its own digest, `BLAKE3(lsn | prev | payload)`. Through
+//! every batch that [`Wal::append_batch`] syncs also carries a signature
+//! over its own digest, `BLAKE3(lsn | prev | payload)`. Through
 //! the chain, that signature covers the whole batch, so signing costs one
 //! signature per sync rather than one per record. Flag bit 0 of the segment
 //! header marks such a segment, and its header ends with the digest its
@@ -43,8 +43,11 @@
 //! ```text
 //! signed header: magic | version | flags = 1 | first lsn | anchor [32]
 //! linked frame:  len | crc32c | lsn | payload | prev [32] | 0
-//! signed frame:  len | crc32c | lsn | payload | prev [32] | signature [64] | 1
+//! signed frame:  len | crc32c | lsn | payload | prev [32] | signature | algorithm u8 | 1
 //! ```
+//!
+//! The signature is as long as the signatures of the algorithm whose
+//! [`kurator_crypto::Algorithm::id`] follows it: 64 bytes for Ed25519.
 
 mod bytes;
 mod checksum;
@@ -59,5 +62,5 @@ pub use error::{Corruption, Error, InvalidFrame, Result};
 pub use frame::MAX_PAYLOAD_LEN;
 pub use log::{Options, RecoveryReport, Start, TailDamage, TruncatedTail, Wal};
 pub use lsn::{Lsn, LsnFiles, LsnRange};
-pub use seal::{Digest, Integrity, Protection, SealDamage, SigningKey, VerifyingKey};
+pub use seal::{Digest, Integrity, Protection, SealDamage};
 pub use segment::sync_dir;

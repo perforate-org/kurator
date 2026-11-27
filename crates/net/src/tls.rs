@@ -1,16 +1,20 @@
-//! TLS 1.3 with raw Ed25519 public keys (RFC 7250) in both directions.
+//! TLS 1.3 with raw public keys (RFC 7250) in both directions.
 //!
 //! There are no certificates and no certificate authorities. As on ICP,
 //! where a node's TLS key is registered for it, a replica is known by its
 //! transport key: the client checks that the server holds the key the
 //! membership lists for it, and the server checks that the client holds a
 //! key its [`Roster`] trusts.
+//!
+//! A handshake is signed with the algorithm of the signer's transport key,
+//! [`KeyPurpose::Transport`]'s, by the TLS signature scheme that
+//! [`Algorithm::tls_scheme`] names; a peer must sign with the scheme of
+//! the key it presents.
 
 use std::fmt;
 use std::sync::Arc;
 
-use kurator_raft::{KeyPurpose, NodeSecret};
-use kurator_wal::VerifyingKey;
+use kurator_crypto::{Algorithm, KeyPurpose, NodeSecret, VerifyingKey};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{AlwaysResolvesClientRawPublicKeys, ResolvesClientCert};
 use rustls::crypto::{CryptoProvider, verify_tls13_signature_with_raw_key};
@@ -26,14 +30,21 @@ use rustls::{
     SignatureScheme,
 };
 
-use crate::der;
 use crate::roster::Roster;
 
 /// The ALPN protocol id: the version of the message encoding.
 pub(crate) const ALPN: &[u8] = b"kurator-raft/1";
 
-/// The one signature scheme a replica accepts.
-const SCHEME: SignatureScheme = SignatureScheme::ED25519;
+/// The TLS signature scheme of `algorithm`.
+fn scheme(algorithm: Algorithm) -> SignatureScheme {
+    SignatureScheme::from(algorithm.tls_scheme())
+}
+
+/// The signature schemes a replica accepts: those of every algorithm a
+/// transport key may use.
+fn schemes() -> Vec<SignatureScheme> {
+    Algorithm::ALL.into_iter().map(scheme).collect()
+}
 
 /// This replica's transport key, ready for TLS.
 #[derive(Debug, Clone)]
@@ -46,12 +57,14 @@ impl Identity {
     /// The transport identity derived from `secret`.
     pub(crate) fn new(secret: &NodeSecret) -> Result<Self, Error> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let pkcs8 = der::pkcs8(secret.derive(KeyPurpose::Transport));
+        let signing = secret.signing_key(KeyPurpose::Transport);
         let signer = provider
             .key_provider
-            .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8)))?;
-        let public = secret.public_key(KeyPurpose::Transport).to_bytes();
-        let key = CertifiedKey::new(vec![CertificateDer::from(der::spki(public))], signer);
+            .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                signing.to_pkcs8(),
+            )))?;
+        let spki = signing.verifying_key().to_spki();
+        let key = CertifiedKey::new(vec![CertificateDer::from(spki)], signer);
         Ok(Self {
             provider,
             key: Arc::new(key),
@@ -79,7 +92,7 @@ impl Identity {
     /// The configuration for connecting to the replica that holds `expected`.
     pub(crate) fn client(&self, expected: &VerifyingKey) -> Result<rustls::ClientConfig, Error> {
         let verifier = Arc::new(Expected {
-            spki: der::spki(expected.to_bytes()),
+            spki: expected.to_spki(),
             provider: Arc::clone(&self.provider),
         });
         let resolver: Arc<dyn ResolvesClientCert> = Arc::new(
@@ -97,17 +110,19 @@ impl Identity {
 
 /// The public key a peer presented in the handshake.
 pub(crate) fn presented_key(spki: &[u8]) -> Option<VerifyingKey> {
-    VerifyingKey::from_bytes(&der::spki_key(spki)?)
+    VerifyingKey::from_spki(spki)
 }
 
-/// Checks the handshake signature of `spki` over `message`.
+/// Checks the handshake signature of `spki` over `message`, which must be
+/// by the scheme of the key's algorithm.
 fn verify_signature(
     provider: &CryptoProvider,
     message: &[u8],
     spki: &CertificateDer<'_>,
     dss: &DigitallySignedStruct,
 ) -> Result<HandshakeSignatureValid, Error> {
-    if dss.scheme != SCHEME {
+    let key = presented_key(spki).ok_or(CertificateError::BadEncoding)?;
+    if dss.scheme != scheme(key.algorithm()) {
         return Err(PeerIncompatible::NoSignatureSchemesInCommon.into());
     }
     verify_tls13_signature_with_raw_key(
@@ -167,7 +182,7 @@ impl ServerCertVerifier for Expected {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SCHEME]
+        schemes()
     }
 
     fn requires_raw_public_keys(&self) -> bool {
@@ -218,7 +233,7 @@ impl ClientCertVerifier for Trusted {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SCHEME]
+        schemes()
     }
 
     fn requires_raw_public_keys(&self) -> bool {
@@ -230,16 +245,16 @@ impl ClientCertVerifier for Trusted {
 mod tests {
     use std::sync::Arc;
 
-    use kurator_raft::{KeyPurpose, NodeSecret};
+    use kurator_crypto::{KeyPurpose, NodeSecret};
+    use rustls::SignatureScheme;
 
-    use super::Expected;
-    use crate::der;
+    use super::{Expected, schemes};
 
     #[test]
     fn an_expectation_shows_the_key_it_expects() {
         let key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
         let expected = Expected {
-            spki: der::spki(key.to_bytes()),
+            spki: key.to_spki(),
             provider: Arc::new(rustls::crypto::ring::default_provider()),
         };
         assert_eq!(
@@ -247,5 +262,12 @@ mod tests {
             format!("Expected {{ key: Some(VerifyingKey({key})), .. }}"),
             "debug"
         );
+    }
+
+    #[test]
+    fn transport_keys_sign_with_a_scheme_replicas_accept() {
+        assert_eq!(schemes(), vec![SignatureScheme::ED25519], "Ed25519");
+        let scheme = SignatureScheme::from(KeyPurpose::Transport.algorithm().tls_scheme());
+        assert!(schemes().contains(&scheme), "{scheme:?}");
     }
 }

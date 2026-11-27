@@ -13,7 +13,8 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_wal::{Integrity, Lsn, SigningKey, Start, Wal};
+use kurator_crypto::SigningKey;
+use kurator_wal::{Integrity, Lsn, Start, Wal};
 use openraft::storage::{IOFlushed, RaftLogStorage};
 use openraft::{LogState, OptionalSend, RaftLogReader};
 use parking_lot::Mutex;

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{Corruption, Error, InvalidFrame, Result};
 use crate::frame::{self, Decoded};
 use crate::lsn::{Lsn, LsnRange};
-use crate::seal::{Digest, Head, Integrity, Opened, Seal, SealDamage, SigningKey, VerifyingKey};
+use kurator_crypto::{SigningKey, VerifyingKey};
+
+use crate::seal::{Digest, Head, Integrity, Opened, Seal, SealDamage};
 use crate::segment::{self, Format, Header, Segment, sync_dir};
 
 /// How a log is laid out.

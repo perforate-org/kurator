@@ -24,7 +24,7 @@ use crate::error::{Error, Result, SnapshotDamage};
 use crate::state::{KvState, LoggedState};
 
 /// Version 2 keeps every readable version of each key.
-const FORMAT: Format = Format::new(*b"KRSN", 2);
+const FORMAT: Format = Format::new(*b"KRSN", 1);
 const FILES: LsnFiles = LsnFiles::new(".snap");
 const TEMP_PREFIX: &str = ".snapshot-";
 

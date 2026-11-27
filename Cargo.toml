@@ -13,6 +13,7 @@ keywords = ["database", "storage", "wal", "p2p"]
 categories = ["database-implementations"]
 
 [workspace.dependencies]
+kurator-crypto = { path = "crates/crypto" }
 kurator-wal = { path = "crates/wal" }
 kurator-codec = { path = "crates/codec" }
 kurator-storage = { path = "crates/storage" }

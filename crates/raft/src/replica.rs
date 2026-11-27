@@ -19,7 +19,6 @@ use openraft::{Raft, RaftNetworkFactory, ReadPolicy, ServerState};
 
 use crate::config::{Config, MembershipEdit};
 use crate::error::{Error, Result};
-use crate::identity::{KeyPurpose, NodeSecret};
 use crate::layout::Home;
 use crate::log_store::LogStore;
 use crate::proposal::Proposal;
@@ -27,6 +26,7 @@ use crate::rpc::{Refusal, Request, Response};
 use crate::snapshot::SnapshotBytes;
 use crate::state_machine::StateMachine;
 use crate::types::{LogId, Membership, NodeId, Peer, Progress};
+use kurator_crypto::{KeyPurpose, NodeSecret};
 
 /// Who a replica is: its id in the cluster and the secret its keys come
 /// from.

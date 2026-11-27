@@ -1,0 +1,22 @@
+[package]
+name = "kurator-crypto"
+description = "Kurator's signature keys, each tagged with its algorithm so a node can move to another one, such as a post-quantum scheme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+blake3.workspace = true
+ed25519-dalek.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

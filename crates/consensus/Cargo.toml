@@ -13,7 +13,7 @@ categories.workspace = true
 [dependencies]
 kurator-shard.workspace = true
 kurator-storage.workspace = true
-kurator-wal.workspace = true
+kurator-crypto.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

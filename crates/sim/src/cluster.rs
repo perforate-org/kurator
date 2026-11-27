@@ -10,11 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kurator_consensus::{Replicated as _, Transaction as _};
+use kurator_crypto::NodeSecret;
 use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
 use kurator_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
 use kurator_raft::{
-    Error, Member, Membership, NodeId, NodeSecret, Peer, Progress, Replica, Role, Status, Store,
-    Txn,
+    Error, Member, Membership, NodeId, Peer, Progress, Replica, Role, Status, Store, Txn,
 };
 use kurator_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
 use kurator_storage::{

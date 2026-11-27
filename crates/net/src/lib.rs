@@ -14,10 +14,11 @@
 //!   ([`kurator_meta::Call`]), which a node answers from its own meta
 //!   replica. [`Quic`] implements [`kurator_meta::Ask`], so any node can
 //!   reach the meta shard's leader.
-//! - **Mutual authentication by Ed25519 key.** TLS 1.3 with raw public
-//!   keys (RFC 7250), no certificates: each side proves it holds the
-//!   transport key derived from its [`NodeSecret`](kurator_raft::NodeSecret)
-//!   ([`KeyPurpose::Transport`](kurator_raft::KeyPurpose::Transport),
+//! - **Mutual authentication by transport key.** TLS 1.3 with raw public
+//!   keys (RFC 7250), no certificates, signed with the key's own algorithm
+//!   (Ed25519 today): each side proves it holds the
+//!   transport key derived from its [`NodeSecret`](kurator_crypto::NodeSecret)
+//!   ([`KeyPurpose::Transport`](kurator_crypto::KeyPurpose::Transport),
 //!   separate from the key that signs its WAL). The client expects the
 //!   key the membership lists for the peer; the server accepts the keys
 //!   of its replicas' memberships, and before it has one, the peers it was started
@@ -35,7 +36,8 @@
 //! use std::collections::BTreeMap;
 //! use std::sync::Arc;
 //! use kurator_net::{Endpoint, Store};
-//! use kurator_raft::{Member, NodeId, NodeSecret};
+//! use kurator_crypto::NodeSecret;
+//! use kurator_raft::{Member, NodeId};
 //!
 //! let member = Member::new(NodeId::new(1), NodeSecret::from_seed([1; 32]));
 //! let endpoint = Endpoint::bind("127.0.0.1:7001".parse()?, member.secret(), BTreeMap::new())?;
@@ -47,7 +49,6 @@
 //! ```
 
 mod connection;
-mod der;
 mod endpoint;
 mod roster;
 mod tls;

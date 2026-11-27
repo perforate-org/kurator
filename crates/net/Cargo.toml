@@ -13,9 +13,9 @@ categories.workspace = true
 [dependencies]
 kurator-meta.workspace = true
 kurator-consensus.workspace = true
+kurator-crypto.workspace = true
 kurator-raft.workspace = true
 kurator-shard.workspace = true
-kurator-wal.workspace = true
 openraft-rt-tokio.workspace = true
 quinn.workspace = true
 rustls.workspace = true

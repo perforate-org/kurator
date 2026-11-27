@@ -9,8 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use kurator_crypto::VerifyingKey;
 use kurator_raft::{Memberships, NodeId};
-use kurator_wal::VerifyingKey;
 
 use crate::Tokio;
 

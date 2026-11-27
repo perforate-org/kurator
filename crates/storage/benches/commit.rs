@@ -10,8 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use kurator_crypto::{Algorithm, SigningKey};
 use kurator_storage::{Db, Options, Version};
-use kurator_wal::{Integrity, SigningKey, Start, Wal};
+use kurator_wal::{Integrity, Start, Wal};
 use proptest as _;
 use tempfile as _;
 
@@ -60,7 +61,10 @@ fn wal_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_append_batch");
     let integrities = [
         ("checksum", Integrity::Checksum),
-        ("signed", Integrity::Signed(SigningKey::from_seed([1; 32]))),
+        (
+            "signed",
+            Integrity::Signed(SigningKey::from_seed(Algorithm::Ed25519, [1; 32])),
+        ),
     ];
     for (name, integrity) in integrities {
         for batch in [1_u64, 16, 256] {

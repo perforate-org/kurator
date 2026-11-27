@@ -19,7 +19,9 @@
 //! split     = the rest of the record, as `kurator_shard::Split::encode`
 //!             wrote it
 //! membership= configs u32 (voters u32 node u64*)* | nodes u32 (node u64 peer)*
-//! peer      = addr | key [32]
+//! peer      = addr | key
+//! key       = algorithm u8 | len u32 | public key
+//!             the algorithm as `kurator_crypto::Algorithm::id` names it
 //! addr      = 4 [4] port u16 | 6 [16] port u16
 //! meta      = option(log id) | option(log id) | membership
 //!             a snapshot's last entry, its membership's entry, and the
@@ -30,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use kurator_codec::{DecodeError, Reader};
-use kurator_wal::VerifyingKey;
+use kurator_crypto::{Algorithm, VerifyingKey};
 use openraft::EntryPayload;
 
 use crate::config::Entry;
@@ -301,7 +303,9 @@ fn put_peer(out: &mut Vec<u8>, peer: &Peer) {
         }
     }
     out.extend_from_slice(&peer.addr().port().to_le_bytes());
-    out.extend_from_slice(&peer.key().to_bytes());
+    out.push(peer.key().algorithm().id());
+    put_len(out, peer.key().as_bytes().len());
+    out.extend_from_slice(peer.key().as_bytes());
 }
 
 fn peer(reader: &mut Reader<'_>) -> Result<Peer, DecodeError> {
@@ -311,7 +315,9 @@ fn peer(reader: &mut Reader<'_>) -> Result<Peer, DecodeError> {
         other => return Err(DecodeError::Tag(other)),
     };
     let port = reader.read::<u16>()?;
-    let key = VerifyingKey::from_bytes(&reader.read::<[u8; 32]>()?).ok_or(DecodeError::Invalid)?;
+    let id = reader.read::<u8>()?;
+    let algorithm = Algorithm::from_id(id).ok_or(DecodeError::Tag(id))?;
+    let key = VerifyingKey::from_parts(algorithm, reader.bytes()?).ok_or(DecodeError::Invalid)?;
     Ok(Peer::new(SocketAddr::new(ip, port), key))
 }
 
@@ -478,6 +484,8 @@ mod tests {
         let mut encoded = Vec::new();
         put_membership(&mut encoded, &membership(&[1], &[]));
         let key_at = encoded.len() - 32;
+        // After the address: the algorithm and the key's length.
+        let algorithm_at = key_at - 5;
         // Not a point on the curve.
         let mut bad_key = encoded.clone();
         let mut off_curve = [0; 32];
@@ -485,7 +493,14 @@ mod tests {
         bad_key[key_at..].copy_from_slice(&off_curve);
         // An address family that does not exist.
         let mut bad_family = encoded.clone();
-        bad_family[key_at - 7] = 5;
+        bad_family[algorithm_at - 7] = 5;
+        // An algorithm this build does not know.
+        let mut bad_algorithm = encoded.clone();
+        bad_algorithm[algorithm_at] = 0;
+        // A key of the wrong length for its algorithm.
+        let mut bad_length = encoded.clone();
+        bad_length[algorithm_at + 1] = 31;
+        bad_length.truncate(bad_length.len() - 1);
         // A voter whose peer is missing: one config of one voter, no nodes.
         let orphan = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         // The same node twice.
@@ -497,6 +512,8 @@ mod tests {
         for (bytes, error, why) in [
             (bad_key, DecodeError::Invalid, "key"),
             (bad_family, DecodeError::Tag(5), "family"),
+            (bad_algorithm, DecodeError::Tag(0), "algorithm"),
+            (bad_length, DecodeError::Invalid, "length"),
             (orphan.to_vec(), DecodeError::Invalid, "orphan voter"),
             (twice, DecodeError::Invalid, "duplicate node"),
         ] {

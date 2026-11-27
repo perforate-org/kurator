@@ -25,7 +25,11 @@ fn key_prints_the_same_key_every_time() {
         String::from_utf8(output.stdout).unwrap()
     };
     let first = key();
-    assert_eq!(first.trim().len(), 64, "64 hex digits: {first:?}");
+    assert!(
+        first.starts_with("ed25519:"),
+        "names its algorithm: {first:?}"
+    );
+    assert_eq!(first.trim().len(), 8 + 64, "and 64 hex digits: {first:?}");
     assert_eq!(key(), first, "stable");
 }
 
