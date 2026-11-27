@@ -38,6 +38,7 @@
 //! # }
 //! ```
 
+mod across;
 mod batch;
 mod command;
 mod db;
@@ -48,9 +49,9 @@ mod span;
 mod state;
 mod two_phase;
 mod txn;
-mod txn_id;
 mod version;
 
+pub use across::{Deadline, TxnId};
 pub use batch::{KvOp, WriteBatch};
 pub use command::{Command, Encoded};
 pub use db::{Db, Options, Txn};
@@ -63,5 +64,4 @@ pub use span::{End, Span};
 pub use state::{KvState, View};
 pub use two_phase::{Decide, Decided, Decision, Prepare};
 pub use txn::Transaction;
-pub use txn_id::TxnId;
 pub use version::{Retention, Version};

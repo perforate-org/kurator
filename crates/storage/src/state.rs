@@ -9,13 +9,13 @@ use std::ops::Bound;
 use kurator_codec::{DecodeError, Reader, put_bytes};
 use kurator_wal::Lsn;
 
+use crate::across::TxnId;
 use crate::batch::{KvOp, WriteBatch};
 use crate::command::Command;
 use crate::outcome::{Abort, Outcome, Unreadable};
 use crate::span::Span;
 use crate::two_phase::{Decide, Decided, Decision, Prepare};
 use crate::txn::{ReadSet, Transaction};
-use crate::txn_id::TxnId;
 use crate::version::{Retention, Version};
 
 use self::locks::Locks;
@@ -166,9 +166,10 @@ impl KvState {
         self.locks.is_locked()
     }
 
-    /// The transactions across shards prepared here and not decided yet,
-    /// with their primary keys: where to ask how they were decided.
-    pub fn pending(&self) -> impl Iterator<Item = (TxnId, &[u8])> {
+    /// The transactions across shards prepared here and not decided yet:
+    /// their primary keys say where to ask how they were decided, and
+    /// their deadlines when that may be done.
+    pub fn pending(&self) -> impl Iterator<Item = &Prepare> {
         self.locks.pending()
     }
 
