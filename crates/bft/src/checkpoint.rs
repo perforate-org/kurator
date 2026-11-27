@@ -390,23 +390,26 @@ impl Tally {
     /// Whether `signer` may have a share at `height` counted: it has fewer
     /// than [`AHEAD`] heights waiting, or one higher, which then goes.
     fn room(&mut self, signer: NodeId, height: Height) -> bool {
-        let waiting: Vec<Height> = self
+        let mut waiting: Vec<Height> = self
             .shares
             .iter()
             .filter(|(_, shares)| shares.contains_key(&signer))
             .map(|(at, _)| *at)
             .collect();
-        if waiting.len() < AHEAD || waiting.contains(&height) {
+        if waiting.contains(&height) {
             return true;
         }
-        match waiting.last() {
-            Some(highest) if *highest > height => {
-                if let Some(shares) = self.shares.get_mut(highest) {
+        waiting.push(height);
+        waiting.sort_unstable();
+        match waiting.get(AHEAD) {
+            None => true,
+            Some(dropped) if *dropped == height => false,
+            Some(dropped) => {
+                if let Some(shares) = self.shares.get_mut(dropped) {
                     let _evicted = shares.remove(&signer);
                 }
                 true
             }
-            Some(_) | None => false,
         }
     }
 }
