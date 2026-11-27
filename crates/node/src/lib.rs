@@ -99,7 +99,8 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         .iter()
         .map(|(id, peer)| (*id, peer.key().clone()))
         .collect();
-    let endpoint = Endpoint::bind(settings.listen(), member.secret(), bootstrap)?;
+    let endpoint = Endpoint::bind(settings.listen(), member.secret(), bootstrap)?
+        .with_clients(settings.clients().to_vec());
     let me = member.peer(endpoint.local_addr()?);
     let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
     let store = Store::open(member, settings.dir(), config, endpoint.transport()).await?;

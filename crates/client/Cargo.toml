@@ -1,0 +1,26 @@
+[package]
+name = "kurator-client"
+description = "Kurator's client: what a client asks a node, how a node answers, and the client that routes reads, writes and transactions to the shards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kurator-codec.workspace = true
+kurator-consensus.workspace = true
+kurator-meta.workspace = true
+kurator-shard.workspace = true
+kurator-storage.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+kurator-crypto.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

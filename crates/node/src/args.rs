@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! kurator key <dir>
-//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--found]
+//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--found]
 //! ```
 
 use std::net::SocketAddr;
@@ -29,6 +29,7 @@ pub struct Settings {
     dir: PathBuf,
     listen: SocketAddr,
     peers: Vec<(NodeId, Peer)>,
+    clients: Vec<VerifyingKey>,
     start: Start,
 }
 
@@ -66,6 +67,12 @@ impl Settings {
     #[must_use]
     pub fn peers(&self) -> &[(NodeId, Peer)] {
         &self.peers
+    }
+
+    /// The keys of the clients it serves.
+    #[must_use]
+    pub fn clients(&self) -> &[VerifyingKey] {
+        &self.clients
     }
 
     /// How it comes into its cluster.
@@ -123,6 +130,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
     let mut dir = None;
     let mut listen = None;
     let mut peers = Vec::new();
+    let mut clients = Vec::new();
     let mut start = Start::Wait;
     while let Some(arg) = args.next() {
         let mut value = |option: &'static str| args.next().ok_or(UsageError::Missing(option));
@@ -131,6 +139,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
             "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--listen" => listen = Some(read("--listen", &value("--listen")?, addr)?),
             "--peer" => peers.push(read("--peer", &value("--peer")?, peer)?),
+            "--client" => clients.push(read("--client", &value("--client")?, key)?),
             "--found" => start = Start::Found,
             _ => return Err(UsageError::Option(arg)),
         }
@@ -140,6 +149,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
         dir: dir.ok_or(UsageError::Missing("--dir"))?,
         listen: listen.ok_or(UsageError::Missing("--listen"))?,
         peers,
+        clients,
         start,
     })
 }
@@ -207,8 +217,9 @@ mod tests {
     #[test]
     fn a_run_line_parses() {
         let peer_key = NodeSecret::from_seed([2; 32]).public_key(KeyPurpose::Transport);
+        let client_key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
         let line = format!(
-            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --found"
+            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --found"
         );
         let Ok(Invocation::Run(settings)) = parse(args(&line)) else {
             panic!("parses");
@@ -223,12 +234,14 @@ mod tests {
         assert_eq!(*id, NodeId::new(2), "peer id");
         assert_eq!(peer.addr().port(), 7002, "peer addr");
         assert_eq!(peer.key(), &peer_key, "peer key");
+        assert_eq!(settings.clients(), [client_key], "client");
         let Ok(Invocation::Run(waiting)) = parse(args("run --id 4 --dir d --listen [::1]:1"))
         else {
             panic!("parses");
         };
         assert_eq!(waiting.start(), Start::Wait, "waits by default");
         assert!(waiting.peers().is_empty(), "no peers");
+        assert!(waiting.clients().is_empty(), "no clients");
     }
 
     #[test]
@@ -264,6 +277,13 @@ mod tests {
                 UsageError::Value {
                     option: "--peer",
                     value: "2=127.0.0.1:1".to_owned(),
+                },
+            ),
+            (
+                "run --client ed25519:00",
+                UsageError::Value {
+                    option: "--client",
+                    value: "ed25519:00".to_owned(),
                 },
             ),
         ] {

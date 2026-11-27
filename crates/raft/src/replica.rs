@@ -610,6 +610,15 @@ impl<C: Config> Replicated for Replica<C> {
             })?;
         Ok(self.state.read(|state| read(state.kv())))
     }
+
+    async fn propose(&self, command: Command) -> kurator_consensus::Result<Outcome> {
+        let response = written(self.raft.client_write(Proposal::new(command)?).await)?;
+        match response.data {
+            Applied::Data(outcome) => Ok(outcome),
+            Applied::Misrouted(shard) => Err(misrouted(shard).into()),
+            Applied::Split(_) | _ => Err(Error::Raft("a command applied as a split".into()).into()),
+        }
+    }
 }
 
 impl<C: Config> Transaction for Txn<'_, C> {

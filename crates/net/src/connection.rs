@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_client::{Reach, Reply, Request};
 use kurator_meta::{Answer, Ask, Call};
 use kurator_raft::{Connection, Failure, Message, NodeId, Peer, Response, Transport};
 use quinn::crypto::rustls::QuicClientConfig;
@@ -30,16 +31,20 @@ pub(crate) enum Channel {
     Raft,
     /// A [`Call`] on the meta shard, answered by an [`Answer`].
     Meta,
+    /// A client's [`Request`], answered by a [`Reply`].
+    Client,
 }
 
 impl Channel {
     const RAFT: u8 = 1;
     const META: u8 = 2;
+    const CLIENT: u8 = 3;
 
     const fn tag(self) -> u8 {
         match self {
             Self::Raft => Self::RAFT,
             Self::Meta => Self::META,
+            Self::Client => Self::CLIENT,
         }
     }
 
@@ -49,6 +54,7 @@ impl Channel {
         let channel = match *tag {
             Self::RAFT => Self::Raft,
             Self::META => Self::Meta,
+            Self::CLIENT => Self::Client,
             _ => return None,
         };
         Some((channel, rest))
@@ -189,5 +195,18 @@ impl Ask for Quic {
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
         Answer::decode(&reply).map_err(io::Error::other)
+    }
+}
+
+impl Reach for Quic {
+    /// Opens a connection of its own for the request, as [`Quic::ask`]
+    /// does.
+    async fn reach(&self, node: NodeId, peer: &Peer, request: &Request) -> io::Result<Reply> {
+        let request = request.encode()?;
+        let mut link = self.connect(node, peer);
+        let reply = tokio::time::timeout(ASK_TIMEOUT, link.exchange(Channel::Client, &request))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        Reply::decode(&reply).map_err(io::Error::other)
     }
 }

@@ -735,6 +735,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-client"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "kurator-codec",
+ "kurator-consensus",
+ "kurator-crypto",
+ "kurator-meta",
+ "kurator-shard",
+ "kurator-storage",
+ "proptest",
+]
+
+[[package]]
 name = "kurator-codec"
 version = "0.0.1"
 dependencies = [
@@ -748,6 +762,7 @@ name = "kurator-consensus"
 version = "0.0.1"
 dependencies = [
  "futures-util",
+ "kurator-codec",
  "kurator-crypto",
  "kurator-shard",
  "kurator-storage",
@@ -781,6 +796,7 @@ dependencies = [
 name = "kurator-net"
 version = "0.0.1"
 dependencies = [
+ "kurator-client",
  "kurator-consensus",
  "kurator-crypto",
  "kurator-meta",

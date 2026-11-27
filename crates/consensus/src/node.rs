@@ -2,9 +2,13 @@
 //! authenticate each node.
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use kurator_crypto::VerifyingKey;
+use kurator_codec::{DecodeError, Reader};
+use kurator_crypto::{Algorithm, VerifyingKey};
+
+const V4: u8 = 4;
+const V6: u8 = 6;
 
 /// Identifies a node within a cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -59,6 +63,48 @@ impl Peer {
     #[must_use]
     pub const fn key(&self) -> &VerifyingKey {
         &self.key
+    }
+
+    /// Appends `addr | key`, where `addr` is `4 [4] port u16` or
+    /// `6 [16] port u16` and `key` is `algorithm u8 | len u32 | public key`,
+    /// the algorithm as [`Algorithm::id`] names it.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        match self.addr {
+            SocketAddr::V4(addr) => {
+                out.push(V4);
+                out.extend_from_slice(&addr.ip().octets());
+            }
+            SocketAddr::V6(addr) => {
+                out.push(V6);
+                out.extend_from_slice(&addr.ip().octets());
+            }
+        }
+        out.extend_from_slice(&self.addr.port().to_le_bytes());
+        out.push(self.key.algorithm().id());
+        // A public key is a few kilobytes at most.
+        let len = u32::try_from(self.key.as_bytes().len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(self.key.as_bytes());
+    }
+
+    /// Reads a peer written by [`Peer::encode`].
+    ///
+    /// # Errors
+    ///
+    /// When the input is not one, or its key is not a valid key of its
+    /// algorithm.
+    pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let ip = match reader.read::<u8>()? {
+            V4 => Ipv4Addr::from(reader.read::<[u8; 4]>()?).into(),
+            V6 => Ipv6Addr::from(reader.read::<[u8; 16]>()?).into(),
+            other => return Err(DecodeError::Tag(other)),
+        };
+        let port = reader.read::<u16>()?;
+        let id = reader.read::<u8>()?;
+        let algorithm = Algorithm::from_id(id).ok_or(DecodeError::Tag(id))?;
+        let key =
+            VerifyingKey::from_parts(algorithm, reader.bytes()?).ok_or(DecodeError::Invalid)?;
+        Ok(Self::new(SocketAddr::new(ip, port), key))
     }
 }
 

@@ -6,14 +6,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_client::{Reply, Request};
 use kurator_crypto::{NodeSecret, VerifyingKey};
-use kurator_meta::{Answer, Call};
+use kurator_meta::{Answer, Call, Meta};
 use kurator_raft::{Message, NodeId, Refusal, Response};
 use kurator_shard::ShardId;
 use quinn::crypto::rustls::QuicServerConfig;
 
 use crate::connection::{Channel, MAX_MESSAGE, Quic};
-use crate::roster::Roster;
+use crate::roster::{Caller, Roster};
 use crate::tls::{Identity, presented_key};
 use crate::{Inbox, Tokio};
 
@@ -46,6 +47,7 @@ pub struct Endpoint {
     socket: quinn::Endpoint,
     identity: Identity,
     bootstrap: BTreeMap<NodeId, VerifyingKey>,
+    clients: Vec<VerifyingKey>,
     transport: Arc<quinn::TransportConfig>,
 }
 
@@ -72,8 +74,16 @@ impl Endpoint {
             socket: quinn::Endpoint::client(addr)?,
             identity,
             bootstrap,
+            clients: Vec::new(),
             transport: Arc::new(transport),
         })
+    }
+
+    /// Serves the clients that hold `clients` too, as clients: they may
+    /// read and write, but not take part in replication.
+    #[must_use]
+    pub fn with_clients(self, clients: Vec<VerifyingKey>) -> Self {
+        Self { clients, ..self }
     }
 
     /// Where it listens.
@@ -103,13 +113,18 @@ impl Endpoint {
     ///
     /// When the TLS configuration cannot be built.
     pub fn serve(self, inbox: Inbox) -> Result<Server, NetError> {
-        let roster = Arc::new(Roster::new(self.bootstrap, inbox.memberships()));
+        let quic = self.transport();
+        let roster = Arc::new(Roster::new(
+            self.bootstrap,
+            inbox.memberships(),
+            self.clients,
+        ));
         let tls = self.identity.server(Arc::clone(&roster))?;
         let mut server =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
         let _configured = server.transport_config(self.transport);
         self.socket.set_server_config(Some(server));
-        let task = tokio::spawn(accept(self.socket.clone(), roster, inbox));
+        let task = tokio::spawn(accept(self.socket.clone(), roster, inbox, quic));
         Ok(Server {
             socket: self.socket,
             task,
@@ -132,19 +147,28 @@ impl Drop for Server {
     }
 }
 
+/// What serving a request needs: the replicas, and the transport to ask
+/// other nodes through.
+#[derive(Debug, Clone)]
+struct Serving {
+    inbox: Inbox,
+    quic: Quic,
+}
+
 /// Accepts connections until the endpoint closes.
-async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, inbox: Inbox) {
+async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, inbox: Inbox, quic: Quic) {
+    let serving = Serving { inbox, quic };
     while let Some(incoming) = endpoint.accept().await {
         drop(tokio::spawn(connection(
             incoming,
             Arc::clone(&roster),
-            inbox.clone(),
+            serving.clone(),
         )));
     }
 }
 
 /// Serves one connection: one request per stream, each in its own task.
-async fn connection(incoming: quinn::Incoming, roster: Arc<Roster>, inbox: Inbox) {
+async fn connection(incoming: quinn::Incoming, roster: Arc<Roster>, serving: Serving) {
     let Ok(connection) = incoming.await else {
         return;
     };
@@ -154,11 +178,11 @@ async fn connection(incoming: quinn::Incoming, roster: Arc<Roster>, inbox: Inbox
     };
     while let Ok((send, recv)) = connection.accept_bi().await {
         // A node that left the membership is cut off on its next request.
-        let Some(sender) = roster.identify(&key) else {
+        let Some(caller) = roster.identify(&key) else {
             connection.close(quinn::VarInt::from_u32(2), b"not a member");
             return;
         };
-        drop(tokio::spawn(stream(sender, send, recv, inbox.clone())));
+        drop(tokio::spawn(stream(caller, send, recv, serving.clone())));
     }
 }
 
@@ -171,20 +195,27 @@ fn peer_key(connection: &quinn::Connection) -> Option<VerifyingKey> {
     presented_key(certificates.first()?)
 }
 
-/// Reads one request, handles it and writes the answer.
+/// Reads one request, handles it and writes the answer. A client may use
+/// the client channel only.
 async fn stream(
-    sender: NodeId,
+    caller: Caller,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    inbox: Inbox,
+    serving: Serving,
 ) {
     let Ok(bytes) = recv.read_to_end(MAX_MESSAGE).await else {
         return;
     };
-    let answer = match Channel::split(&bytes) {
-        Some((Channel::Raft, message)) => raft(sender, message, &inbox).await,
-        Some((Channel::Meta, call)) => meta(call, &inbox).await,
-        None => Response::<Tokio>::Refused(Refusal::Malformed).encode(),
+    let answer = match (Channel::split(&bytes), caller) {
+        (Some((Channel::Raft, message)), Caller::Node(sender)) => {
+            raft(sender, message, &serving.inbox).await
+        }
+        (Some((Channel::Meta, call)), Caller::Node(_)) => meta(call, &serving.inbox).await,
+        (Some((Channel::Client, request)), _) => client(request, &serving).await,
+        (Some((Channel::Raft | Channel::Meta, _)), Caller::Client) => {
+            Response::<Tokio>::Refused(Refusal::Forged).encode()
+        }
+        (None, _) => Response::<Tokio>::Refused(Refusal::Malformed).encode(),
     };
     if send.write_all(&answer).await.is_ok() {
         drop(send.finish());
@@ -211,4 +242,34 @@ async fn meta(bytes: &[u8], inbox: &Inbox) -> Vec<u8> {
         (Err(error), _) => Answer::Failed(format!("the call does not decode: {error}")),
     };
     answer.encode().unwrap_or_default()
+}
+
+/// Answers the client request `bytes` from this node's replicas, and
+/// encodes the reply. A reply too long to encode is none.
+async fn client(bytes: &[u8], serving: &Serving) -> Vec<u8> {
+    let reply = match Request::decode(bytes) {
+        Ok(Request::Map) => map(serving).await,
+        Ok(Request::Shard(shard, call)) => match serving.inbox.replica(shard) {
+            Some(replica) => kurator_client::answer(&replica, call).await,
+            None => Reply::NoReplica,
+        },
+        Ok(_) => Reply::Failed("a request this node does not know".to_owned()),
+        Err(error) => Reply::Failed(format!("the request does not decode: {error}")),
+    };
+    reply.encode().unwrap_or_default()
+}
+
+/// The registry, from the meta shard's leader wherever it is, and the
+/// nodes this node knows of.
+async fn map(serving: &Serving) -> Reply {
+    let Some(replica) = serving.inbox.replica(ShardId::META) else {
+        return Reply::NoReplica;
+    };
+    match Meta::new(&replica, &serving.quic).registry().await {
+        Ok(registry) => Reply::Map {
+            registry,
+            peers: serving.inbox.memberships().nodes(),
+        },
+        Err(error) => Reply::Failed(error.to_string()),
+    }
 }
