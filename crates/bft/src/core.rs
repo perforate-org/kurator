@@ -73,6 +73,11 @@ pub enum Event {
 /// - **Voting.** A replica votes once in a view at most, and only for a
 ///   block that extends a certificate at least as new as the newest it
 ///   knows, its *lock*.
+/// - **Commands.** A replica hands the commands submitted to it to the
+///   leader who proposes next. A leader proposes only while there is
+///   something to decide: commands, or blocks of commands the others have
+///   not yet seen decided. An idle committee proposes nothing, and its
+///   views time out, ever more slowly.
 /// - **Commit.** A block commits when its child, proposed in the very
 ///   next view, is certified: a quorum then holds a lock on it, and no
 ///   later certificate can extend anything else. Committing a block
@@ -193,9 +198,8 @@ impl Core {
                 Ok(())
             }
             Event::Submitted(command) => {
-                if !self.pending.contains(&command) {
-                    self.pending.push(command);
-                }
+                self.hold(vec![command]);
+                self.offer(self.lock.block());
                 Ok(())
             }
         };
@@ -241,6 +245,15 @@ impl Core {
                 self.timed_out(certificate);
                 Ok(())
             }
+            Message::Forward(commands) => {
+                self.hold(commands);
+                // Forwarded no further: the sender may be in another view,
+                // and the two could pass commands back and forth for ever.
+                if self.leads() {
+                    self.propose(self.view);
+                }
+                Ok(())
+            }
             Message::Deliver(block) => {
                 if !self.wanted.remove(&block.id()) {
                     return Err(Rejection::Unwanted);
@@ -263,8 +276,50 @@ impl Core {
         self.votes = self.votes.split_off(&before);
         self.wait(self.failures);
         self.ask_again();
-        if self.config.committee.leader(view) == Some(self.node()) {
-            self.propose(view);
+        self.offer(self.lock.block());
+    }
+
+    /// Whether this replica leads the view it is in.
+    fn leads(&self) -> bool {
+        self.config.committee.leader(self.view) == Some(self.node())
+    }
+
+    /// Keeps `commands` until they are decided.
+    fn hold(&mut self, commands: Vec<Vec<u8>>) {
+        for command in commands {
+            if !self.pending.contains(&command) {
+                self.pending.push(command);
+            }
+        }
+    }
+
+    /// Proposes in the current view when this replica leads it and has
+    /// not yet, or hands the commands it holds that no block proposes yet
+    /// to the leader who can propose them next: the current view's, or
+    /// once this replica voted in the view, the next view's, who may wait
+    /// idle for them. It offers on entering a view, on voting and on each
+    /// command submitted.
+    fn offer(&mut self, tip: BlockId) {
+        if self.view == View::GENESIS {
+            // Not started: it enters its first view, and offers, then.
+            return;
+        }
+        if self.leads() && self.proposed < self.view {
+            self.propose(self.view);
+            return;
+        }
+        let commands = self.unproposed(tip);
+        let view = if self.voted >= self.view {
+            self.view.next()
+        } else {
+            Some(self.view)
+        };
+        let leader = view
+            .and_then(|view| self.config.committee.leader(view))
+            .filter(|leader| *leader != self.node());
+        if let (false, Some(leader)) = (commands.is_empty(), leader) {
+            self.effects
+                .send(To::One(leader), Message::Forward(commands));
         }
     }
 
@@ -345,12 +400,14 @@ impl Core {
         if !self.blocks.contains_key(&block) {
             self.want(block);
         }
+        // Decided first, so that the next view's leader knows what is left
+        // to decide.
+        self.find_commit();
         if let Some(next) = view.next().filter(|next| *next > self.view) {
             self.failures = 0;
             self.entered = None;
             self.enter(next);
         }
-        self.find_commit();
     }
 
     /// Finds the newest block a two-chain commits: the parent of a
@@ -428,8 +485,17 @@ impl Core {
 
     // --- Proposing and voting ---
 
+    /// Proposes a block in `view`, once, when there is something to
+    /// decide: commands no block proposes yet, or blocks of commands the
+    /// others have not decided, which only blocks after them show them
+    /// decided. A leader with neither leaves its view idle, and the view
+    /// times out.
     fn propose(&mut self, view: View) {
         if self.proposed >= view {
+            return;
+        }
+        let commands = self.unproposed(self.lock.block());
+        if commands.is_empty() && self.settled() {
             return;
         }
         // It entered the view by a timeout certificate, which then
@@ -437,7 +503,6 @@ impl Core {
         // which its lock now is.
         let timeout = self.entered.clone();
         self.proposed = view;
-        let commands = self.unproposed();
         let block = Block::new(view, self.lock.clone(), commands);
         let proposal = Proposal::sign(
             &self.config.key,
@@ -454,11 +519,41 @@ impl Core {
         }
     }
 
-    /// The pending commands that no undecided ancestor of the next block
-    /// holds.
-    fn unproposed(&self) -> Vec<Vec<u8>> {
-        let mut proposed = BTreeSet::new();
+    /// Whether the others decided every block of commands the next block
+    /// would extend: whether the newest block it extends shows them the
+    /// certificate that decides the last of those blocks.
+    fn settled(&self) -> bool {
+        let Some(shown) = self.shown() else {
+            return self.lock.block() == BlockId::GENESIS;
+        };
         let mut id = self.lock.block();
+        while id != shown {
+            match self.blocks.get(&id) {
+                Some(block) if block.commands().is_empty() => id = block.parent(),
+                // A block it lacks might hold commands.
+                Some(_) | None => return false,
+            }
+        }
+        true
+    }
+
+    /// The block that the certificate in the newest certified block
+    /// decides, for whoever sees that block: the parent of the block it
+    /// certifies, when that one follows its own certificate's view.
+    fn shown(&self) -> Option<BlockId> {
+        let tip = self.blocks.get(&self.lock.block())?;
+        let certified = self.blocks.get(&tip.justify().block())?;
+        certified
+            .view()
+            .follows(certified.justify().view())
+            .then(|| certified.parent())
+    }
+
+    /// The pending commands that neither `tip` nor its undecided ancestors
+    /// hold.
+    fn unproposed(&self, tip: BlockId) -> Vec<Vec<u8>> {
+        let mut proposed = BTreeSet::new();
+        let mut id = tip;
         while let Some(block) = self.blocks.get(&id).filter(|_| id != self.committed.0) {
             proposed.extend(block.commands().iter());
             id = block.parent();
@@ -481,7 +576,7 @@ impl Core {
         self.check_vote(view, extends)?;
         self.voted = view;
         let vote = Vote::sign(&self.config.key, self.config.domain, self.node(), view, id);
-        match view
+        let counted = match view
             .next()
             .and_then(|next| self.config.committee.leader(next))
         {
@@ -491,7 +586,12 @@ impl Core {
                 Ok(())
             }
             None => Ok(()),
+        };
+        // The commands this block leaves out go with the vote.
+        if self.view == view {
+            self.offer(id);
         }
+        counted
     }
 
     /// Whether this replica may vote for a valid proposal in `view` that

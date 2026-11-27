@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use kurator_consensus::NodeId;
 use kurator_crypto::VerifyingKey;
+use kurator_shard::ShardId;
 
 use crate::view::View;
 
@@ -26,7 +27,26 @@ impl Domain {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The domain of shard `shard` decided by `committee`: a hash of the
+    /// shard's id and every member's id and key, so that a signature
+    /// counts neither in another shard nor under another committee.
+    #[must_use]
+    pub fn of(shard: ShardId, committee: &Committee) -> Self {
+        let mut hasher = blake3::Hasher::new_derive_key(DOMAIN_CONTEXT);
+        let _shard = hasher.update(&shard.get().to_le_bytes());
+        for (node, key) in &committee.members {
+            let _member = hasher
+                .update(&node.get().to_le_bytes())
+                .update(&[key.algorithm().id()])
+                .update(key.as_bytes());
+        }
+        Self(*hasher.finalize().as_bytes())
+    }
 }
+
+/// The key derivation context of shard domains. Fixed forever.
+const DOMAIN_CONTEXT: &str = "kurator 2026-11 bft shard domain";
 
 /// The replicas that decide a shard, each with the public key it signs
 /// votes with.
@@ -116,6 +136,8 @@ mod tests {
     use kurator_consensus::NodeId;
     use kurator_crypto::{Algorithm, SigningKey};
 
+    use kurator_shard::ShardId;
+
     use super::{Committee, Domain, faults, quorum};
     use crate::view::View;
 
@@ -182,6 +204,19 @@ mod tests {
     #[test]
     fn domains_are_their_bytes() {
         assert_eq!(Domain::new([3; 32]).as_bytes(), &[3; 32], "bytes");
+    }
+
+    #[test]
+    fn a_domain_names_its_shard_and_its_committee() {
+        let four = committee(4);
+        let first = Domain::of(ShardId::new(1), &four);
+        assert_eq!(first, Domain::of(ShardId::new(1), &committee(4)), "fixed");
+        assert_ne!(first, Domain::of(ShardId::new(2), &four), "another shard");
+        assert_ne!(
+            first,
+            Domain::of(ShardId::new(1), &committee(5)),
+            "another committee"
+        );
     }
 }
 

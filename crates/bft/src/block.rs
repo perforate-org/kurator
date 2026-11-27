@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use kurator_codec::{DecodeError, Reader};
 use kurator_consensus::NodeId;
 use kurator_crypto::{Signature, SigningKey};
 
@@ -12,7 +12,8 @@ use crate::timeout::TimeoutCertificate;
 use crate::view::View;
 use crate::vote::{BlockId, Justify, check};
 use crate::wire::{
-    put_count, put_node, put_signature, put_view, read_count, read_node, read_signature, read_view,
+    put_commands, put_node, put_signature, put_view, read_commands, read_node, read_signature,
+    read_view,
 };
 
 /// The key derivation context of block ids. Fixed forever.
@@ -81,21 +82,13 @@ impl Block {
     pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
         put_view(out, self.view)?;
         self.justify.encode(out)?;
-        put_count(out, self.commands.len())?;
-        self.commands
-            .iter()
-            .try_for_each(|command| put_bytes(out, command))
+        put_commands(out, &self.commands)
     }
 
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let view = read_view(reader)?;
         let justify = Justify::decode(reader)?;
-        let count = read_count(reader)?;
-        let mut commands = Vec::new();
-        for _ in 0..count {
-            commands.push(reader.bytes()?.to_vec());
-        }
-        Ok(Self::new(view, justify, commands))
+        Ok(Self::new(view, justify, read_commands(reader)?))
     }
 }
 

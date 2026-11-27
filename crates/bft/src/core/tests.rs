@@ -37,8 +37,17 @@ fn core(node: NodeId) -> Core {
     Core::new(config(node))
 }
 
-fn started(node: NodeId) -> Core {
+/// A replica holding a command, so that it proposes when it leads.
+fn holding(node: NodeId) -> Core {
     let mut core = core(node);
+    let _held = core
+        .handle(Event::Submitted(b"command".to_vec()))
+        .persisted();
+    core
+}
+
+fn started(node: NodeId) -> Core {
+    let mut core = holding(node);
     let _start = core.handle(Event::Start).persisted();
     core
 }
@@ -88,7 +97,7 @@ fn receive(core: &mut Core, message: Message) -> Effects {
 
 #[test]
 fn the_first_leader_proposes_on_start() {
-    let mut first = core(leader(1));
+    let mut first = holding(leader(1));
     let step = first.handle(Event::Start);
     assert_eq!(
         step.safety().map(Safety::voted),
@@ -567,7 +576,7 @@ fn a_block_commits_once_its_child_in_the_next_view_is_certified() {
         .collect();
     let decided = run(&mut cores, 400);
     let first = &decided[&NodeId::new(1)];
-    assert!(first.len() >= 3, "decides: {}", first.len());
+    assert!(!first.is_empty(), "decides");
     assert_eq!(first[0].view(), View::new(1), "the first block first");
     for blocks in decided.values() {
         let common = blocks.len().min(first.len());
@@ -633,12 +642,14 @@ fn a_replica_remembers_its_votes_across_a_restart() {
     let (mut journal, fresh) = Journal::open(dir.path(), Options::default()).unwrap();
     assert_eq!(fresh, Recovered::default(), "nothing yet");
     let mut replica = Core::recover(config(node), fresh);
+    let _held = replica.handle(Event::Submitted(b"command".to_vec()));
     let first = journal.persist(replica.handle(Event::Start)).unwrap();
     let proposed = proposal_in(&first).unwrap();
     drop(journal);
 
     let (_journal, recovered) = Journal::open(dir.path(), Options::default()).unwrap();
     let mut restarted = Core::recover(config(node), recovered);
+    let _held_again = restarted.handle(Event::Submitted(b"command".to_vec()));
     let again = restarted.handle(Event::Start).persisted();
     assert_eq!(restarted.view(), View::new(1), "back in its view");
     assert!(proposal_in(&again).is_none(), "proposes once a view");
@@ -656,4 +667,111 @@ fn a_replica_remembers_its_votes_across_a_restart() {
         Some(Rejection::Voted(View::new(1))),
         "votes once a view"
     );
+}
+
+#[test]
+fn an_idle_leader_proposes_nothing_and_waits_out_its_view() {
+    let mut first = core(leader(1));
+    let effects = first.handle(Event::Start).persisted();
+    assert_eq!(first.view(), View::new(1), "in the first view");
+    assert!(proposal_in(&effects).is_none(), "nothing to decide");
+    assert_eq!(
+        effects.timer().map(|timer| timer.view()),
+        Some(View::new(1)),
+        "the view times out"
+    );
+
+    // A command forwarded to it is proposed at once.
+    let command = b"forwarded".to_vec();
+    let forwarded = receive(&mut first, Message::Forward(vec![command.clone()]));
+    let proposed = proposal_in(&forwarded).unwrap();
+    assert_eq!(proposed.block().commands(), [command], "proposes it");
+}
+
+#[test]
+fn a_command_goes_to_the_leader_of_the_view() {
+    let node = follower(&[1]);
+    let mut replica = core(node);
+    let _start = replica.handle(Event::Start).persisted();
+    let command = b"submitted".to_vec();
+    let effects = replica
+        .handle(Event::Submitted(command.clone()))
+        .persisted();
+    let [outgoing] = effects.messages() else {
+        panic!("one message: {:?}", effects.messages());
+    };
+    assert_eq!(outgoing.to(), To::One(leader(1)), "to the leader");
+    assert_eq!(
+        outgoing.message(),
+        &Message::Forward(vec![command]),
+        "the command"
+    );
+
+    // Forwarded commands go no further.
+    let other = b"other".to_vec();
+    let kept = receive(&mut replica, Message::Forward(vec![other]));
+    assert!(kept.messages().is_empty(), "kept for later");
+}
+
+/// The votes of two members other than `node` for `block` in `view`.
+fn two_votes(node: NodeId, view: u64, block: BlockId) -> impl Iterator<Item = Message> {
+    (1..=4)
+        .map(NodeId::new)
+        .filter(move |other| *other != node)
+        .take(2)
+        .map(move |other| {
+            let vote = Vote::sign(&key(other.get()), DOMAIN, other, View::new(view), block);
+            Message::Vote(vote)
+        })
+}
+
+#[test]
+fn a_leader_proposes_after_commands_until_they_decide_then_idles() {
+    let first = proposal(1, Justify::Genesis, None);
+    let commands = first.block().id();
+
+    // The leader of view 2 certifies the block of commands, and proposes
+    // an empty block after it: only that one's certificate commits it.
+    let node = leader(2);
+    let mut replica = core(node);
+    let _start = replica.handle(Event::Start).persisted();
+    let mut effects = receive(&mut replica, Message::Proposal(first.clone()));
+    for vote in two_votes(node, 1, commands) {
+        effects = receive(&mut replica, vote);
+    }
+    let after = proposal_in(&effects).unwrap();
+    assert_eq!(after.block().view(), View::new(2), "in the next view");
+    assert!(after.block().commands().is_empty(), "empty");
+
+    // The leader of view 3 decides the commands, and proposes once more,
+    // to show the others the certificate that decides them.
+    let (shown, decided) = next_leader(&[&first, &after], 3);
+    assert_eq!(decided, [commands], "decides the commands");
+    assert!(shown.block().commands().is_empty(), "empty");
+
+    // The leader of view 4 has nothing more to show.
+    let (idle, _decided) = next_leader(&[&first, &after, &shown], 4);
+    assert!(idle.block().view() < View::new(4), "idles");
+}
+
+/// The leader of `view`, a fresh replica, once it saw `chain` and the
+/// votes that certify its last block in the view before: what it proposes
+/// next, the last of the chain if nothing, and what it decided.
+fn next_leader(chain: &[&Proposal], view: u64) -> (Proposal, Vec<BlockId>) {
+    let node = leader(view);
+    let mut replica = core(node);
+    let _start = replica.handle(Event::Start).persisted();
+    for proposal in chain {
+        let _voted = receive(&mut replica, Message::Proposal((*proposal).clone()));
+    }
+    let last = chain.last().unwrap();
+    let mut decided = Vec::new();
+    let mut proposed = None;
+    for vote in two_votes(node, view.saturating_sub(1), last.block().id()) {
+        let effects = receive(&mut replica, vote);
+        decided.extend(effects.decided().iter().map(Block::id));
+        proposed = proposed.or_else(|| proposal_in(&effects));
+    }
+    assert_eq!(replica.view(), View::new(view), "in view {view}");
+    (proposed.unwrap_or_else(|| (*last).clone()), decided)
 }

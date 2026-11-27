@@ -4,9 +4,10 @@
 //! [`Ledger`]. It is the shard's [`Replicated`] replica for the layers
 //! above consensus.
 //!
-//! Every replica takes writes: a command waits in the replica it was
-//! given to until that replica leads a view and proposes it, and returns
-//! once a block that holds it is decided and applied. Reads see the
+//! Every replica takes writes: a command goes from the replica it was
+//! given to on to the leader who proposes next, and returns once a block
+//! that holds it is decided and applied. A committee with nothing to
+//! decide proposes nothing, and its views time out. Reads see the
 //! replica's own decided state ([`Reads::Decided`]).
 
 use std::collections::BTreeMap;

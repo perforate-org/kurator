@@ -13,6 +13,8 @@ use kurator_raft::{Message, NodeId, Refusal, Response};
 use kurator_shard::ShardId;
 use quinn::crypto::rustls::QuicServerConfig;
 
+#[cfg(feature = "bft")]
+use crate::bft::{BftReplica, Committees};
 use crate::connection::{Channel, MAX_MESSAGE, Quic};
 use crate::roster::{Caller, Roster};
 use crate::tls::{Identity, presented_key};
@@ -49,6 +51,8 @@ pub struct Endpoint {
     bootstrap: BTreeMap<NodeId, VerifyingKey>,
     clients: Vec<VerifyingKey>,
     transport: Arc<quinn::TransportConfig>,
+    #[cfg(feature = "bft")]
+    committees: Committees,
 }
 
 impl Endpoint {
@@ -76,6 +80,8 @@ impl Endpoint {
             bootstrap,
             clients: Vec::new(),
             transport: Arc::new(transport),
+            #[cfg(feature = "bft")]
+            committees: Committees::default(),
         })
     }
 
@@ -84,6 +90,17 @@ impl Endpoint {
     #[must_use]
     pub fn with_clients(self, clients: Vec<VerifyingKey>) -> Self {
         Self { clients, ..self }
+    }
+
+    /// Serves the BFT `replicas` too, by shard, and trusts the members of
+    /// their committees with their messages.
+    #[cfg(feature = "bft")]
+    #[must_use]
+    pub fn with_bft(self, replicas: BTreeMap<ShardId, Arc<BftReplica>>) -> Self {
+        Self {
+            committees: Committees::new(replicas),
+            ..self
+        }
     }
 
     /// Where it listens.
@@ -114,9 +131,14 @@ impl Endpoint {
     /// When the TLS configuration cannot be built.
     pub fn serve(self, inbox: Inbox) -> Result<Server, NetError> {
         let quic = self.transport();
+        #[cfg(feature = "bft")]
+        let committees = self.committees.keys();
+        #[cfg(not(feature = "bft"))]
+        let committees = BTreeMap::new();
         let roster = Arc::new(Roster::new(
             self.bootstrap,
             inbox.memberships(),
+            committees,
             self.clients,
         ));
         let tls = self.identity.server(Arc::clone(&roster))?;
@@ -124,7 +146,13 @@ impl Endpoint {
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
         let _configured = server.transport_config(self.transport);
         self.socket.set_server_config(Some(server));
-        let task = tokio::spawn(accept(self.socket.clone(), roster, inbox, quic));
+        let serving = Serving {
+            inbox,
+            quic,
+            #[cfg(feature = "bft")]
+            committees: self.committees,
+        };
+        let task = tokio::spawn(accept(self.socket.clone(), roster, serving));
         Ok(Server {
             socket: self.socket,
             task,
@@ -153,11 +181,12 @@ impl Drop for Server {
 struct Serving {
     inbox: Inbox,
     quic: Quic,
+    #[cfg(feature = "bft")]
+    committees: Committees,
 }
 
 /// Accepts connections until the endpoint closes.
-async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, inbox: Inbox, quic: Quic) {
-    let serving = Serving { inbox, quic };
+async fn accept(endpoint: quinn::Endpoint, roster: Arc<Roster>, serving: Serving) {
     while let Some(incoming) = endpoint.accept().await {
         drop(tokio::spawn(connection(
             incoming,
@@ -196,7 +225,8 @@ fn peer_key(connection: &quinn::Connection) -> Option<VerifyingKey> {
 }
 
 /// Reads one request, handles it and writes the answer. A client may use
-/// the client channel only.
+/// the client channel only, and a member of a BFT committee the BFT
+/// channel as well.
 async fn stream(
     caller: Caller,
     mut send: quinn::SendStream,
@@ -212,7 +242,12 @@ async fn stream(
         }
         (Some((Channel::Meta, call)), Caller::Node(_)) => meta(call, &serving.inbox).await,
         (Some((Channel::Client, request)), _) => client(request, &serving).await,
-        (Some((Channel::Raft | Channel::Meta, _)), Caller::Client) => {
+        (Some((Channel::Bft, frame)), Caller::Node(sender) | Caller::Member(sender)) => {
+            bft(sender, frame, &serving).await;
+            Vec::new()
+        }
+        (Some((Channel::Raft | Channel::Meta, _)), Caller::Client | Caller::Member(_))
+        | (Some((Channel::Bft, _)), Caller::Client) => {
             Response::<Tokio>::Refused(Refusal::Forged).encode()
         }
         (None, _) => Response::<Tokio>::Refused(Refusal::Malformed).encode(),
@@ -251,12 +286,41 @@ async fn client(bytes: &[u8], serving: &Serving) -> Vec<u8> {
         Ok(Request::Map) => map(serving).await,
         Ok(Request::Shard(shard, call)) => match serving.inbox.replica(shard) {
             Some(replica) => kurator_client::answer(&replica, call).await,
-            None => Reply::NoReplica,
+            None => elsewhere(shard, call, serving).await,
         },
         Ok(_) => Reply::Failed("a request this node does not know".to_owned()),
         Err(error) => Reply::Failed(format!("the request does not decode: {error}")),
     };
     reply.encode().unwrap_or_default()
+}
+
+/// Hands the BFT message `frame` from `sender` to its shard's replica.
+#[cfg(feature = "bft")]
+async fn bft(sender: NodeId, frame: &[u8], serving: &Serving) {
+    serving.committees.deliver(sender, frame).await;
+}
+
+/// A build without BFT holds no BFT replica to hand a message to.
+#[cfg(not(feature = "bft"))]
+#[expect(clippy::unused_async, reason = "the same call as the BFT build's")]
+async fn bft(_sender: NodeId, _frame: &[u8], _serving: &Serving) {}
+
+/// Answers `call` on `shard`, which no Raft replica here holds, from the
+/// BFT replica of it.
+#[cfg(feature = "bft")]
+async fn elsewhere(shard: ShardId, call: kurator_client::Call, serving: &Serving) -> Reply {
+    serving
+        .committees
+        .answer(shard, call)
+        .await
+        .unwrap_or(Reply::NoReplica)
+}
+
+/// A build without BFT holds no other replica.
+#[cfg(not(feature = "bft"))]
+#[expect(clippy::unused_async, reason = "the same call as the BFT build's")]
+async fn elsewhere(_shard: ShardId, _call: kurator_client::Call, _serving: &Serving) -> Reply {
+    Reply::NoReplica
 }
 
 /// The registry, from the meta shard's leader wherever it is, and the

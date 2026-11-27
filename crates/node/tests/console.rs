@@ -495,3 +495,46 @@ fn a_node_serves_its_metrics() {
     );
     assert!(console.quit().is_empty(), "nothing more");
 }
+
+/// The consensus key `kurator key --consensus` prints for `dir`.
+fn consensus_key_of(dir: &Path) -> String {
+    let output = Command::new(KURATOR)
+        .arg("key")
+        .arg(dir)
+        .arg("--consensus")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "key succeeds");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn a_node_runs_the_bft_shards_its_charters_seat_it_in() {
+    let (dir, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (transport, consensus) = (key_of(dir.path()), consensus_key_of(dir.path()));
+    assert!(consensus.starts_with("ed25519:"), "a key: {consensus}");
+    assert_ne!(consensus, transport, "of its own");
+    let charter = dir.path().join("charter");
+    let seat = |node| format!("member {node} 127.0.0.1:1 {transport} {consensus} alice\n");
+
+    // A charter that seats another node.
+    std::fs::write(&charter, format!("shard 40\n{}", seat(2))).unwrap();
+    let output = Command::new(KURATOR)
+        .args(["run", "--id", "1", "--listen", "127.0.0.1:0", "--bft"])
+        .arg(&charter)
+        .arg("--dir")
+        .arg(other.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "fails");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("not a member"), "explains: {stderr}");
+
+    // A committee of one runs, and runs again from its journal.
+    std::fs::write(&charter, format!("shard 40\n{}", seat(1))).unwrap();
+    let charter = charter.to_str().unwrap();
+    let args = ["--id", "1", "--listen", "127.0.0.1:0", "--bft", charter];
+    assert!(Console::start(&args, dir.path()).quit().is_empty(), "runs");
+    assert!(dir.path().join("bft/40").is_dir(), "its journal");
+    assert!(Console::start(&args, dir.path()).quit().is_empty(), "again");
+}

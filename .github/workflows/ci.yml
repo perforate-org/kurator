@@ -32,6 +32,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked
+      - name: The transport without BFT, as a Raft-only build uses it
+        run: cargo clippy -p kurator-net --all-targets --locked
       - run: cargo test --workspace --locked
       - run: cargo doc --workspace --no-deps --locked
       - uses: taiki-e/install-action@v2

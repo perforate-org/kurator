@@ -824,6 +824,7 @@ dependencies = [
 name = "kurator-net"
 version = "0.0.1"
 dependencies = [
+ "kurator-bft",
  "kurator-client",
  "kurator-consensus",
  "kurator-crypto",
@@ -831,7 +832,9 @@ dependencies = [
  "kurator-raft",
  "kurator-shard",
  "kurator-storage",
+ "kurator-wal",
  "openraft-rt-tokio",
+ "parking_lot",
  "proptest",
  "quinn",
  "rustls",
@@ -845,6 +848,7 @@ name = "kurator-node"
 version = "0.0.1"
 dependencies = [
  "getrandom 0.4.3",
+ "kurator-bft",
  "kurator-client",
  "kurator-consensus",
  "kurator-crypto",
@@ -853,6 +857,7 @@ dependencies = [
  "kurator-raft",
  "kurator-shard",
  "kurator-storage",
+ "kurator-wal",
  "tempfile",
  "thiserror",
  "tokio",

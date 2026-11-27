@@ -8,7 +8,7 @@ use kurator_node::args::{self, Invocation};
 #[tokio::main]
 async fn main() -> ExitCode {
     let outcome = match args::parse(std::env::args().skip(1)) {
-        Ok(Invocation::Key(dir)) => kurator_node::key(&dir)
+        Ok(Invocation::Key(dir, purpose)) => kurator_node::key(&dir, purpose)
             .map(|key| Some(key.to_string()))
             .map_err(|error| error.to_string()),
         Ok(Invocation::Run(settings)) => kurator_node::run(settings)

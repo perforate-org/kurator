@@ -56,12 +56,16 @@
 //! # }
 //! ```
 
+#[cfg(feature = "bft")]
+mod bft;
 mod connection;
 mod endpoint;
 mod roster;
 mod tls;
 mod wall;
 
+#[cfg(feature = "bft")]
+pub use bft::{BftReplica, Wire, Wiring};
 pub use connection::{Quic, QuicLink};
 pub use endpoint::{Endpoint, NetError, Server};
 pub use wall::Wall;
