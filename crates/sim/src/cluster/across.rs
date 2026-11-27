@@ -168,11 +168,11 @@ impl<'cluster> Coordinator<'cluster> {
                 break;
             }
         }
-        let proposal = Decide::new(id, primary_key.clone(), proposed);
+        let proposal = Decide::new(id, primary_key.clone(), deadline, proposed);
         let Some(decided) = self.cluster.decide(primary_shard, proposal).await else {
             return Transacted::Unknown;
         };
-        let outcome = Decide::new(id, primary_key, super::decision(decided));
+        let outcome = Decide::new(id, primary_key, deadline, super::decision(decided));
         for shard in told.into_iter().filter(|shard| *shard != primary_shard) {
             let _decided: Option<Decided> = self.cluster.decide(shard, outcome.clone()).await;
         }

@@ -14,7 +14,7 @@ use crate::batch::{KvOp, WriteBatch};
 use crate::command::Command;
 use crate::outcome::{Abort, Outcome, Unreadable};
 use crate::span::Span;
-use crate::two_phase::{Decide, Decided, Decision, Prepare};
+use crate::two_phase::{Collect, Decide, Decided, Decision, Prepare};
 use crate::txn::{ReadSet, Transaction};
 use crate::version::{Retention, Version};
 
@@ -66,7 +66,8 @@ impl KvState {
     /// transaction holds a key it writes; a transaction commits unless,
     /// besides, a command after its read version wrote what it read. A
     /// prepare checks its part as a transaction and locks it; a decision
-    /// applies the part it decides, or drops it.
+    /// applies the part it decides, or drops it. A step of [`Collect`]
+    /// moves the fence or forgets decisions behind it, and writes nothing.
     pub fn apply(&mut self, version: Version, command: Command) -> Outcome {
         debug_assert!(version > self.version, "versions only grow");
         let writes = match command {
@@ -83,15 +84,20 @@ impl KvState {
                 Ok(writes) => writes,
                 Err(outcome) => return outcome,
             },
+            Command::Collect(step) => return self.collect(version, step),
         };
         self.write(version, writes)
     }
 
     /// Prepares `prepare` at `version`, unless its transaction was decided
-    /// already: then this is how.
+    /// already: then this is how. A transaction behind the fence is not
+    /// prepared.
     fn prepare(&mut self, version: Version, prepare: Prepare) -> Outcome {
         if let Some(outcome) = self.locks.told(prepare.id()) {
             return outcome;
+        }
+        if self.locks.is_fenced(prepare.deadline()) {
+            return Outcome::Aborted(Abort::Fenced(prepare.id()));
         }
         if !self.locks.is_prepared(prepare.id()) {
             if let Err(abort) = self.check(prepare.transaction()) {
@@ -104,21 +110,43 @@ impl KvState {
 
     /// Decides `decide` at `version`: the writes to apply when it commits
     /// a part this state prepared, otherwise how the transaction came out.
+    /// A transaction behind the fence that this state does not know of is
+    /// not decided: it may have been, and been forgotten.
     fn decide(&mut self, version: Version, decide: &Decide) -> Result<WriteBatch, Outcome> {
         let id = decide.id();
         if let Some(outcome) = self.locks.told(id) {
             return Err(outcome);
         }
-        let commits = decide.decision() == Decision::Commit && self.locks.is_prepared(id);
+        let held = self.locks.is_prepared(id);
+        if !held && self.locks.is_fenced(decide.deadline()) {
+            return Err(Outcome::Aborted(Abort::Fenced(id)));
+        }
+        let commits = decide.decision() == Decision::Commit && held;
         let decided = if commits {
             Decided::Committed(version)
         } else {
             Decided::Aborted
         };
-        match self.locks.decide(id, decide.primary(), decided) {
+        match self
+            .locks
+            .decide(id, decide.primary(), decide.deadline(), decided)
+        {
             Some(prepared) if commits => Ok(prepared.into_transaction().into_writes()),
             Some(_) | None => Err(Outcome::Aborted(Abort::RolledBack(id))),
         }
+    }
+
+    /// Takes `step` of forgetting decisions, at `version`.
+    fn collect(&mut self, version: Version, step: Collect) -> Outcome {
+        match step {
+            Collect::Fence(horizon) => {
+                if let Err(abort) = self.locks.fence(horizon) {
+                    return Outcome::Aborted(abort);
+                }
+            }
+            Collect::Forget(horizon) => self.locks.forget(horizon),
+        }
+        Outcome::Committed(version)
     }
 
     /// Applies `writes` at `version`.
@@ -171,6 +199,12 @@ impl KvState {
     /// their deadlines when that may be done.
     pub fn pending(&self) -> impl Iterator<Item = &Prepare> {
         self.locks.pending()
+    }
+
+    /// The transactions across shards decided here whose decisions are
+    /// still kept, in id order.
+    pub fn decisions(&self) -> impl Iterator<Item = (TxnId, Decided)> + '_ {
+        self.locks.decisions()
     }
 
     /// Whether every key, and every part of a transaction prepared here,

@@ -17,7 +17,7 @@ use kurator_raft::{
 };
 use kurator_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
 use kurator_storage::{
-    Abort, Deadline, Decide, Decided, Decision, KvOp, KvState, TxnId, Version, WriteBatch,
+    Abort, Deadline, Decide, Decided, Decision, KvOp, KvState, Prepare, TxnId, Version, WriteBatch,
 };
 use openraft_rt_sim::{SimInstant, SimRuntime};
 use parking_lot::Mutex;
@@ -27,8 +27,10 @@ use crate::holdings::Holdings;
 use crate::network::{Endpoint, Faults, Garbled, Network};
 
 pub use self::across::{Across, Coordinator};
+pub use self::collect::Collector;
 
 mod across;
+mod collect;
 
 /// Why the simulation could not go on.
 #[derive(Debug, thiserror::Error)]
@@ -645,7 +647,7 @@ impl Cluster {
     /// holds prepared past its deadline.
     async fn resolve(&self) {
         let now = now();
-        let expired: Vec<(ShardId, TxnId, Vec<u8>)> = self
+        let expired: Vec<(ShardId, Lock)> = self
             .shards()
             .iter()
             .filter_map(|shard| Some((shard.id(), self.leader_replica(shard.id())?)))
@@ -655,13 +657,13 @@ impl Cluster {
                         .kv()
                         .pending()
                         .filter(|prepared| prepared.deadline().has_passed(now))
-                        .map(|prepared| (shard, prepared.id(), prepared.primary().to_vec()))
+                        .map(|prepared| (shard, Lock::of(prepared)))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
-        for (shard, id, primary) in expired {
-            self.resolve_lock(shard, id, primary).await;
+        for (shard, lock) in expired {
+            self.resolve_lock(shard, lock).await;
         }
     }
 
@@ -680,21 +682,27 @@ impl Cluster {
         if !deadline.has_passed(now()) {
             return false;
         }
-        self.resolve_lock(shard, *by, primary.clone()).await;
+        self.resolve_lock(shard, Lock::new(*by, primary.clone(), *deadline))
+            .await;
         true
     }
 
-    /// Decides the transaction `id`, prepared on `shard`, as its primary
+    /// Decides the transaction that holds `lock` on `shard` as its primary
     /// decided it, or, when the primary never did, aborted there first.
     /// The primary's log orders that abort and its coordinator's commit,
     /// so whichever came first stands.
-    async fn resolve_lock(&self, shard: ShardId, id: TxnId, primary: Vec<u8>) {
+    async fn resolve_lock(&self, shard: ShardId, lock: Lock) {
+        let Lock {
+            id,
+            primary,
+            deadline,
+        } = lock;
         let primary_shard = self.locate(&primary);
-        let abort = Decide::new(id, primary.clone(), Decision::Abort);
+        let abort = Decide::new(id, primary.clone(), deadline, Decision::Abort);
         let Some(decided) = self.decide(primary_shard, abort).await else {
             return;
         };
-        let outcome = Decide::new(id, primary, decision(decided));
+        let outcome = Decide::new(id, primary, deadline, decision(decided));
         let _decided: Option<Decided> = self.decide(shard, outcome).await;
     }
 
@@ -1166,6 +1174,33 @@ fn peer(member: &Member) -> Peer {
 }
 
 /// The decision to tell the other shards once the primary `decided`.
+/// A lock a transaction across shards holds: what to resolve it by.
+#[derive(Debug)]
+struct Lock {
+    id: TxnId,
+    primary: Vec<u8>,
+    deadline: Deadline,
+}
+
+impl Lock {
+    const fn new(id: TxnId, primary: Vec<u8>, deadline: Deadline) -> Self {
+        Self {
+            id,
+            primary,
+            deadline,
+        }
+    }
+
+    /// The lock `prepared` holds.
+    fn of(prepared: &Prepare) -> Self {
+        Self::new(
+            prepared.id(),
+            prepared.primary().to_vec(),
+            prepared.deadline(),
+        )
+    }
+}
+
 const fn decision(decided: Decided) -> Decision {
     match decided {
         Decided::Committed(_) => Decision::Commit,

@@ -27,6 +27,12 @@
 //! not: the primary's log orders that abort and the coordinator's commit,
 //! so they agree.
 //!
+//! Decisions are kept until a [`Collect`] forgets them, in two steps over
+//! every shard: first a fence, after which a shard holds no lock and
+//! takes no part in any transaction whose deadline is before the fence,
+//! then forgetting the decisions of those transactions. Once every shard
+//! is fenced, no one can come to ask how they were decided.
+//!
 //! Every shard held all the locks of the transaction at its commit point,
 //! so its reads on every shard were still current then: committed
 //! transactions are serializable, each at its commit point.
@@ -142,6 +148,7 @@ pub enum Decision {
 pub struct Decide {
     id: TxnId,
     primary: Vec<u8>,
+    deadline: Deadline,
     decision: Decision,
 }
 
@@ -150,12 +157,14 @@ const DECISION_ABORT: u8 = 2;
 
 impl Decide {
     /// Tells a shard that the transaction `id`, whose primary key is
-    /// `primary`, is decided as `decision`.
+    /// `primary` and whose prepares carry `deadline`, is decided as
+    /// `decision`.
     #[must_use]
-    pub const fn new(id: TxnId, primary: Vec<u8>, decision: Decision) -> Self {
+    pub const fn new(id: TxnId, primary: Vec<u8>, deadline: Deadline, decision: Decision) -> Self {
         Self {
             id,
             primary,
+            deadline,
             decision,
         }
     }
@@ -172,16 +181,25 @@ impl Decide {
         &self.primary
     }
 
+    /// The deadline its prepares carry, which tells when its decision
+    /// may be forgotten.
+    #[must_use]
+    pub const fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+
     /// The decision.
     #[must_use]
     pub const fn decision(&self) -> Decision {
         self.decision
     }
 
-    /// Appends `id u128 | primary | decision u8`: commit 1, abort 2.
+    /// Appends `id u128 | primary | deadline u64 | decision u8`: commit 1,
+    /// abort 2.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.id.encode(out);
         put_bytes(out, &self.primary).map_err(Error::too_large)?;
+        self.deadline.encode(out);
         out.push(match self.decision {
             Decision::Commit => DECISION_COMMIT,
             Decision::Abort => DECISION_ABORT,
@@ -193,12 +211,63 @@ impl Decide {
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let id = TxnId::decode(reader)?;
         let primary = reader.bytes()?.to_vec();
+        let deadline = Deadline::decode(reader)?;
         let decision = match reader.read::<u8>()? {
             DECISION_COMMIT => Decision::Commit,
             DECISION_ABORT => Decision::Abort,
             other => return Err(DecodeError::Tag(other)),
         };
-        Ok(Self::new(id, primary, decision))
+        Ok(Self::new(id, primary, deadline, decision))
+    }
+}
+
+/// A step of forgetting decisions: the same step, at the same horizon, is
+/// told every shard before the next step is told any.
+///
+/// 1. [`Collect::Fence`] makes a shard refuse, from then on, every prepare
+///    and every decision it does not know yet of a transaction whose
+///    deadline is before the horizon. It fails with
+///    [`Abort::Held`](crate::Abort::Held) while the shard holds such a
+///    transaction prepared: decide it first, at its primary.
+/// 2. [`Collect::Forget`] drops the decisions of the transactions whose
+///    deadline is before the horizon, and before the shard's fence.
+///
+/// Once every shard is fenced, none holds a lock of those transactions
+/// or ever will, so no one comes to ask their primaries how they were
+/// decided, and a late prepare or decision of one changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Collect {
+    /// Take no part in the transactions whose deadline is before this.
+    Fence(Deadline),
+    /// Forget the decisions on the transactions whose deadline is before
+    /// this.
+    Forget(Deadline),
+}
+
+const COLLECT_FENCE: u8 = 1;
+const COLLECT_FORGET: u8 = 2;
+
+impl Collect {
+    /// Appends `step u8 | horizon u64`: fence 1, forget 2.
+    pub(crate) fn encode(self, out: &mut Vec<u8>) {
+        let (step, horizon) = match self {
+            Self::Fence(horizon) => (COLLECT_FENCE, horizon),
+            Self::Forget(horizon) => (COLLECT_FORGET, horizon),
+        };
+        out.push(step);
+        horizon.encode(out);
+    }
+
+    /// Reads a step written by [`Collect::encode`].
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let step = reader.read::<u8>()?;
+        let horizon = Deadline::decode(reader)?;
+        match step {
+            COLLECT_FENCE => Ok(Self::Fence(horizon)),
+            COLLECT_FORGET => Ok(Self::Forget(horizon)),
+            other => Err(DecodeError::Tag(other)),
+        }
     }
 }
 
@@ -214,21 +283,37 @@ pub enum Decided {
 
 #[cfg(kani)]
 mod proofs {
-    use super::Decide;
+    use super::{Collect, Decide};
     use kurator_codec::Reader;
 
     /// Decoding a decision never panics, and a decoded decision encodes
     /// back to exactly the bytes it was read from.
     #[kani::proof]
-    #[kani::unwind(26)]
+    #[kani::unwind(34)]
     fn decisions_decode_totally_and_roundtrip() {
-        let buf: [u8; 24] = kani::any();
+        let buf: [u8; 32] = kani::any();
         let len: usize = kani::any_where(|len| *len <= buf.len());
         let mut reader = Reader::new(&buf[..len]);
         if let Ok(decoded) = Decide::decode(&mut reader) {
             let read = len - reader.rest().len();
             let mut out = Vec::new();
             assert!(decoded.encode(&mut out).is_ok(), "small key");
+            assert_eq!(out.as_slice(), &buf[..read], "roundtrip");
+        }
+    }
+
+    /// Decoding a step of collecting never panics, and a decoded step
+    /// encodes back to exactly the bytes it was read from.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn collect_steps_decode_totally_and_roundtrip() {
+        let buf: [u8; 10] = kani::any();
+        let len: usize = kani::any_where(|len| *len <= buf.len());
+        let mut reader = Reader::new(&buf[..len]);
+        if let Ok(decoded) = Collect::decode(&mut reader) {
+            let read = len - reader.rest().len();
+            let mut out = Vec::new();
+            decoded.encode(&mut out);
             assert_eq!(out.as_slice(), &buf[..read], "roundtrip");
         }
     }

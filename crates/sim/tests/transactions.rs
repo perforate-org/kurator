@@ -1,5 +1,6 @@
 //! Transactions under faults: concurrent transfers between accounts while
-//! replicas crash, restart and get cut off, on one shard and across two.
+//! replicas crash, restart and get cut off, and decisions are forgotten,
+//! on one shard and across two.
 //! Whatever happens, no transfer is applied by half or twice, so the
 //! accounts always hold the money they started with, and every replica
 //! ends with the same state.
@@ -18,7 +19,9 @@ use std::time::Duration;
 use futures_util::future::join;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_raft::{Error, Txn};
-use kurator_sim::{Across, Cluster, Coordinator, Faults, Holdings, Outcome, Rng, Sim, Transacted};
+use kurator_sim::{
+    Across, Cluster, Collector, Coordinator, Faults, Holdings, Outcome, Rng, Sim, Transacted,
+};
 use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
@@ -190,6 +193,13 @@ fn run(client: Client, seed: u64) -> Tally {
                     .leader()
                     .into_iter()
                     .for_each(|id| cluster.isolate(id)),
+                94..97 => {
+                    let (_collected, ()) = join(
+                        Collector::new(&cluster).collect(Duration::ZERO),
+                        transfers(&cluster, client, &mut rng, &mut tally),
+                    )
+                    .await;
+                }
                 _ => cluster.heal(),
             }
             SimRuntime::sleep(Duration::from_millis(rng.below(MAX_GAP_MS))).await;
@@ -198,7 +208,21 @@ fn run(client: Client, seed: u64) -> Tally {
             .settle()
             .await
             .unwrap_or_else(|error| panic!("seed {seed}: {error}"));
+        // Past the deadline of every transaction, so none is still kept.
+        SimRuntime::sleep(Duration::from_secs(6)).await;
+        let collected = Collector::new(&cluster).collect(Duration::ZERO).await;
+        assert_eq!(collected, Outcome::Acked, "seed {seed}: collected");
+        cluster
+            .settle()
+            .await
+            .unwrap_or_else(|error| panic!("seed {seed}: {error}"));
         let states = cluster.states();
+        let kept = states
+            .values()
+            .flat_map(Holdings::shards)
+            .map(|state| state.kv().decisions().count())
+            .sum::<usize>();
+        assert_eq!(kept, 0, "seed {seed}: every decision forgotten");
         let first = states.values().next().expect("a replica");
         for (id, state) in &states {
             assert_eq!(state, first, "seed {seed}: {id} agrees");
