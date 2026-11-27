@@ -266,3 +266,182 @@ fn primary(parts: &[(ShardId, Shard, Draft)]) -> Option<(ShardId, Vec<u8>)> {
         Some((*id, shard.span().start().to_vec()))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt as _;
+    use kurator_shard::{Epoch, Shard, ShardId};
+    use kurator_storage::{
+        Abort, Command, Deadline, Decision, End, KvOp, Outcome, Span, TxnId, Version,
+    };
+    use parking_lot::Mutex;
+
+    use super::{Coordinator, Transacted};
+    use crate::remote::{Call, Reply};
+    use crate::shards::Shards;
+
+    /// Keys before `m` on the first shard, the rest on shard 2.
+    fn held(id: ShardId) -> Shard {
+        let span = if id == ShardId::FIRST {
+            Span::new("", End::Before(b"m".to_vec()))
+        } else {
+            Span::new("m", End::Unbounded)
+        };
+        Shard::new(id, span.unwrap(), Epoch::new(1))
+    }
+
+    /// Two shards that begin at version 1 and decide as told; `refusing`
+    /// answers every prepare with its reply instead.
+    struct Two {
+        refusing: Option<(ShardId, Reply)>,
+        decided: Mutex<Vec<(ShardId, Decision)>>,
+        /// The writes each prepare carried.
+        prepared: Mutex<Vec<(ShardId, Vec<KvOp>)>>,
+    }
+
+    impl Two {
+        fn new(refusing: Option<(ShardId, Reply)>) -> Self {
+            Self {
+                refusing,
+                decided: Mutex::new(Vec::new()),
+                prepared: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn refused(&self, id: ShardId) -> Option<Reply> {
+            let (shard, reply) = self.refusing.as_ref()?;
+            (*shard == id).then(|| reply.clone())
+        }
+    }
+
+    impl Shards for Two {
+        fn locate(&self, key: &[u8]) -> ShardId {
+            if key < b"m".as_slice() {
+                ShardId::FIRST
+            } else {
+                ShardId::new(2)
+            }
+        }
+
+        async fn refresh(&self) -> Vec<ShardId> {
+            vec![ShardId::FIRST, ShardId::new(2)]
+        }
+
+        async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {
+            let id = shard;
+            Some(match call {
+                Call::Begin => Reply::Begun {
+                    shard: held(id),
+                    at: Version::new(1),
+                },
+                Call::Propose(Command::Prepare(_)) if self.refused(id).is_some() => {
+                    self.refused(id)?
+                }
+                Call::Propose(Command::Prepare(prepare)) => {
+                    let writes = prepare.transaction().writes().ops().to_vec();
+                    self.prepared.lock().push((id, writes));
+                    Reply::Applied(Outcome::Prepared(Version::new(2)))
+                }
+                Call::Get { at, .. } if at == Version::new(1) => {
+                    Reply::Value(Some(b"old".to_vec()))
+                }
+                Call::Propose(Command::Decide(decide)) => {
+                    self.decided.lock().push((id, decide.decision()));
+                    Reply::Applied(match decide.decision() {
+                        Decision::Commit => Outcome::Committed(Version::new(3)),
+                        Decision::Abort | _ => Outcome::Aborted(Abort::RolledBack(decide.id())),
+                    })
+                }
+                other @ (Call::Get { .. } | Call::Scan { .. } | Call::Propose(_)) => {
+                    Reply::Failed(format!("{other:?}"))
+                }
+            })
+        }
+
+        fn now(&self) -> Deadline {
+            Deadline::new(0)
+        }
+
+        fn next_txn(&self) -> TxnId {
+            TxnId::new(1)
+        }
+    }
+
+    fn put_a_and_z(shards: &Two) -> Transacted {
+        async {
+            let mut txn = Coordinator::new(shards).begin();
+            txn.put(b"a", "1").await.unwrap();
+            txn.put(b"z", "1").await.unwrap();
+            txn.commit().await
+        }
+        .now_or_never()
+        .unwrap()
+    }
+
+    #[test]
+    fn reads_see_the_shard_and_then_the_writes() {
+        let shards = Two::new(None);
+        let committed = async {
+            let mut txn = Coordinator::new(&shards).begin();
+            let old = Some(b"old".to_vec());
+            assert_eq!(txn.get(b"a").await.unwrap(), old, "the shard");
+            txn.put(b"a", "1").await.unwrap();
+            assert_eq!(txn.get(b"a").await.unwrap(), Some(b"1".to_vec()), "own");
+            txn.delete(b"z").await.unwrap();
+            assert_eq!(txn.get(b"z").await.unwrap(), None, "own delete");
+            txn.commit().await
+        }
+        .now_or_never()
+        .unwrap();
+        assert_eq!(committed, Transacted::Committed(Version::new(3)));
+        let prepared = shards.prepared.lock().clone();
+        let put = KvOp::Put {
+            key: b"a".to_vec(),
+            value: b"1".to_vec(),
+        };
+        let delete = KvOp::Delete { key: b"z".to_vec() };
+        let expected = [(ShardId::FIRST, vec![put]), (ShardId::new(2), vec![delete])];
+        assert_eq!(prepared, expected, "each shard's writes");
+    }
+
+    #[test]
+    fn every_shard_hears_a_commit() {
+        let shards = Two::new(None);
+        assert_eq!(put_a_and_z(&shards), Transacted::Committed(Version::new(3)));
+        let decided = shards.decided.lock().clone();
+        let commit = Decision::Commit;
+        assert_eq!(
+            decided,
+            [(ShardId::FIRST, commit), (ShardId::new(2), commit)]
+        );
+    }
+
+    #[test]
+    fn a_shard_that_refused_to_prepare_is_not_told() {
+        let second = ShardId::new(2);
+        let conflict = Abort::Conflict {
+            key: b"z".to_vec(),
+            version: Version::new(2),
+        };
+        for refusal in [
+            Reply::Misrouted(held(second)),
+            Reply::Applied(Outcome::Aborted(conflict)),
+        ] {
+            let shards = Two::new(Some((second, refusal.clone())));
+            assert_eq!(put_a_and_z(&shards), Transacted::Aborted, "{refusal:?}");
+            let decided = shards.decided.lock().clone();
+            let primary = [(ShardId::FIRST, Decision::Abort)];
+            assert_eq!(decided, primary, "only the primary: {refusal:?}");
+        }
+    }
+
+    #[test]
+    fn a_shard_that_did_not_answer_is_told() {
+        let second = ShardId::new(2);
+        let shards = Two::new(Some((second, Reply::Failed("lost".into()))));
+        assert_eq!(put_a_and_z(&shards), Transacted::Aborted);
+        let decided = shards.decided.lock().clone();
+        let abort = Decision::Abort;
+        assert_eq!(decided, [(ShardId::FIRST, abort), (second, abort)], "both");
+    }
+}

@@ -119,3 +119,97 @@ pub(crate) const fn decision(decided: Decided) -> Decision {
         Decided::Aborted | _ => Decision::Abort,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt as _;
+    use kurator_shard::ShardId;
+    use kurator_storage::{Abort, Command, Deadline, Decision, Outcome, TxnId, Version};
+    use parking_lot::Mutex;
+
+    use super::{Lock, resolve_expired};
+    use crate::remote::{Call, Reply};
+    use crate::shards::Shards;
+
+    /// Keys before `m` on the first shard, where every transaction was
+    /// committed already; the rest on shard 2. The clock reads 100.
+    #[derive(Default)]
+    struct Decided {
+        told: Mutex<Vec<(ShardId, Decision)>>,
+    }
+
+    impl Shards for Decided {
+        fn locate(&self, key: &[u8]) -> ShardId {
+            if key < b"m".as_slice() {
+                ShardId::FIRST
+            } else {
+                ShardId::new(2)
+            }
+        }
+
+        async fn refresh(&self) -> Vec<ShardId> {
+            Vec::new()
+        }
+
+        async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {
+            let Call::Propose(Command::Decide(decide)) = call else {
+                return None;
+            };
+            self.told.lock().push((shard, decide.decision()));
+            Some(Reply::Applied(Outcome::Committed(Version::new(5))))
+        }
+
+        fn now(&self) -> Deadline {
+            Deadline::new(100)
+        }
+
+        fn next_txn(&self) -> TxnId {
+            TxnId::new(1)
+        }
+    }
+
+    fn locked(deadline: u64) -> Abort {
+        Abort::Locked {
+            key: b"z".to_vec(),
+            by: TxnId::new(3),
+            primary: b"a".to_vec(),
+            deadline: Deadline::new(deadline),
+        }
+    }
+
+    #[test]
+    fn only_a_lock_past_its_deadline_is_expired() {
+        let now = Deadline::new(100);
+        let lock = Lock::new(TxnId::new(3), b"a".to_vec(), Deadline::new(99));
+        assert_eq!(Lock::expired(&locked(99), now), Some(lock), "past");
+        assert_eq!(Lock::expired(&locked(100), now), None, "not yet");
+        let other = Abort::RolledBack(TxnId::new(3));
+        assert_eq!(Lock::expired(&other, now), None, "no lock");
+    }
+
+    #[test]
+    fn a_lock_is_decided_as_its_primary_decided() {
+        let shards = Decided::default();
+        let abort = locked(99);
+        let resolved = resolve_expired(&shards, ShardId::new(2), &abort);
+        assert!(resolved.now_or_never().unwrap(), "resolved");
+        let told = shards.told.lock().clone();
+        let expected = [
+            (ShardId::FIRST, Decision::Abort),
+            (ShardId::new(2), Decision::Commit),
+        ];
+        assert_eq!(
+            told, expected,
+            "abort asked at the primary, its commit told"
+        );
+    }
+
+    #[test]
+    fn a_lock_before_its_deadline_is_left() {
+        let shards = Decided::default();
+        let abort = locked(100);
+        let resolved = resolve_expired(&shards, ShardId::new(2), &abort);
+        assert!(!resolved.now_or_never().unwrap(), "left");
+        assert!(shards.told.lock().is_empty(), "nothing told");
+    }
+}
