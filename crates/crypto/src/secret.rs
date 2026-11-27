@@ -1,18 +1,18 @@
-//! A replica's identity: one secret, and a key for each thing the replica
-//! signs, derived from it.
+//! A node's identity: one secret, and a key for each thing the node signs,
+//! derived from it.
 //!
 //! ICP gives a node separate keys for separate purposes, so that a key
 //! leaked or misused in one protocol proves nothing in another. Kurator
 //! does the same, but derives every key from one 32-byte [`NodeSecret`]
 //! with BLAKE3's key derivation, so an operator keeps one file. Each
-//! [`KeyPurpose`] has its own derivation context, and contexts never
-//! change: changing one changes the key.
+//! [`KeyPurpose`] has its own derivation context for each algorithm, and
+//! contexts never change: changing one changes the key.
 
 use std::fmt;
 
-use kurator_wal::{SigningKey, VerifyingKey};
+use crate::{Algorithm, SigningKey, VerifyingKey};
 
-/// The one secret a replica holds. Every key it uses is derived from it.
+/// The one secret a node holds. Every key it uses is derived from it.
 ///
 /// `Debug` shows nothing of it.
 #[derive(Clone, PartialEq, Eq)]
@@ -22,20 +22,33 @@ pub struct NodeSecret([u8; 32]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum KeyPurpose {
-    /// Signs this replica's own Raft log (`kurator_wal::Integrity::Signed`).
+    /// Signs the node's own Raft logs (`kurator_wal::Integrity::Signed`).
     WalSigning,
-    /// Authenticates this replica to other replicas in the transport's
-    /// handshake. Its public half is the key in the replica's
-    /// [`Peer`](crate::Peer).
+    /// Authenticates the node to other nodes in the transport's handshake.
+    /// Its public half is the key in the node's `Peer`.
     Transport,
 }
 
 impl KeyPurpose {
-    /// The BLAKE3 derivation context. Fixed forever: see the module docs.
-    const fn context(self) -> &'static str {
+    /// The algorithm of this purpose's keys.
+    ///
+    /// Each purpose moves to another algorithm on its own, when everything
+    /// that checks its signatures can: a log can switch as soon as this
+    /// build reads the new algorithm, the transport only once TLS stacks
+    /// and every peer speak it.
+    #[must_use]
+    pub const fn algorithm(self) -> Algorithm {
         match self {
-            Self::WalSigning => "kurator 2026-11 replica WAL signing key",
-            Self::Transport => "kurator 2026-11 replica transport key",
+            Self::WalSigning | Self::Transport => Algorithm::Ed25519,
+        }
+    }
+
+    /// The BLAKE3 derivation context of this purpose's `algorithm` keys.
+    /// Fixed forever: see the module docs.
+    const fn context(self, algorithm: Algorithm) -> &'static str {
+        match (self, algorithm) {
+            (Self::WalSigning, Algorithm::Ed25519) => "kurator 2026-11 replica WAL signing key",
+            (Self::Transport, Algorithm::Ed25519) => "kurator 2026-11 replica transport key",
         }
     }
 }
@@ -54,17 +67,16 @@ impl NodeSecret {
         self.0
     }
 
-    /// The secret of the key for `purpose`, for a protocol that needs the
-    /// raw seed, such as a TLS stack loading an Ed25519 key.
-    #[must_use]
-    pub fn derive(&self, purpose: KeyPurpose) -> [u8; 32] {
-        blake3::derive_key(purpose.context(), &self.0)
+    /// The seed of the key for `purpose`.
+    fn derive(&self, purpose: KeyPurpose, algorithm: Algorithm) -> [u8; 32] {
+        blake3::derive_key(purpose.context(algorithm), &self.0)
     }
 
-    /// The signing key for `purpose`.
+    /// The signing key for `purpose`, of [`KeyPurpose::algorithm`].
     #[must_use]
     pub fn signing_key(&self, purpose: KeyPurpose) -> SigningKey {
-        SigningKey::from_seed(self.derive(purpose))
+        let algorithm = purpose.algorithm();
+        SigningKey::from_seed(algorithm, self.derive(purpose, algorithm))
     }
 
     /// The public key for `purpose`.
@@ -83,6 +95,7 @@ impl fmt::Debug for NodeSecret {
 #[cfg(test)]
 mod tests {
     use super::{KeyPurpose, NodeSecret};
+    use crate::{Algorithm, SigningKey};
 
     #[test]
     fn purposes_get_unrelated_keys_and_secrets_stay_hidden() {
@@ -91,8 +104,8 @@ mod tests {
         let transport = secret.public_key(KeyPurpose::Transport);
         assert_ne!(wal, transport, "one key per purpose");
         assert_ne!(
-            secret.derive(KeyPurpose::Transport),
-            [7; 32],
+            transport,
+            SigningKey::from_seed(Algorithm::Ed25519, [7; 32]).verifying_key(),
             "derived, not the seed itself"
         );
         assert_eq!(
@@ -109,8 +122,20 @@ mod tests {
     }
 
     #[test]
+    fn keys_use_their_purposes_algorithm() {
+        let secret = NodeSecret::from_seed([7; 32]);
+        for purpose in [KeyPurpose::WalSigning, KeyPurpose::Transport] {
+            assert_eq!(
+                secret.signing_key(purpose).algorithm(),
+                purpose.algorithm(),
+                "{purpose:?}"
+            );
+        }
+    }
+
+    #[test]
     fn derivation_contexts_are_fixed() {
-        // A changed context silently changes every replica's keys.
+        // A changed context silently changes every node's keys.
         let secret = NodeSecret::from_seed([0; 32]);
         assert_eq!(
             secret.public_key(KeyPurpose::Transport).to_string(),
@@ -125,7 +150,7 @@ mod tests {
     }
 
     const TRANSPORT_KEY_OF_ZERO_SEED: &str =
-        "1143ed0efdb8425791bfc3fd92e758ed6f627e48c5800b080376b1a8f78b8940";
+        "ed25519:1143ed0efdb8425791bfc3fd92e758ed6f627e48c5800b080376b1a8f78b8940";
     const WAL_KEY_OF_ZERO_SEED: &str =
-        "9a708b2b2d9f535bdeebf1f3f67fb62ee51a706aa49b67849c22347158dc87a9";
+        "ed25519:9a708b2b2d9f535bdeebf1f3f67fb62ee51a706aa49b67849c22347158dc87a9";
 }

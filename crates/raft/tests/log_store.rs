@@ -8,10 +8,10 @@
 
 use std::path::Path;
 
+use kurator_crypto::{Algorithm, SigningKey};
 use kurator_raft::openraft::storage::{IOFlushed, RaftLogStorage};
 use kurator_raft::openraft::{AsyncRuntime as _, EntryPayload, RaftLogReader};
 use kurator_raft::{Entry, LeaderId, LogId, LogStore, NodeId, Vote};
-use kurator_wal::SigningKey;
 use openraft_rt_sim::SimRuntime;
 use proptest as _;
 
@@ -21,7 +21,7 @@ kurator_raft::declare_config!(
 );
 
 fn key() -> SigningKey {
-    SigningKey::from_seed([7; 32])
+    SigningKey::from_seed(Algorithm::Ed25519, [7; 32])
 }
 
 fn log_id(term: u64, index: u64) -> LogId {

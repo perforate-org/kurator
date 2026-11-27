@@ -13,7 +13,7 @@
 //!   only once the entries are on its disk. A write that returned survives
 //!   any minority of crashes.
 //! - **Signed log.** Every record of the log carries the digest of the
-//!   record before it and the replica's Ed25519 signature, so a changed,
+//!   record before it and the replica's signature, so a changed,
 //!   removed or reordered record is found when the log is opened.
 //! - **Memory-first state.** The [`StateMachine`] holds the whole
 //!   [`KvState`](kurator_storage::KvState) in memory. A restart loads the
@@ -43,7 +43,6 @@
 mod codec;
 mod config;
 mod error;
-mod identity;
 mod layout;
 mod log_store;
 mod network;
@@ -57,7 +56,6 @@ mod types;
 
 pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
-pub use identity::{KeyPurpose, NodeSecret};
 pub use kurator_consensus::Role;
 pub use kurator_shard::Applied;
 pub use log_store::LogStore;

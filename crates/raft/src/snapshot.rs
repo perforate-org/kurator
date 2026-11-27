@@ -27,7 +27,7 @@ use crate::types::{LeaderId, Membership, SnapshotMeta};
 
 /// Version 2 added peers to the membership, version 3 the readable
 /// versions of each key, version 4 the shard.
-const FORMAT: Format = Format::new(*b"KRRS", 4);
+const FORMAT: Format = Format::new(*b"KRRS", 5);
 const FILE: &str = "snapshot";
 const TEMP_PREFIX: &str = ".snapshot-";
 

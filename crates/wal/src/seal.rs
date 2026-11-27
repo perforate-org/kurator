@@ -5,25 +5,27 @@
 //!
 //! ```text
 //! linked: payload | prev digest [32] | 0
-//! signed: payload | prev digest [32] | signature [64] | 1
+//! signed: payload | prev digest [32] | signature | algorithm u8 | 1
 //! ```
 //!
 //! `prev` is the [`Digest`] of the record before, so deleting, reordering
 //! or replacing a record breaks the chain. The record's own digest is
 //! BLAKE3 over `lsn | prev | payload`. The last record of every synced
-//! batch is signed: Ed25519 over its digest by the key of the node that
-//! wrote the log. Through the chain, that one signature covers every
-//! record of the batch.
+//! batch is signed over its digest by the key of the node that wrote the
+//! log. Through the chain, that one signature covers every record of the
+//! batch. The signature is as long as its algorithm's signatures, and the
+//! algorithm's id follows it, so a log signed with one algorithm stays
+//! readable after a node moves to another.
 
 use std::fmt;
 
+use kurator_crypto::{Algorithm, Signature, SigningKey, VerifyingKey};
+
 /// The most bytes a seal adds to a record.
-pub(crate) const MAX_SEAL_LEN: usize = SIGNED_LEN;
+pub(crate) const MAX_SEAL_LEN: usize = signed_len(Algorithm::MAX_SIGNATURE_LEN);
 
 const DIGEST_LEN: usize = 32;
-const SIGNATURE_LEN: usize = 64;
 const LINKED_LEN: usize = DIGEST_LEN + 1;
-const SIGNED_LEN: usize = DIGEST_LEN + SIGNATURE_LEN + 1;
 const LINKED: u8 = 0;
 const SIGNED: u8 = 1;
 
@@ -57,70 +59,6 @@ impl fmt::Debug for Digest {
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
-    }
-}
-
-/// The key a node signs its log with.
-///
-/// `Debug` shows only the public half. The secret is zeroed when the key is
-/// dropped.
-#[derive(Clone, PartialEq, Eq)]
-pub struct SigningKey(Box<ed25519_dalek::SigningKey>);
-
-impl SigningKey {
-    /// The key whose secret is `seed`. The seed must come from a
-    /// cryptographically secure source and stay secret.
-    #[must_use]
-    pub fn from_seed(seed: [u8; 32]) -> Self {
-        Self(Box::new(ed25519_dalek::SigningKey::from_bytes(&seed)))
-    }
-
-    /// The public half, which checks this key's signatures.
-    #[must_use]
-    pub fn verifying_key(&self) -> VerifyingKey {
-        VerifyingKey(Box::new(self.0.verifying_key()))
-    }
-}
-
-impl fmt::Debug for SigningKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SigningKey")
-            .field(&self.verifying_key())
-            .finish()
-    }
-}
-
-/// The public key that checks a node's signatures.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct VerifyingKey(Box<ed25519_dalek::VerifyingKey>);
-
-impl VerifyingKey {
-    /// The key encoded as `bytes`, or `None` when they are not a valid
-    /// point on the curve.
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        ed25519_dalek::VerifyingKey::from_bytes(bytes)
-            .ok()
-            .map(|key| Self(Box::new(key)))
-    }
-
-    /// The encoded key.
-    #[must_use]
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_bytes()
-    }
-}
-
-impl fmt::Debug for VerifyingKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VerifyingKey({self})")
-    }
-}
-
-/// Lowercase hex, as [`Digest`] shows itself.
-impl fmt::Display for VerifyingKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Digest(self.to_bytes()).fmt(f)
     }
 }
 
@@ -171,9 +109,13 @@ pub enum SealDamage {
     /// it: records were removed, reordered or replaced.
     #[error("record does not follow the record before it")]
     Chain,
-    /// The signature does not match the record.
+    /// The signature does not match the record, or is by another
+    /// algorithm than the log's key.
     #[error("record signature does not match")]
     Signature,
+    /// The record is signed with an algorithm this build does not know.
+    #[error("record is signed with unknown algorithm {0}")]
+    Algorithm(u8),
     /// A batch ends without the signed record that closes it, in a place
     /// where a crash cannot have cut it short.
     #[error("batch is not signed")]
@@ -181,17 +123,17 @@ pub enum SealDamage {
 }
 
 /// The seal of one record, as it is written after the payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Seal {
     /// Links the record to the one before it; a later record of the same
     /// batch is signed.
     Linked([u8; LINKED_LEN]),
     /// Links the record and signs it, closing its batch.
-    Signed([u8; SIGNED_LEN]),
+    Signed(Vec<u8>),
 }
 
 impl Seal {
-    pub(crate) const fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Linked(bytes) => bytes,
             Self::Signed(bytes) => bytes,
@@ -236,8 +178,13 @@ impl Head {
     /// and returns the seal and the head after it.
     pub(crate) fn sign(self, key: &SigningKey, lsn: u64, payload: &[u8]) -> (Seal, Self) {
         let digest = record_digest(lsn, self.0, payload);
-        let mut seal = [SIGNED; SIGNED_LEN];
-        fill(&mut seal, &[&self.0.0, &sign(key, digest)]);
+        let signature = key.sign(&digest.0);
+        let seal = [
+            self.0.0.as_slice(),
+            signature.as_bytes(),
+            &[signature.algorithm().id(), SIGNED],
+        ]
+        .concat();
         (Seal::Signed(seal), Self(digest))
     }
 
@@ -251,14 +198,14 @@ impl Head {
         lsn: u64,
         record: &'a [u8],
     ) -> Result<(Opened<'a>, Self), SealDamage> {
-        let split = split(record).ok_or(SealDamage::Missing)?;
+        let split = split(record)?;
         if split.prev != self.0 {
             return Err(SealDamage::Chain);
         }
         let digest = record_digest(lsn, split.prev, split.payload);
         let opened = match split.signature {
             None => Opened::Linked(split.payload),
-            Some(signature) if verify(key, digest, &signature) => Opened::Signed(split.payload),
+            Some(signature) if key.verify(&digest.0, &signature) => Opened::Signed(split.payload),
             Some(_) => return Err(SealDamage::Signature),
         };
         Ok((opened, Self(digest)))
@@ -281,25 +228,50 @@ struct Split<'a> {
     payload: &'a [u8],
     prev: Digest,
     /// Present on the record that closes a batch.
-    signature: Option<[u8; SIGNATURE_LEN]>,
+    signature: Option<Signature>,
+}
+
+/// The length of a signed seal whose signature is `signature_len` long.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "signatures are a few kilobytes at most, far from overflowing"
+)]
+const fn signed_len(signature_len: usize) -> usize {
+    DIGEST_LEN + signature_len + 2
 }
 
 /// Splits a sealed record into payload, previous digest and signature.
-fn split(record: &[u8]) -> Option<Split<'_>> {
-    let (kind, rest) = record.split_last()?;
-    let seal_len = match *kind {
-        LINKED => LINKED_LEN,
-        SIGNED => SIGNED_LEN,
-        _ => return None,
+fn split(record: &[u8]) -> Result<Split<'_>, SealDamage> {
+    let (kind, rest) = record.split_last().ok_or(SealDamage::Missing)?;
+    let (seal, algorithm) = match *kind {
+        LINKED => (LINKED_LEN.checked_sub(1), None),
+        SIGNED => {
+            let (id, _) = rest.split_last().ok_or(SealDamage::Missing)?;
+            let algorithm = Algorithm::from_id(*id).ok_or(SealDamage::Algorithm(*id))?;
+            (
+                signed_len(algorithm.signature_len()).checked_sub(1),
+                Some(algorithm),
+            )
+        }
+        _ => return Err(SealDamage::Missing),
     };
-    let (payload, seal) =
-        rest.split_at_checked(rest.len().checked_sub(seal_len.checked_sub(1)?)?)?;
-    let (prev, signature) = seal.split_first_chunk::<DIGEST_LEN>()?;
-    let signature = match *kind {
-        SIGNED => Some(signature.try_into().ok()?),
-        _ => None,
+    let (payload, seal) = seal
+        .and_then(|len| rest.len().checked_sub(len))
+        .and_then(|at| rest.split_at_checked(at))
+        .ok_or(SealDamage::Missing)?;
+    let (prev, signature) = seal
+        .split_first_chunk::<DIGEST_LEN>()
+        .ok_or(SealDamage::Missing)?;
+    let signature = match algorithm {
+        Some(algorithm) => Some(
+            signature
+                .split_last()
+                .and_then(|(_, bytes)| Signature::from_parts(algorithm, bytes))
+                .ok_or(SealDamage::Missing)?,
+        ),
+        None => None,
     };
-    Some(Split {
+    Ok(Split {
         payload,
         prev: Digest(*prev),
         signature,
@@ -315,48 +287,50 @@ fn record_digest(lsn: u64, prev: Digest, payload: &[u8]) -> Digest {
     Digest(*digest.as_bytes())
 }
 
-fn sign(key: &SigningKey, digest: Digest) -> [u8; SIGNATURE_LEN] {
-    use ed25519_dalek::Signer as _;
-    key.0.sign(&digest.0).to_bytes()
-}
-
-fn verify(key: &VerifyingKey, digest: Digest, signature: &[u8; SIGNATURE_LEN]) -> bool {
-    key.0
-        .verify_strict(&digest.0, &ed25519_dalek::Signature::from_bytes(signature))
-        .is_ok()
-}
-
 #[cfg(kani)]
 mod proofs {
-    use super::{LINKED_LEN, SIGNED_LEN, split};
+    use kurator_crypto::Algorithm;
+
+    use super::{LINKED_LEN, SealDamage, signed_len, split};
 
     /// Splitting a record never panics, and finds a seal exactly when the
-    /// record ends in a known kind and is long enough to hold that seal,
-    /// with the payload in front of it. BLAKE3 and Ed25519 are beyond a
-    /// bounded model checker; the unit tests check them.
+    /// record ends in a known kind (and, when signed, a known algorithm)
+    /// and is long enough to hold that seal, with the payload in front of
+    /// it. BLAKE3 and the signatures are beyond a bounded model checker;
+    /// the unit tests check them.
     #[kani::proof]
     #[kani::unwind(130)]
     fn split_is_total() {
         let record: [u8; 100] = kani::any();
         let len: usize = kani::any_where(|len| *len <= record.len());
         let record = &record[..len];
+        let algorithm = len
+            .checked_sub(2)
+            .and_then(|at| record.get(at))
+            .and_then(|id| Algorithm::from_id(*id));
         let seal_len = match record.last() {
             Some(0) => Some(LINKED_LEN),
-            Some(1) => Some(SIGNED_LEN),
+            Some(1) => algorithm.map(|algorithm| signed_len(algorithm.signature_len())),
             _ => None,
         };
         match (split(record), seal_len) {
-            (Some(split), Some(seal_len)) => {
+            (Ok(split), Some(seal_len)) => {
                 assert_eq!(split.payload.len() + seal_len, len, "payload is the rest");
                 assert_eq!(
-                    split.signature.is_some(),
-                    seal_len == SIGNED_LEN,
+                    split.signature.map(|signature| signature.algorithm()),
+                    algorithm.filter(|_| record.last() == Some(&1)),
                     "signed kind"
                 );
             }
-            (None, Some(seal_len)) => assert!(len < seal_len, "only short records have no seal"),
-            (None, None) => {}
-            (Some(_), None) => panic!("a seal of no known kind"),
+            (Err(SealDamage::Missing), Some(seal_len)) => {
+                assert!(len < seal_len, "only short records have no seal");
+            }
+            (Err(SealDamage::Algorithm(_)), None) => {
+                assert!(record.last() == Some(&1), "only signed seals name one");
+            }
+            (Err(_), None) => {}
+            (Ok(_), None) => panic!("a seal of no known kind"),
+            (Err(_), Some(_)) => panic!("a whole seal that does not split"),
         }
     }
 }
@@ -365,12 +339,12 @@ mod proofs {
 mod tests {
     use proptest::prelude::*;
 
-    use super::{
-        Digest, Head, Integrity, LINKED_LEN, Opened, Protection, SIGNED_LEN, SealDamage, SigningKey,
-    };
+    use kurator_crypto::{Algorithm, SigningKey};
+
+    use super::{Digest, Head, Integrity, LINKED_LEN, Opened, Protection, SealDamage, signed_len};
 
     fn key() -> SigningKey {
-        SigningKey::from_seed([7; 32])
+        SigningKey::from_seed(Algorithm::Ed25519, [7; 32])
     }
 
     fn signed(head: Head, lsn: u64, payload: &[u8]) -> (Vec<u8>, Head) {
@@ -389,7 +363,9 @@ mod tests {
         let (first, middle) = linked(head, 1, b"first");
         let (second, last) = signed(middle, 2, b"second");
         assert_eq!(first.len(), 5 + LINKED_LEN, "linked seal length");
-        assert_eq!(second.len(), 6 + SIGNED_LEN, "signed seal length");
+        assert_eq!(second.len(), 6 + 32 + 64 + 2, "signed seal length");
+        assert_eq!(signed_len(64), 98, "signed seal length");
+        assert_eq!(second.get(second.len() - 2), Some(&1), "Ed25519 id");
         let verifying = key().verifying_key();
         assert_eq!(
             head.open(&verifying, 1, &first),
@@ -435,7 +411,7 @@ mod tests {
             Err(SealDamage::Signature),
             "position"
         );
-        let stranger = SigningKey::from_seed([8; 32]).verifying_key();
+        let stranger = SigningKey::from_seed(Algorithm::Ed25519, [8; 32]).verifying_key();
         assert_eq!(
             head.open(&stranger, 1, &record),
             Err(SealDamage::Signature),
@@ -461,6 +437,14 @@ mod tests {
             Err(SealDamage::Missing),
             "kind"
         );
+        let mut algorithm = record.clone();
+        let at = algorithm.len() - 2;
+        algorithm[at] = 0;
+        assert_eq!(
+            head.open(&verifying, 1, &algorithm),
+            Err(SealDamage::Algorithm(0)),
+            "algorithm"
+        );
         assert_eq!(
             head.open(&verifying, 1, &[]),
             Err(SealDamage::Missing),
@@ -484,20 +468,10 @@ mod tests {
     }
 
     #[test]
-    fn keys_and_digests_print_as_hex() {
+    fn digests_print_as_hex() {
         let digest = Digest::from_bytes([0xAB; 32]);
         assert_eq!(digest.to_string(), "ab".repeat(32), "display");
         assert_eq!(format!("{digest:?}"), format!("Digest({digest})"), "debug");
-        let public = key().verifying_key();
-        assert!(
-            format!("{:?}", key()).contains(&Digest::from_bytes(public.to_bytes()).to_string()),
-            "debug shows the public key"
-        );
-        assert_eq!(
-            super::VerifyingKey::from_bytes(&public.to_bytes()),
-            Some(public),
-            "roundtrip"
-        );
     }
 
     proptest! {

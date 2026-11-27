@@ -66,6 +66,7 @@
 | crate | 役割 |
 | --- | --- |
 | `crates/codec` | 共通のバイナリ符号化(`Reader`、ファイル枠 `Format`) |
+| `crates/crypto` | 署名鍵と署名。どれもアルゴリズム(`Algorithm`、今は Ed25519)の識別子を持ち、耐量子暗号(ML-DSA など)へ用途ごとに移せる。`NodeSecret` から用途(`KeyPurpose`)ごとの鍵を導出 |
 | `crates/wal` | 追記型 WAL。チェックサム版と署名版 |
 | `crates/storage` | 版付きの状態、トランザクション(二相コミットの準備と決定を含む)、キー範囲 `Span`、group commit、スナップショット、`Db` |
 | `crates/shard` | シャード記述子(ID・範囲・エポック)、分割、`ShardMap`、シャードの状態 |
@@ -73,7 +74,7 @@
 | `crates/meta` | メタシャード: シャード ID の割り当て、配置の登録簿 `Registry`、配置の報告。合意層には `Replicated` 越しにだけ触れる |
 | `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica`、シャードごとのレプリカを束ねる `Store` |
 | `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱、分割、レプリカ移動、シャード横断トランザクションの調整役) |
-| `crates/net` | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証) |
+| `crates/net` | QUIC トランスポート(quinn、Raw Public Key の相互認証。署名方式は鍵のアルゴリズムに従う) |
 | `crates/node` | `kurator` バイナリ: ノード 1 つ(全シャードのレプリカ)をプロセスとして動かすコンソール |
 
 シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`

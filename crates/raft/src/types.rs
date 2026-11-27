@@ -49,7 +49,7 @@ pub(crate) mod testing {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use super::{Membership, NodeId, Peer};
-    use crate::identity::{KeyPurpose, NodeSecret};
+    use kurator_crypto::{KeyPurpose, NodeSecret};
 
     /// Replica `id`'s peer: a loopback address and a key from its id.
     pub(crate) fn peer(id: u64) -> Peer {

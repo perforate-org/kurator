@@ -366,13 +366,13 @@ mod tests {
     use openraft_rt_sim::SimRuntime;
 
     use super::Store;
-    use crate::identity::NodeSecret;
     use crate::network::{Connection, Failure, Transport};
     use crate::replica::Member;
     use crate::rpc::{Message, Request, Response};
     use crate::snapshot::SnapshotBytes;
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, Peer, SnapshotMeta, StoredMembership, Vote};
+    use kurator_crypto::NodeSecret;
 
     crate::declare_config!(Test, SimRuntime);
 

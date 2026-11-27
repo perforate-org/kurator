@@ -4,7 +4,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 
-use kurator_wal::VerifyingKey;
+use kurator_crypto::VerifyingKey;
 
 /// Identifies a node within a cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

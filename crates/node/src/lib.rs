@@ -17,9 +17,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
+use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
 use kurator_net::{Endpoint, NetError, Quic, Server, Store};
-use kurator_raft::{KeyPurpose, Member, NodeSecret};
-use kurator_wal::VerifyingKey;
+use kurator_raft::Member;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::args::{Settings, Start};

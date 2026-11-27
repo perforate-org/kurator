@@ -12,9 +12,10 @@ use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use kurator_crypto::{Algorithm, SigningKey};
 use kurator_wal::{
-    Corruption, Digest, Error, Integrity, Lsn, Options, Protection, SealDamage, SigningKey, Start,
-    TailDamage, Wal,
+    Corruption, Digest, Error, Integrity, Lsn, Options, Protection, SealDamage, Start, TailDamage,
+    Wal,
 };
 use proptest as _;
 
@@ -24,7 +25,7 @@ const HEADER_LEN: usize = 48;
 const FRAME_HEADER_LEN: usize = 16;
 
 fn key(seed: u8) -> SigningKey {
-    SigningKey::from_seed([seed; 32])
+    SigningKey::from_seed(Algorithm::Ed25519, [seed; 32])
 }
 
 fn signed(seed: u8) -> Options {
@@ -232,7 +233,8 @@ fn checksummed_logs_have_no_chain() {
 /// Seal bytes after a payload: a linked record, and the signed record that
 /// closes a batch.
 const LINKED_SEAL_LEN: usize = 33;
-const SIGNED_SEAL_LEN: usize = 97;
+/// An Ed25519 signed seal: digest, signature, algorithm and kind.
+const SIGNED_SEAL_LEN: usize = 32 + 64 + 1 + 1;
 
 /// A log with one batch of `count` records of 20 bytes, in one segment.
 fn one_batch(count: u8) -> tempfile::TempDir {

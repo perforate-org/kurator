@@ -208,16 +208,16 @@ mod tests {
     use std::sync::Arc;
 
     use futures_util::FutureExt as _;
+    use kurator_crypto::{Algorithm, SigningKey};
     use kurator_shard::Shard;
     use kurator_storage::{KeyValue, KvState, Version};
-    use kurator_wal::SigningKey;
 
     use super::{Members, Replicated, Role, Transaction};
     use crate::error::{Error, Result};
     use crate::node::{NodeId, Peer};
 
     fn peer(id: u8) -> Peer {
-        let key = SigningKey::from_seed([id; 32]).verifying_key();
+        let key = SigningKey::from_seed(Algorithm::Ed25519, [id; 32]).verifying_key();
         Peer::new(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 7000), key)
     }
 

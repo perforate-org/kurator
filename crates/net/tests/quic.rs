@@ -12,17 +12,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kurator_consensus::Replicated as _;
+use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
 use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Reported};
 use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio};
 use kurator_raft::openraft::raft::VoteRequest;
 use kurator_raft::openraft::{self, SnapshotPolicy};
 use kurator_raft::{
-    Connection as _, Failure, KeyPurpose, Member, Message, NodeId, NodeSecret, Peer, Progress,
-    Refusal, Request, Response, Role, Transport as _, Vote,
+    Connection as _, Failure, Member, Message, NodeId, Peer, Progress, Refusal, Request, Response,
+    Role, Transport as _, Vote,
 };
 use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
-use kurator_wal::VerifyingKey;
 
 const LOOPBACK: &str = "127.0.0.1:0";
 

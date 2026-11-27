@@ -8,8 +8,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use kurator_crypto::VerifyingKey;
 use kurator_raft::{NodeId, Peer};
-use kurator_wal::VerifyingKey;
 
 /// What the process was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,24 +171,16 @@ fn peer(text: &str) -> Option<(NodeId, Peer)> {
     Some((node_id(id)?, Peer::new(addr(addr_text)?, key(key_text)?)))
 }
 
-/// A transport key as `kurator key` prints it: 64 hex digits.
+/// A transport key as `kurator key` prints it: `ed25519:` and 64 hex
+/// digits.
 pub(crate) fn key(text: &str) -> Option<VerifyingKey> {
-    let mut bytes = [0_u8; 32];
-    let mut digits = text.chars();
-    for byte in &mut bytes {
-        let high = digits.next()?.to_digit(16)?;
-        let low = digits.next()?.to_digit(16)?;
-        *byte = u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?;
-    }
-    if digits.next().is_some() {
-        return None;
-    }
-    VerifyingKey::from_bytes(&bytes)
+    text.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use kurator_raft::{KeyPurpose, NodeId, NodeSecret};
+    use kurator_crypto::{KeyPurpose, NodeSecret};
+    use kurator_raft::NodeId;
 
     use super::{Invocation, Start, UsageError, key, parse};
 
