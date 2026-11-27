@@ -19,6 +19,7 @@ kurator-codec = { path = "crates/codec" }
 kurator-storage = { path = "crates/storage" }
 kurator-shard = { path = "crates/shard" }
 kurator-consensus = { path = "crates/consensus" }
+kurator-client = { path = "crates/client" }
 kurator-raft = { path = "crates/raft" }
 kurator-meta = { path = "crates/meta" }
 kurator-sim = { path = "crates/sim" }

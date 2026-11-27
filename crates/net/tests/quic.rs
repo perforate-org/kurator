@@ -11,9 +11,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_client::{Call as ClientCall, Reach as _, Reply, Request as ClientRequest};
 use kurator_consensus::Replicated as _;
 use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
-use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Reported};
+use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Registry, Reported};
 use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio};
 use kurator_raft::openraft::raft::VoteRequest;
 use kurator_raft::openraft::{self, SnapshotPolicy};
@@ -22,7 +23,7 @@ use kurator_raft::{
     Role, Transport as _, Vote,
 };
 use kurator_shard::ShardId;
-use kurator_storage::WriteBatch;
+use kurator_storage::{Command, Outcome, Version, WriteBatch};
 
 const LOOPBACK: &str = "127.0.0.1:0";
 
@@ -79,12 +80,19 @@ impl Node {
 
 /// Starts node `id`, trusting `bootstrap` until it has a membership.
 async fn start(id: u64, bootstrap: &[u64]) -> Node {
+    start_serving(id, bootstrap, &[]).await
+}
+
+/// Starts node `id` as [`start`] does, serving the clients `clients` too.
+async fn start_serving(id: u64, bootstrap: &[u64], clients: &[u64]) -> Node {
     let member = Member::new(NodeId::new(id), secret(id));
     let trusted = bootstrap
         .iter()
         .map(|other| (NodeId::new(*other), key(*other)))
         .collect();
-    let endpoint = Endpoint::bind(LOOPBACK.parse().unwrap(), member.secret(), trusted).unwrap();
+    let endpoint = Endpoint::bind(LOOPBACK.parse().unwrap(), member.secret(), trusted)
+        .unwrap()
+        .with_clients(clients.iter().map(|client| key(*client)).collect());
     let peer = member.peer(endpoint.local_addr().unwrap());
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(member, dir.path(), config(), endpoint.transport())
@@ -376,4 +384,125 @@ async fn meta_calls() {
         Answer::NotLeader(Some(leader)),
         "a follower names the leader"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_trusted_client_writes_and_reads_through_the_leader() {
+    within(client_requests()).await;
+}
+
+/// Asks node `target` for `call` on the first shard, following the leader
+/// each node names, until one answers otherwise.
+async fn on_leader(
+    client: &Quic,
+    peers: &BTreeMap<NodeId, Peer>,
+    mut target: NodeId,
+    call: &ClientCall,
+) -> Reply {
+    for _ in 0..100 {
+        let request = ClientRequest::Shard(ShardId::FIRST, call.clone());
+        let reply = client
+            .reach(target, &peers[&target], &request)
+            .await
+            .unwrap();
+        let Reply::NotLeader(hint) = reply else {
+            return reply;
+        };
+        match hint {
+            Some(leader) => target = leader,
+            None => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    panic!("no leader answered {call:?}");
+}
+
+/// The map `node` gives once it knows the shards.
+async fn mapped(client: &Quic, node: NodeId, peer: &Peer) -> (Registry, BTreeMap<NodeId, Peer>) {
+    for _ in 0..100 {
+        let reply = client.reach(node, peer, &ClientRequest::Map).await.unwrap();
+        if let Reply::Map { registry, peers } = reply {
+            return (registry, peers);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no map from {node:?}");
+}
+
+async fn client_requests() {
+    let ids = [1, 2, 3];
+    let mut nodes = BTreeMap::new();
+    for id in ids {
+        drop(nodes.insert(id, start_serving(id, &ids, &[7]).await));
+    }
+    let voters: Vec<(NodeId, Peer)> = nodes
+        .iter()
+        .map(|(id, node)| (NodeId::new(*id), node.peer.clone()))
+        .collect();
+    nodes[&1].store.found(voters).await.unwrap();
+    eventually("a leader", || leader(&nodes).is_some()).await;
+    let client = Endpoint::bind(LOOPBACK.parse().unwrap(), &secret(7), BTreeMap::new())
+        .unwrap()
+        .transport();
+    let first = NodeId::new(1);
+
+    // Any node tells where the shards and the nodes are.
+    let (registry, peers) = mapped(&client, first, &nodes[&1].peer).await;
+    assert_eq!(peers.len(), 3, "every node: {peers:?}");
+    assert!(
+        registry.placement(ShardId::FIRST).is_some(),
+        "the first shard"
+    );
+
+    // A write goes to the leader, and reads see it at its version.
+    let put = ClientCall::Propose(Command::Kv(WriteBatch::new().put("k", "v")));
+    let Reply::Applied(Outcome::Committed(at)) = on_leader(&client, &peers, first, &put).await
+    else {
+        panic!("the write did not commit");
+    };
+    let Reply::Begun { at: begun, .. } =
+        on_leader(&client, &peers, first, &ClientCall::Begin).await
+    else {
+        panic!("no begin");
+    };
+    assert!(begun >= at, "begins after the write: {begun} < {at}");
+    let get = |version| ClientCall::Get {
+        at: version,
+        key: b"k".to_vec(),
+    };
+    assert_eq!(
+        on_leader(&client, &peers, first, &get(at)).await,
+        Reply::Value(Some(b"v".to_vec())),
+        "at the write"
+    );
+    assert_eq!(
+        on_leader(&client, &peers, first, &get(Version::ZERO)).await,
+        Reply::Value(None),
+        "before it"
+    );
+
+    // A client may not take part in replication.
+    let mut link = client.connect(first, &nodes[&1].peer);
+    let refused = link
+        .call(vote_from(7), Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        matches!(refused, Response::Refused(Refusal::Forged)),
+        "a client's vote: {refused:?}"
+    );
+
+    // A key no node serves gets no answer.
+    let stranger = Endpoint::bind(LOOPBACK.parse().unwrap(), &secret(8), BTreeMap::new())
+        .unwrap()
+        .transport();
+    let unknown = stranger
+        .reach(first, &nodes[&1].peer, &ClientRequest::Map)
+        .await;
+    assert!(unknown.is_err(), "a stranger: {unknown:?}");
+
+    for (_, node) in nodes {
+        let Node { store, server, .. } = node;
+        drop(server);
+        store.shutdown().await.unwrap();
+    }
 }

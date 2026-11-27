@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::ops::Bound;
 
 use kurator_shard::Shard;
-use kurator_storage::{KeyValue, KvState, Version};
+use kurator_storage::{Command, KeyValue, KvState, Outcome, Version};
 
 use crate::error::Result;
 use crate::node::{NodeId, Peer};
@@ -122,6 +122,19 @@ pub trait Replicated: Send + Sync {
         &self,
         read: impl FnOnce(&KvState) -> R + Send,
     ) -> impl Future<Output = Result<R>> + Send;
+
+    /// Replicates `command` and applies it, and returns what applying it
+    /// did. An abort is an [`Outcome::Aborted`], not an error: the
+    /// command ordered and applied, writing nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`](crate::Error::NotLeader) when this replica
+    /// does not lead, [`Error::Discarded`](crate::Error::Discarded) when
+    /// a new leader dropped it, and
+    /// [`Error::Misrouted`](crate::Error::Misrouted) when the shard does
+    /// not hold what it touches.
+    fn propose(&self, command: Command) -> impl Future<Output = Result<Outcome>> + Send;
 }
 
 /// A transaction on a replicated shard: it reads one version and holds
@@ -198,6 +211,10 @@ impl<T: Replicated + ?Sized> Replicated for Arc<T> {
     ) -> impl Future<Output = Result<R>> + Send {
         T::read(self, read)
     }
+
+    fn propose(&self, command: Command) -> impl Future<Output = Result<Outcome>> + Send {
+        T::propose(self, command)
+    }
 }
 
 #[cfg(test)]
@@ -210,7 +227,7 @@ mod tests {
     use futures_util::FutureExt as _;
     use kurator_crypto::{Algorithm, SigningKey};
     use kurator_shard::Shard;
-    use kurator_storage::{KeyValue, KvState, Version};
+    use kurator_storage::{Command, KeyValue, KvState, Outcome, Version, WriteBatch};
 
     use super::{Members, Replicated, Role, Transaction};
     use crate::error::{Error, Result};
@@ -279,6 +296,10 @@ mod tests {
             Ok(Empty)
         }
 
+        async fn propose(&self, _command: Command) -> Result<Outcome> {
+            Ok(Outcome::Committed(Version::new(9)))
+        }
+
         async fn read<R: Send>(&self, read: impl FnOnce(&KvState) -> R + Send) -> Result<R> {
             Ok(read(&KvState::default()))
         }
@@ -306,6 +327,15 @@ mod tests {
         assert_eq!(shared.members(), members(), "members");
         let read = shared.read(KvState::version).now_or_never().unwrap();
         assert_eq!(read.unwrap(), Version::ZERO, "read");
+        let proposed = shared
+            .propose(Command::Kv(WriteBatch::new().put("k", "v")))
+            .now_or_never()
+            .unwrap();
+        assert_eq!(
+            proposed.unwrap(),
+            Outcome::Committed(Version::new(9)),
+            "propose"
+        );
         let mut txn = shared.begin().now_or_never().unwrap().unwrap();
         assert_eq!(txn.get(b"k").unwrap(), None, "get");
         assert!(

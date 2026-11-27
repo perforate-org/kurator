@@ -19,20 +19,15 @@
 //! split     = the rest of the record, as `kurator_shard::Split::encode`
 //!             wrote it
 //! membership= configs u32 (voters u32 node u64*)* | nodes u32 (node u64 peer)*
-//! peer      = addr | key
-//! key       = algorithm u8 | len u32 | public key
-//!             the algorithm as `kurator_crypto::Algorithm::id` names it
-//! addr      = 4 [4] port u16 | 6 [16] port u16
+//! peer      = as `kurator_consensus::Peer::encode` writes it
 //! meta      = option(log id) | option(log id) | membership
 //!             a snapshot's last entry, its membership's entry, and the
 //!             membership
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use kurator_codec::{DecodeError, Reader};
-use kurator_crypto::{Algorithm, VerifyingKey};
 use openraft::EntryPayload;
 
 use crate::config::Entry;
@@ -54,9 +49,6 @@ const SPLIT: u8 = 3;
 
 const NONE: u8 = 0;
 const SOME: u8 = 1;
-
-const V4: u8 = 4;
-const V6: u8 = 6;
 
 /// One record of the Raft log.
 #[derive(Debug, Clone, PartialEq)]
@@ -139,7 +131,7 @@ pub(crate) fn put_membership(out: &mut Vec<u8>, membership: &Membership) {
     put_len(out, nodes.len());
     for (id, peer) in nodes {
         put_node_id(out, *id);
-        put_peer(out, peer);
+        peer.encode(out);
     }
 }
 
@@ -161,7 +153,7 @@ pub(crate) fn membership(reader: &mut Reader<'_>) -> Result<Membership, DecodeEr
     let mut nodes = BTreeMap::new();
     for _ in 0..reader.read::<u32>()? {
         let id = node_id(reader)?;
-        if nodes.insert(id, peer(reader)?).is_some() {
+        if nodes.insert(id, Peer::decode(reader)?).is_some() {
             return Err(DecodeError::Invalid);
         }
     }
@@ -289,36 +281,6 @@ fn put_node_id(out: &mut Vec<u8>, id: NodeId) {
 
 fn node_id(reader: &mut Reader<'_>) -> Result<NodeId, DecodeError> {
     reader.read::<u64>().map(NodeId::new)
-}
-
-fn put_peer(out: &mut Vec<u8>, peer: &Peer) {
-    match peer.addr() {
-        SocketAddr::V4(addr) => {
-            out.push(V4);
-            out.extend_from_slice(&addr.ip().octets());
-        }
-        SocketAddr::V6(addr) => {
-            out.push(V6);
-            out.extend_from_slice(&addr.ip().octets());
-        }
-    }
-    out.extend_from_slice(&peer.addr().port().to_le_bytes());
-    out.push(peer.key().algorithm().id());
-    put_len(out, peer.key().as_bytes().len());
-    out.extend_from_slice(peer.key().as_bytes());
-}
-
-fn peer(reader: &mut Reader<'_>) -> Result<Peer, DecodeError> {
-    let ip = match reader.read::<u8>()? {
-        V4 => Ipv4Addr::from(reader.read::<[u8; 4]>()?).into(),
-        V6 => Ipv6Addr::from(reader.read::<[u8; 16]>()?).into(),
-        other => return Err(DecodeError::Tag(other)),
-    };
-    let port = reader.read::<u16>()?;
-    let id = reader.read::<u8>()?;
-    let algorithm = Algorithm::from_id(id).ok_or(DecodeError::Tag(id))?;
-    let key = VerifyingKey::from_parts(algorithm, reader.bytes()?).ok_or(DecodeError::Invalid)?;
-    Ok(Peer::new(SocketAddr::new(ip, port), key))
 }
 
 #[cfg(test)]

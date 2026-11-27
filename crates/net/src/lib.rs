@@ -13,7 +13,10 @@
 //!   names its channel: Raft messages, or calls on the meta shard
 //!   ([`kurator_meta::Call`]), which a node answers from its own meta
 //!   replica. [`Quic`] implements [`kurator_meta::Ask`], so any node can
-//!   reach the meta shard's leader.
+//!   reach the meta shard's leader. A third channel carries client
+//!   requests ([`kurator_client::Request`]): the shard map, and versioned
+//!   reads and writes on a replica this node holds. [`Quic`] implements
+//!   [`kurator_client::Reach`].
 //! - **Mutual authentication by transport key.** TLS 1.3 with raw public
 //!   keys (RFC 7250), no certificates, signed with the key's own algorithm
 //!   (Ed25519 today), and a post-quantum key exchange only
@@ -23,7 +26,9 @@
 //!   separate from the key that signs its WAL). The client expects the
 //!   key the membership lists for the peer; the server accepts the keys
 //!   of its replicas' memberships, and before it has one, the peers it was started
-//!   with.
+//!   with, and the client keys it was given
+//!   ([`Endpoint::with_clients`]). A client may use the client channel
+//!   only.
 //! - **No impersonation.** A request names its sender in its vote; the
 //!   server refuses a request whose sender is not the node that
 //!   authenticated the connection, and drops a connection whose node left

@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 kurator-shard.workspace = true
 kurator-storage.workspace = true
+kurator-codec.workspace = true
 kurator-crypto.workspace = true
 thiserror.workspace = true
 
