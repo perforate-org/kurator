@@ -17,6 +17,7 @@
 //! promote <id>             make a learner that caught up a voter in every shard
 //! remove <id>              take a node out of every shard
 //! collect                  forget the decisions on transactions across shards long past their deadline
+//! backup <dir>             write every shard this node holds to <dir>, which must not exist; see `run --restore`
 //! quit
 //! ```
 //!
@@ -25,6 +26,7 @@
 //! it leads once they pass their ceiling, every
 //! [`split::EVERY`](crate::split::EVERY).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use kurator_client::Collected;
@@ -68,6 +70,8 @@ pub enum Command {
     Remove(NodeId),
     /// Forgets old decisions on transactions across shards.
     Collect,
+    /// Backs up every shard the node holds to a new directory.
+    Backup(PathBuf),
     /// Stops the node.
     Quit,
 }
@@ -84,7 +88,7 @@ pub enum Reply {
 
 const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k> | shards \
                     | status | members | add <id> <addr> <key> | promote <id> \
-                    | remove <id> | collect | quit";
+                    | remove <id> | collect | backup <dir> | quit";
 
 impl Command {
     /// Reads one line; `None` when it is not a command.
@@ -106,6 +110,7 @@ impl Command {
             ["promote", id] => Self::Promote(node_id(id)?),
             ["remove", id] => Self::Remove(node_id(id)?),
             ["collect"] => Self::Collect,
+            ["backup", dir] => Self::Backup(PathBuf::from(dir)),
             ["quit"] => Self::Quit,
             _ => return None,
         };
@@ -166,6 +171,14 @@ pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
             Collected::Forgotten => "ok: forgotten".to_owned(),
             Collected::Unfinished | _ => "error: a shard did not answer; try again".to_owned(),
         },
+        Command::Backup(dir) => {
+            let backup = store.back_up();
+            let shards = backup.shards().count();
+            match backup.write(&dir) {
+                Ok(()) => format!("ok: {shards} shards in {}", dir.display()),
+                Err(error) => format!("error: {error}"),
+            }
+        }
         Command::Quit => return Reply::Quit,
     };
     Reply::Show(shown)
@@ -327,6 +340,8 @@ mod tests {
             ("promote 4", Some(Command::Promote(NodeId::new(4)))),
             ("remove 2", Some(Command::Remove(NodeId::new(2)))),
             ("quit", Some(Command::Quit)),
+            ("backup b", Some(Command::Backup("b".into()))),
+            ("backup", None),
             ("put k", None),
             ("promote four", None),
             ("add 4 nowhere key", None),

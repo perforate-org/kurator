@@ -11,6 +11,7 @@ use openraft::async_runtime::Mutex as _;
 use openraft::{AsyncRuntime, RaftTypeConfig};
 use parking_lot::Mutex;
 
+use crate::backup::Backup;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -168,6 +169,23 @@ impl<C: Config, T: Transport<C>> Store<C, T> {
         let halves = replica.split(at, right).await?;
         self.shared.plant().await?;
         Ok(halves)
+    }
+
+    /// A backup of every shard the node holds a state of, each as its
+    /// replica last applied it, which may lag the shard's leader.
+    #[must_use]
+    pub fn back_up(&self) -> Backup {
+        Backup::new(
+            self.replicas()
+                .into_iter()
+                .filter(|replica| replica.is_initialized())
+                .map(|replica| {
+                    // Applied after the state was read, so at least as far.
+                    let state = replica.read_local(Clone::clone);
+                    let applied = replica.status().applied().map_or(0, |log_id| log_id.index);
+                    (state, applied)
+                }),
+        )
     }
 
     /// The id of the node.

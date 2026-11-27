@@ -40,6 +40,7 @@
 //! replicas, delivering into each replica's [`Inbox`]: QUIC in production,
 //! a simulated network in tests. Both speak the same binary encoding.
 
+mod backup;
 mod codec;
 mod config;
 mod error;
@@ -54,6 +55,7 @@ mod state_machine;
 mod store;
 mod types;
 
+pub use backup::Backup;
 pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
 pub use kurator_consensus::Role;
