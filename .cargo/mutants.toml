@@ -1,5 +1,9 @@
 # Mutants that no in-process test can observe. Each needs a reason.
 exclude_re = [
+    # While Ed25519 is the only algorithm, its id is the constant 1, so
+    # returning 1 is the same function. A second algorithm makes it
+    # observable through the round-trip test.
+    "replace Algorithm::id -> u8 with 1",
     # Kani harnesses and the checksum stand-in they use run under `cargo kani`.
     "proofs::",
     # Directory syncs only matter after power loss.
