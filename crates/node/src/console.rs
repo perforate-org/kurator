@@ -16,11 +16,16 @@
 //! add <id> <addr> <key>    add a learner to every shard
 //! promote <id>             make a learner that caught up a voter in every shard
 //! remove <id>              take a node out of every shard
+//! collect                  forget the decisions on transactions across shards long past their deadline
 //! quit
 //! ```
+//!
+//! The node that leads the meta shard also collects on its own, every
+//! [`sweep::EVERY`](crate::sweep::EVERY).
 
 use std::sync::Arc;
 
+use kurator_client::Collected;
 use kurator_consensus::{Members, NodeId, Peer, Replicated as _};
 use kurator_meta::{Meta, Placement};
 use kurator_net::{Quic, Replica, Store};
@@ -59,6 +64,8 @@ pub enum Command {
     Promote(NodeId),
     /// Removes a node.
     Remove(NodeId),
+    /// Forgets old decisions on transactions across shards.
+    Collect,
     /// Stops the node.
     Quit,
 }
@@ -75,7 +82,7 @@ pub enum Reply {
 
 const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k> | shards \
                     | status | members | add <id> <addr> <key> | promote <id> \
-                    | remove <id> | quit";
+                    | remove <id> | collect | quit";
 
 impl Command {
     /// Reads one line; `None` when it is not a command.
@@ -96,6 +103,7 @@ impl Command {
             ["add", id, at, public] => Self::Add(node_id(id)?, Peer::new(addr(at)?, key(public)?)),
             ["promote", id] => Self::Promote(node_id(id)?),
             ["remove", id] => Self::Remove(node_id(id)?),
+            ["collect"] => Self::Collect,
             ["quit"] => Self::Quit,
             _ => return None,
         };
@@ -152,6 +160,10 @@ pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
             }
             everywhere(outcomes)
         }
+        Command::Collect => match crate::sweep::collect(store, ask).await {
+            Collected::Forgotten => "ok: forgotten".to_owned(),
+            Collected::Unfinished | _ => "error: a shard did not answer; try again".to_owned(),
+        },
         Command::Quit => return Reply::Quit,
     };
     Reply::Show(shown)

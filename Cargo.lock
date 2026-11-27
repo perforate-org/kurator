@@ -819,6 +819,7 @@ name = "kurator-node"
 version = "0.0.1"
 dependencies = [
  "getrandom 0.4.3",
+ "kurator-client",
  "kurator-consensus",
  "kurator-crypto",
  "kurator-meta",

@@ -12,6 +12,8 @@ pub mod args;
 pub mod console;
 pub mod report;
 pub mod secret;
+pub mod session;
+pub mod sweep;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -41,6 +43,12 @@ pub enum NodeError {
     /// The Raft configuration is invalid.
     #[error(transparent)]
     Config(#[from] kurator_raft::openraft::ConfigError),
+    /// No node told the client where the shards are.
+    #[error("no node answered")]
+    Unreached,
+    /// A client's operation failed.
+    #[error(transparent)]
+    Client(#[from] kurator_client::Error),
 }
 
 /// The transport key of the node whose secret is in `dir`, creating the
@@ -68,12 +76,18 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
         .await?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut beats = tokio::time::interval(report::EVERY);
+    let mut sweeps = tokio::time::interval(sweep::EVERY);
     loop {
         let line = tokio::select! {
             line = lines.next_line() => line?,
             _ = beats.tick() => {
                 // A beat that failed is made again on the next one.
                 drop(report::heartbeat(&store, &quic).await);
+                continue;
+            }
+            _ = sweeps.tick() => {
+                // A sweep that did not finish is made again on the next one.
+                let _swept: Option<kurator_client::Collected> = sweep::sweep(&store, &quic).await;
                 continue;
             }
         };

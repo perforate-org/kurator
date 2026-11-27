@@ -3,7 +3,11 @@
 //! ```text
 //! kurator key <dir>
 //! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--found]
+//! kurator client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
 //! ```
+//!
+//! A client's operations run as one transaction, across every shard they
+//! touch.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -20,6 +24,49 @@ pub enum Invocation {
     Key(PathBuf),
     /// Run a replica.
     Run(Settings),
+    /// Run operations on a cluster as a client.
+    Client(Session),
+}
+
+/// What a client does: who it is, where it first asks, and the
+/// operations of its transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Session {
+    dir: PathBuf,
+    peers: Vec<(NodeId, Peer)>,
+    ops: Vec<Op>,
+}
+
+impl Session {
+    /// Where the client keeps its secret.
+    #[must_use]
+    pub const fn dir(&self) -> &PathBuf {
+        &self.dir
+    }
+
+    /// The nodes it asks first where the shards are.
+    #[must_use]
+    pub fn peers(&self) -> &[(NodeId, Peer)] {
+        &self.peers
+    }
+
+    /// The operations, in order.
+    #[must_use]
+    pub fn ops(&self) -> &[Op] {
+        &self.ops
+    }
+}
+
+/// One operation of a client's transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Op {
+    /// Read a key.
+    Get(Vec<u8>),
+    /// Set a key.
+    Put(Vec<u8>, Vec<u8>),
+    /// Remove a key.
+    Delete(Vec<u8>),
 }
 
 /// How a replica runs.
@@ -87,8 +134,13 @@ impl Settings {
 #[non_exhaustive]
 pub enum UsageError {
     /// No command, or one this build does not know.
-    #[error("expected `key <dir>` or `run --id <n> --dir <dir> --listen <addr> ...`")]
+    #[error(
+        "expected `key <dir>`, `run --id <n> --dir <dir> --listen <addr> ...` or `client --dir <dir> --peer ... <op>...`"
+    )]
     Command,
+    /// A client with nothing to do.
+    #[error("a client needs at least one operation: get <key>, put <key> <value> or del <key>")]
+    Nothing,
     /// An option this build does not know.
     #[error("unknown option {0}")]
     Option(String),
@@ -121,6 +173,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Usage
             )
         }
         Some("run") => run(args).map(Invocation::Run),
+        Some("client") => client(args).map(Invocation::Client),
         Some(_) | None => Err(UsageError::Command),
     }
 }
@@ -151,6 +204,37 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
         peers,
         clients,
         start,
+    })
+}
+
+fn client(mut args: impl Iterator<Item = String>) -> Result<Session, UsageError> {
+    let mut dir = None;
+    let mut peers = Vec::new();
+    let mut ops = Vec::new();
+    while let Some(arg) = args.next() {
+        let mut value = |option: &'static str| args.next().ok_or(UsageError::Missing(option));
+        match arg.as_str() {
+            "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
+            "--peer" => peers.push(read("--peer", &value("--peer")?, peer)?),
+            "get" => ops.push(Op::Get(value("get")?.into_bytes())),
+            "put" => {
+                let key = value("put")?.into_bytes();
+                ops.push(Op::Put(key, value("put")?.into_bytes()));
+            }
+            "del" => ops.push(Op::Delete(value("del")?.into_bytes())),
+            _ => return Err(UsageError::Option(arg)),
+        }
+    }
+    if peers.is_empty() {
+        return Err(UsageError::Missing("--peer"));
+    }
+    if ops.is_empty() {
+        return Err(UsageError::Nothing);
+    }
+    Ok(Session {
+        dir: dir.ok_or(UsageError::Missing("--dir"))?,
+        peers,
+        ops,
     })
 }
 
@@ -192,7 +276,7 @@ mod tests {
     use kurator_crypto::{KeyPurpose, NodeSecret};
     use kurator_raft::NodeId;
 
-    use super::{Invocation, Start, UsageError, key, parse};
+    use super::{Invocation, Op, Start, UsageError, key, parse};
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_owned).collect()
@@ -242,6 +326,50 @@ mod tests {
         assert_eq!(waiting.start(), Start::Wait, "waits by default");
         assert!(waiting.peers().is_empty(), "no peers");
         assert!(waiting.clients().is_empty(), "no clients");
+    }
+
+    #[test]
+    fn a_client_line_parses() {
+        let peer_key = NodeSecret::from_seed([2; 32]).public_key(KeyPurpose::Transport);
+        let line = format!("client --dir c --peer 2=127.0.0.1:7002,{peer_key} get a put b 1 del c");
+        let Ok(Invocation::Client(session)) = parse(args(&line)) else {
+            panic!("parses");
+        };
+        assert_eq!(session.dir().to_str(), Some("c"), "dir");
+        assert_eq!(session.peers().len(), 1, "peer");
+        let ops = [
+            Op::Get(b"a".to_vec()),
+            Op::Put(b"b".to_vec(), b"1".to_vec()),
+            Op::Delete(b"c".to_vec()),
+        ];
+        assert_eq!(session.ops(), ops, "ops in order");
+        let peer = format!("--peer 2=127.0.0.1:7002,{peer_key}");
+        for (bad, error) in [
+            (format!("client --dir c {peer}"), UsageError::Nothing),
+            (
+                "client --dir c get a".to_owned(),
+                UsageError::Missing("--peer"),
+            ),
+            (format!("client {peer} get a"), UsageError::Missing("--dir")),
+            (
+                format!("client --dir c {peer} put a"),
+                UsageError::Missing("put"),
+            ),
+            (
+                format!("client --dir c {peer} get"),
+                UsageError::Missing("get"),
+            ),
+            (
+                format!("client --dir c {peer} del"),
+                UsageError::Missing("del"),
+            ),
+            (
+                format!("client --dir c {peer} scan"),
+                UsageError::Option("scan".to_owned()),
+            ),
+        ] {
+            assert_eq!(parse(args(&bad)), Err(error), "{bad:?}");
+        }
     }
 
     #[test]
