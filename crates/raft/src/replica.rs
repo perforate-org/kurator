@@ -6,7 +6,10 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
-use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
+use kurator_storage::{
+    Abort, Command, Decide, Decided, Draft, KeyValue, KvState, Outcome, Prepare, Version,
+    WriteBatch,
+};
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
 use openraft::raft::ClientWriteResponse;
@@ -230,6 +233,7 @@ impl<C: Config> Replica<C> {
         match response.data {
             Applied::Split(halves) => Ok(halves),
             Applied::Misrouted(shard) => Err(misrouted(shard)),
+            Applied::Locked => Err(Error::Locked),
             Applied::Data(_) | _ => Err(Error::Raft("a split applied as a command".into())),
         }
     }
@@ -277,6 +281,45 @@ impl<C: Config> Replica<C> {
             shard: self.shard(),
             draft: Draft::new(read_at),
         })
+    }
+
+    /// Prepares this shard's part of a transaction across shards: once it
+    /// applies, the shard holds the part's writes back and locks what it
+    /// read and writes, until [`Replica::decide`] tells it how the
+    /// transaction came out. Returns the version it applied at.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when the
+    /// shard refuses: a read changed since its read version, another
+    /// prepared transaction holds a key it touches, or the transaction was
+    /// decided already. Otherwise as [`Replica::write`].
+    pub async fn prepare(&self, prepare: Prepare) -> Result<Version> {
+        let proposal = Proposal::new(Command::Prepare(prepare))?;
+        let response = written(self.raft.client_write(proposal).await)?;
+        version(response.data)
+    }
+
+    /// Tells this shard how a transaction across shards came out, and
+    /// returns how the shard decided it: as told when it prepared its
+    /// part, as it was decided before when it was, and aborted otherwise.
+    /// A commit told to the primary is the transaction's commit point.
+    ///
+    /// # Errors
+    ///
+    /// As [`Replica::write`]; [`Error::Discarded`] leaves the decision
+    /// unknown, and telling it again is safe.
+    pub async fn decide(&self, decide: Decide) -> Result<Decided> {
+        let proposal = Proposal::new(Command::Decide(decide))?;
+        let response = written(self.raft.client_write(proposal).await)?;
+        let rolled_back = matches!(
+            response.data,
+            Applied::Data(Outcome::Aborted(Abort::RolledBack(_)))
+        );
+        if rolled_back {
+            return Ok(Decided::Aborted);
+        }
+        version(response.data).map(Decided::Committed)
     }
 
     /// Adds `id`, reached as `peer`, as a learner: the leader starts sending
@@ -564,7 +607,7 @@ impl<C: Config> Txn<'_, C> {
 /// The version a command's writes made, or why it made none.
 fn version(applied: Applied) -> Result<Version> {
     match applied {
-        Applied::Data(Outcome::Committed(version)) => Ok(version),
+        Applied::Data(Outcome::Committed(version) | Outcome::Prepared(version)) => Ok(version),
         Applied::Data(Outcome::Aborted(abort)) => Err(kurator_storage::Error::from(abort).into()),
         Applied::Misrouted(shard) => Err(misrouted(shard)),
         Applied::Split(_) | Applied::Data(_) | _ => {

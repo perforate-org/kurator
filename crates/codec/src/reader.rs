@@ -32,7 +32,7 @@ macro_rules! little_endian {
     )*};
 }
 
-little_endian!(u8, u16, u32, u64);
+little_endian!(u8, u16, u32, u64, u128);
 
 impl<const N: usize> sealed::Width for [u8; N] {
     const LEN: usize = N;

@@ -1,7 +1,8 @@
 //! Transactions under faults: concurrent transfers between accounts while
-//! replicas crash, restart and get cut off. Whatever happens, no transfer
-//! is applied by half or twice, so the accounts always hold the money they
-//! started with, and every replica ends with the same state.
+//! replicas crash, restart and get cut off, on one shard and across two.
+//! Whatever happens, no transfer is applied by half or twice, so the
+//! accounts always hold the money they started with, and every replica
+//! ends with the same state.
 //!
 //! `KURATOR_SIM_SEEDS=<n>` runs more seeds than the default, and
 //! `KURATOR_SIM_SEED=<seed>` runs just one, to reproduce a failure.
@@ -17,14 +18,16 @@ use std::time::Duration;
 use futures_util::future::join;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_raft::{Error, Txn};
-use kurator_sim::{Cluster, Faults, Outcome, Rng, Sim, Transacted};
-use kurator_storage::{KvState, WriteBatch};
+use kurator_sim::{Across, Cluster, Coordinator, Faults, Holdings, Outcome, Rng, Sim, Transacted};
+use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 const DEFAULT_SEEDS: u64 = 8;
 const STEPS: u64 = 60;
 const ACCOUNTS: u64 = 4;
 const OPENING: u64 = 100;
+/// The account the second shard starts at, when the accounts are split.
+const SPLIT_AT: u64 = 2;
 /// The longest gap between two steps, in milliseconds of simulated time.
 const MAX_GAP_MS: u64 = 200;
 
@@ -53,28 +56,66 @@ fn balance(txn: &mut Txn<'_, Sim>, index: u64) -> Result<u64, Error> {
     Ok(txn.get(&account(index))?.map_or(0, |bytes| amount(&bytes)))
 }
 
-/// The money in every account of `state`.
-fn total(state: &KvState) -> u64 {
+fn balance_across(txn: &mut Across<'_>, index: u64) -> Result<u64, Error> {
+    Ok(txn.get(&account(index))?.map_or(0, |bytes| amount(&bytes)))
+}
+
+/// The money in every account a replica holds.
+fn total(holdings: &Holdings) -> u64 {
     (0..ACCOUNTS)
-        .filter_map(|index| state.get(&account(index)))
+        .filter_map(|index| holdings.get(&account(index)))
         .map(amount)
         .sum()
 }
 
+/// What is left of `source` after `sum` moves out of it, if it holds that
+/// much and the money moves between two accounts.
+fn left(from: u64, to: u64, source: u64, sum: u64) -> Option<u64> {
+    source.checked_sub(sum).filter(|_| from != to)
+}
+
+/// How a run's transactions reach the accounts.
+#[derive(Debug, Clone, Copy)]
+enum Client {
+    /// Every account is on the first shard, and a transaction commits on
+    /// it alone.
+    OneShard,
+    /// The accounts are split over two shards, and a transaction commits
+    /// in two phases across them.
+    Across,
+}
+
 /// Moves `sum` from one account to another, if the first holds that much
 /// and the two differ.
-async fn transfer(cluster: &Cluster, from: u64, to: u64, sum: u64) -> Transacted {
-    cluster
-        .transact(|txn| {
-            let (source, target) = (balance(txn, from)?, balance(txn, to)?);
-            let Some(left) = source.checked_sub(sum).filter(|_| from != to) else {
-                return Ok(());
-            };
-            txn.put(account(from), left.to_le_bytes());
-            txn.put(account(to), target.checked_add(sum).unwrap().to_le_bytes());
-            Ok(())
-        })
-        .await
+async fn transfer(cluster: &Cluster, client: Client, from: u64, to: u64, sum: u64) -> Transacted {
+    match client {
+        Client::OneShard => {
+            cluster
+                .transact(|txn| {
+                    let (source, target) = (balance(txn, from)?, balance(txn, to)?);
+                    let Some(left) = left(from, to, source, sum) else {
+                        return Ok(());
+                    };
+                    txn.put(account(from), left.to_le_bytes());
+                    txn.put(account(to), target.checked_add(sum).unwrap().to_le_bytes());
+                    Ok(())
+                })
+                .await
+        }
+        Client::Across => {
+            Coordinator::new(cluster)
+                .transact(|txn| {
+                    let source = balance_across(txn, from)?;
+                    let target = balance_across(txn, to)?;
+                    let Some(left) = left(from, to, source, sum) else {
+                        return Ok(());
+                    };
+                    txn.put(&account(from), left.to_le_bytes())?;
+                    txn.put(&account(to), target.checked_add(sum).unwrap().to_le_bytes())
+                })
+                .await
+        }
+    }
 }
 
 /// How the transactions of a run ended.
@@ -98,12 +139,12 @@ impl Tally {
 
 /// Two transfers at once, often touching the same account, so that one of
 /// them conflicts.
-async fn transfers(cluster: &Cluster, rng: &mut Rng, tally: &mut Tally) {
+async fn transfers(cluster: &Cluster, client: Client, rng: &mut Rng, tally: &mut Tally) {
     let mut pick = || (rng.below(ACCOUNTS), rng.below(ACCOUNTS), rng.below(60));
     let (first, second) = (pick(), pick());
     let (first, second) = join(
-        transfer(cluster, first.0, first.1, first.2),
-        transfer(cluster, second.0, second.1, second.2),
+        transfer(cluster, client, first.0, first.1, first.2),
+        transfer(cluster, client, second.0, second.1, second.2),
     )
     .await;
     tally.count(first);
@@ -124,7 +165,7 @@ async fn restart_one(cluster: &mut Cluster, rng: &mut Rng) {
     cluster.restart(id).await.unwrap();
 }
 
-fn run(seed: u64) -> Tally {
+fn run(client: Client, seed: u64) -> Tally {
     SimRuntime::with_seed(seed).block_on(async {
         let mut rng = Rng::new(seed);
         let mut cluster = Cluster::start(seed, 3, Faults::default()).await.unwrap();
@@ -134,10 +175,15 @@ fn run(seed: u64) -> Tally {
         });
         let outcome = cluster.write(opening).await;
         assert!(outcome == Outcome::Acked, "opened: {outcome:?}");
+        if matches!(client, Client::Across) {
+            let split = cluster.split(&account(SPLIT_AT)).await;
+            assert_eq!(split, Outcome::Acked, "split");
+            cluster.settle().await.unwrap();
+        }
         let mut tally = Tally::default();
         for _ in 0..STEPS {
             match rng.below(100) {
-                0..65 => transfers(&cluster, &mut rng, &mut tally).await,
+                0..65 => transfers(&cluster, client, &mut rng, &mut tally).await,
                 65..75 => crash_one(&mut cluster, &mut rng).await,
                 75..88 => restart_one(&mut cluster, &mut rng).await,
                 88..94 => cluster
@@ -157,10 +203,9 @@ fn run(seed: u64) -> Tally {
         for (id, state) in &states {
             assert_eq!(state, first, "seed {seed}: {id} agrees");
         }
-        let read = cluster.read(total).await;
         assert_eq!(
-            read,
-            Some(ACCOUNTS * OPENING),
+            total(first),
+            ACCOUNTS * OPENING,
             "seed {seed}: no money made or lost"
         );
         cluster.shutdown().await.unwrap();
@@ -168,11 +213,20 @@ fn run(seed: u64) -> Tally {
     })
 }
 
-#[test]
-fn concurrent_transfers_neither_make_nor_lose_money() {
-    let tallies: Vec<Tally> = seeds().into_iter().map(run).collect();
+fn check(client: Client) {
+    let tallies: Vec<Tally> = seeds().into_iter().map(|seed| run(client, seed)).collect();
     let committed: u64 = tallies.iter().map(|tally| tally.committed).sum();
     let aborted: u64 = tallies.iter().map(|tally| tally.aborted).sum();
     assert!(committed > 0, "transfers commit: {tallies:?}");
     assert!(aborted > 0, "concurrent transfers conflict: {tallies:?}");
+}
+
+#[test]
+fn concurrent_transfers_neither_make_nor_lose_money() {
+    check(Client::OneShard);
+}
+
+#[test]
+fn concurrent_transfers_across_shards_neither_make_nor_lose_money() {
+    check(Client::Across);
 }

@@ -79,6 +79,12 @@ impl WriteBatch {
         &self.ops
     }
 
+    /// Whether it changes nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
     /// Whether every key it changes is in `span`.
     #[must_use]
     pub fn fits(&self, span: &Span) -> bool {
@@ -93,9 +99,6 @@ impl WriteBatch {
     /// Appends `count u32 | (op u8 | key | value?)*`: put 1 with a value,
     /// delete 2 without; keys and values length prefixed.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
-        if self.ops.is_empty() {
-            return Err(Error::EmptyBatch);
-        }
         let count = u32::try_from(self.ops.len()).map_err(|_| Error::BatchTooLarge)?;
         out.extend_from_slice(&count.to_le_bytes());
         for op in &self.ops {
