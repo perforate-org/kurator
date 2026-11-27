@@ -1,4 +1,4 @@
-//! `kurator`: run a replica, or make a node key. See [`kurator_node::args`].
+//! `kurator`: run a replica, make a node key, or run a client. See [`kurator_node::args`].
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -14,6 +14,10 @@ async fn main() -> ExitCode {
         Ok(Invocation::Run(settings)) => kurator_node::run(settings)
             .await
             .map(|()| None)
+            .map_err(|error| error.to_string()),
+        Ok(Invocation::Client(session)) => kurator_node::session::run(&session)
+            .await
+            .map(Some)
             .map_err(|error| error.to_string()),
         Ok(_) => Err("unsupported command".to_owned()),
         Err(usage) => Err(usage.to_string()),

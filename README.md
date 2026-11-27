@@ -104,7 +104,7 @@ $K run --id 3 --dir n3 --listen 127.0.0.1:7003 --peer $P1 --peer $P2
 
 ```text
 put <key> <value> | del <key> | get <key> | split <key> | shards
-status | members | add <id> <addr> <key> | promote <id> | remove <id> | quit
+status | members | add <id> <addr> <key> | promote <id> | remove <id> | collect | quit
 ```
 
 `split m` は `m` を含むシャードを `m` で分け、`m` 以降を新シャードにする。新シャードの
@@ -121,6 +121,20 @@ ID はメタシャードが割り当て、分割後の両半分を登録簿に�
 クライアントもノードと同じく鍵で認証する。ノードには信頼するクライアントの公開鍵を
 `--client <key>` で渡す(複数可)。クライアントが使えるのはクライアント用の経路だけで、
 Raft やメタシャードの呼び出しは断られる。
+
+```sh
+C=$($K key client)   # クライアントの鍵。各ノードを --client $C 付きで起動する
+$K client --dir client --peer $P1 put apple red put melon green
+$K client --dir client --peer $P1 get apple get melon
+```
+
+`kurator client` は並べた操作(`get <key>`・`put <key> <value>`・`del <key>`)を
+1 つのトランザクションとして実行する。シャードをまたぐときは二相コミットになる。
+`--peer` のノードからシャード地図を受け取り、各シャードのリーダーへ直接送る。
+`committed at <版>` なら書き込みは確定、`aborted` は競合なので再実行すればよい。
+
+シャード横断トランザクションの決定は、期限から 10 分経つとメタシャードのリーダーが
+1 分ごとに回収して忘れる。コンソールの `collect` で今すぐ回収もできる。
 
 開発の決まりと品質ゲートは [CLAUDE.md](CLAUDE.md) を参照。
 

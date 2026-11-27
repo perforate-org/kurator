@@ -1,0 +1,38 @@
+//! Forgetting old decisions: the node that leads the meta shard collects,
+//! now and then, the decisions on transactions across shards that no one
+//! can ask about any more.
+
+use std::time::Duration;
+
+use kurator_client::{Client, Collected, Collector};
+use kurator_consensus::{Replicated as _, Role};
+use kurator_net::{Quic, Store, Wall};
+use kurator_shard::ShardId;
+
+/// How often the node checks whether to collect.
+pub const EVERY: Duration = Duration::from_secs(60);
+
+/// How long a decision is kept past the deadline of its transaction. Past
+/// its deadline, whoever runs into a lock of the transaction resolves it
+/// at the primary; this leaves them that long to.
+pub const GRACE: Duration = Duration::from_secs(600);
+
+/// Collects the decisions past [`GRACE`] when this node leads the meta
+/// shard, so that one node collects at a time: how it came out, or `None`
+/// when another node collects.
+pub async fn sweep(store: &Store, quic: &Quic) -> Option<Collected> {
+    let meta = store.inbox().replica(ShardId::META)?;
+    if meta.role() != Role::Leader {
+        return None;
+    }
+    Some(collect(store, quic).await)
+}
+
+/// Collects the decisions past [`GRACE`] from every shard the cluster
+/// has, reaching them as a client through `quic`.
+pub async fn collect(store: &Store, quic: &Quic) -> Collected {
+    let peers = store.inbox().memberships().nodes();
+    // A collector starts no transaction, so its ids need no origin.
+    let client = Client::new(quic.clone(), Wall::default(), peers, 0);
+    Collector::new(&client).collect(GRACE).await
+}

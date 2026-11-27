@@ -199,3 +199,101 @@ fn a_node_that_holds_no_shard_says_so() {
     );
     assert!(console.quit().is_empty(), "nothing more");
 }
+
+/// The key `kurator key` prints for `dir`.
+fn key_of(dir: &Path) -> String {
+    let output = Command::new(KURATOR).arg("key").arg(dir).output().unwrap();
+    assert!(output.status.success(), "key succeeds");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Runs `kurator client` with `args`: whether it succeeded, and what it
+/// printed on stdout and stderr.
+fn client(args: &[&str]) -> (bool, String) {
+    let output = Command::new(KURATOR)
+        .arg("client")
+        .args(args)
+        .output()
+        .unwrap();
+    let mut shown = String::from_utf8(output.stdout).unwrap();
+    shown.push_str(&String::from_utf8(output.stderr).unwrap());
+    (output.status.success(), shown.trim().to_owned())
+}
+
+#[test]
+fn a_trusted_client_runs_a_transaction_across_shards() {
+    let (node_dir, client_dir, stranger_dir) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let node_key = key_of(node_dir.path());
+    let client_key = key_of(client_dir.path());
+    let mut console = Console::start(
+        &[
+            "--id",
+            "1",
+            "--listen",
+            "127.0.0.1:0",
+            "--client",
+            &client_key,
+            "--found",
+        ],
+        node_dir.path(),
+    );
+    let started = Instant::now();
+    while !console.ask("put a 0", 1).starts_with("ok at") {
+        assert!(started.elapsed() < Duration::from_secs(20), "no leader");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut split = console.ask("split m", 1);
+    while !split.starts_with("ok") {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no split: {split}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        split = console.ask("split m", 1);
+    }
+    // The meta shard and both halves, each with its one voter.
+    let members = console.ask("members", 6);
+    let addr = members
+        .lines()
+        .nth(1)
+        .and_then(|voter| voter.split_whitespace().nth(2))
+        .unwrap_or_else(|| panic!("an address: {members}"))
+        .to_owned();
+    let peer = format!("1={addr},{node_key}");
+    let dir = client_dir.path().to_str().unwrap();
+    let mut wrote = client(&[
+        "--dir", dir, "--peer", &peer, "put", "a", "1", "put", "z", "2",
+    ]);
+    while !wrote.1.starts_with("committed at") {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no commit: {wrote:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        wrote = client(&[
+            "--dir", dir, "--peer", &peer, "put", "a", "1", "put", "z", "2",
+        ]);
+    }
+    assert!(wrote.0, "succeeds");
+    let (read, shown) = client(&[
+        "--dir", dir, "--peer", &peer, "get", "a", "get", "z", "get", "q",
+    ]);
+    assert!(read, "reads: {shown}");
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines.get(..3),
+        Some(["a = 1", "z = 2", "q = (none)"].as_slice()),
+        "{shown}"
+    );
+    assert_eq!(console.ask("get z", 1), "2", "the node sees it");
+    assert_eq!(console.ask("collect", 1), "ok: forgotten", "collected");
+    let stranger = stranger_dir.path().to_str().unwrap();
+    let (refused, said) = client(&["--dir", stranger, "--peer", &peer, "get", "a"]);
+    assert!(!refused, "a stranger is not served");
+    assert_eq!(said, "kurator: no node answered", "and is told so");
+    assert!(console.quit().is_empty(), "nothing more");
+}
