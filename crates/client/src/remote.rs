@@ -208,6 +208,26 @@ impl Call {
 }
 
 impl Reply {
+    /// Where to ask instead, when this reply is not the answer: `Some`
+    /// with the leader the node named, if it named one, when the node
+    /// does not lead, dropped the command for a new leader, or holds no
+    /// replica of the shard; `None` when this is the answer.
+    #[must_use]
+    pub const fn redirect(&self) -> Option<Option<NodeId>> {
+        match self {
+            Self::NotLeader(leader) | Self::Discarded(leader) => Some(*leader),
+            Self::NoReplica => Some(None),
+            Self::Map { .. }
+            | Self::Begun { .. }
+            | Self::Value(_)
+            | Self::Entries(_)
+            | Self::Applied(_)
+            | Self::Misrouted(_)
+            | Self::Refused(_)
+            | Self::Failed(_) => None,
+        }
+    }
+
     /// Encodes the reply.
     ///
     /// # Errors

@@ -9,9 +9,10 @@
 
 use std::time::Duration;
 
+use kurator_client::{Collected, Collector, Coordinator, Transacted};
 use kurator_consensus::Transaction as _;
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_sim::{Cluster, Collector, Coordinator, Faults, Holdings, Outcome, Transacted};
+use kurator_sim::{Cluster, Faults, Holdings, Outcome};
 use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
@@ -33,17 +34,33 @@ async fn cluster(seed: u64) -> Cluster {
     cluster
 }
 
+/// Writes `value` to `a` and `z` in one transaction across both shards.
+async fn put_both(cluster: &Cluster, value: &str) -> Transacted {
+    let mut txn = Coordinator::new(cluster).begin();
+    for key in [b"a", b"z"] {
+        if txn.put(key, value).await.is_err() {
+            return Transacted::Rejected;
+        }
+    }
+    txn.commit().await
+}
+
+/// Reads `a` and writes `z` in one transaction across both shards.
+async fn read_a_write_z(cluster: &Cluster) -> Transacted {
+    let mut txn = Coordinator::new(cluster).begin();
+    if txn.get(b"a").await.is_err() || txn.put(b"z", "3").await.is_err() {
+        return Transacted::Rejected;
+    }
+    txn.commit().await
+}
+
 /// Starts a transaction that writes `a` and `z` and gives up on it as
 /// soon as it prepared its first part, on the first shard.
 async fn abandon(cluster: &Cluster) {
-    let abandoned = SimRuntime::timeout(
-        Duration::from_millis(1),
-        Coordinator::new(cluster).transact(|txn| {
-            txn.put(b"a", "2")?;
-            txn.put(b"z", "2")
-        }),
-    )
-    .await;
+    let mut txn = Coordinator::new(cluster).begin();
+    txn.put(b"a", "2").await.expect("a");
+    txn.put(b"z", "2").await.expect("z");
+    let abandoned = SimRuntime::timeout(Duration::from_millis(1), txn.commit()).await;
     assert!(abandoned.is_err(), "the coordinator gave up");
     SimRuntime::sleep(Duration::from_secs(1)).await;
     assert!(!cluster.unlocked(), "its first part stays prepared");
@@ -68,12 +85,7 @@ fn values(cluster: &Cluster) -> Vec<Values> {
 fn a_coordinator_tells_every_shard() {
     SimRuntime::with_seed(31).block_on(async {
         let cluster = cluster(31).await;
-        let moved = Coordinator::new(&cluster)
-            .transact(|txn| {
-                txn.put(b"a", "0")?;
-                txn.put(b"z", "2")
-            })
-            .await;
+        let moved = put_both(&cluster, "0").await;
         assert!(matches!(moved, Transacted::Committed(_)), "{moved:?}");
         assert!(cluster.unlocked(), "every shard was told");
         cluster.shutdown().await.expect("shutdown");
@@ -104,12 +116,7 @@ fn whoever_runs_into_a_lock_past_its_deadline_resolves_it() {
         abandon(&cluster).await;
         let write = || cluster.write(WriteBatch::new().put("a", "3"));
         assert_eq!(write().await, Outcome::Rejected, "held back");
-        let across = || {
-            Coordinator::new(&cluster).transact(|txn| {
-                let _a = txn.get(b"a")?;
-                txn.put(b"z", "3")
-            })
-        };
+        let across = || read_a_write_z(&cluster);
         assert_eq!(across().await, Transacted::Aborted, "held back");
         assert!(!cluster.unlocked(), "not before the deadline");
         SimRuntime::sleep(PAST_THE_DEADLINE).await;
@@ -154,18 +161,13 @@ fn decisions(cluster: &Cluster) -> usize {
 fn decisions_long_past_their_deadline_are_forgotten() {
     SimRuntime::with_seed(34).block_on(async {
         let mut cluster = cluster(34).await;
-        let moved = Coordinator::new(&cluster)
-            .transact(|txn| {
-                txn.put(b"a", "0")?;
-                txn.put(b"z", "2")
-            })
-            .await;
+        let moved = put_both(&cluster, "0").await;
         assert!(matches!(moved, Transacted::Committed(_)), "{moved:?}");
         abandon(&cluster).await;
         assert!(decisions(&cluster) > 0, "kept while it may be asked");
         assert_eq!(
             Collector::new(&cluster).collect(Duration::ZERO).await,
-            Outcome::Acked,
+            Collected::Forgotten,
             "nothing to forget yet"
         );
         assert!(decisions(&cluster) > 0, "still kept");
@@ -174,22 +176,17 @@ fn decisions_long_past_their_deadline_are_forgotten() {
             Collector::new(&cluster)
                 .collect(Duration::from_secs(1))
                 .await,
-            Outcome::Acked,
+            Collected::Forgotten,
             "collected"
         );
         assert!(cluster.unlocked(), "the lock left behind was resolved");
         cluster.settle().await.expect("settle");
         assert_eq!(decisions(&cluster), 0, "forgotten on every replica");
-        let committed = (Some(b"0".to_vec()), Some(b"2".to_vec()));
+        let committed = (Some(b"0".to_vec()), Some(b"0".to_vec()));
         for value in values(&cluster) {
             assert_eq!(value, committed, "the commit stands, the abandoned one not");
         }
-        let again = Coordinator::new(&cluster)
-            .transact(|txn| {
-                txn.put(b"a", "4")?;
-                txn.put(b"z", "4")
-            })
-            .await;
+        let again = put_both(&cluster, "4").await;
         assert!(matches!(again, Transacted::Committed(_)), "{again:?}");
         cluster.shutdown().await.expect("shutdown");
     });

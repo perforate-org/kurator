@@ -17,6 +17,7 @@ kurator-consensus.workspace = true
 kurator-crypto.workspace = true
 kurator-raft.workspace = true
 kurator-shard.workspace = true
+kurator-storage.workspace = true
 openraft-rt-tokio.workspace = true
 quinn.workspace = true
 rustls.workspace = true
@@ -24,7 +25,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-kurator-storage.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

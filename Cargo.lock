@@ -745,7 +745,9 @@ dependencies = [
  "kurator-meta",
  "kurator-shard",
  "kurator-storage",
+ "parking_lot",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -863,6 +865,7 @@ name = "kurator-sim"
 version = "0.0.1"
 dependencies = [
  "futures-util",
+ "kurator-client",
  "kurator-codec",
  "kurator-consensus",
  "kurator-crypto",
