@@ -23,19 +23,17 @@ pub const EVERY: Duration = Duration::from_secs(2);
 ///
 /// When the store holds no replica of the meta shard, or a report fails.
 pub async fn heartbeat(store: &Store, ask: &Quic) -> Result<(), Unreported> {
-    let replicas = store.replicas();
-    let meta = replicas
-        .iter()
-        .find(|replica| replica.shard_id() == ShardId::META && replica.is_initialized())
+    let meta = store
+        .inbox()
+        .replica(ShardId::META)
         .ok_or(Unreported::NoMeta)?;
-    let meta = Meta::new(meta, ask);
-    let leading = replicas.iter().filter(|replica| {
-        replica.shard_id() != ShardId::META
-            && replica.is_initialized()
-            && replica.status().role() == Role::Leader
+    let meta = Meta::new(&meta, ask);
+    // A replica that holds no state yet has no membership to lead.
+    let leading = store.replicas().into_iter().filter(|replica| {
+        replica.shard_id() != ShardId::META && replica.status().role() == Role::Leader
     });
     for replica in leading {
-        let _reported = meta.report(&Placement::of(replica)).await?;
+        let _reported = meta.report(&Placement::of(&replica)).await?;
     }
     Ok(())
 }

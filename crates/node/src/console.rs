@@ -175,7 +175,7 @@ fn holder(store: &Store, key: &str) -> Option<Arc<Replica>> {
 
 /// This node's replica of the meta shard.
 fn meta(store: &Store) -> Option<Arc<Replica>> {
-    held(store).find(|replica| replica.shard_id() == ShardId::META)
+    store.inbox().replica(ShardId::META)
 }
 
 fn no_meta() -> String {
