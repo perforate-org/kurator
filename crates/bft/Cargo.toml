@@ -12,15 +12,18 @@ categories.workspace = true
 
 [dependencies]
 blake3.workspace = true
+futures-channel.workspace = true
 kurator-codec.workspace = true
 kurator-consensus.workspace = true
 kurator-crypto.workspace = true
 kurator-shard.workspace = true
 kurator-storage.workspace = true
 kurator-wal.workspace = true
+parking_lot.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 

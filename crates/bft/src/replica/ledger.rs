@@ -4,7 +4,7 @@ use kurator_shard::{Applied, ShardState};
 use kurator_storage::{Encoded, Version};
 
 use crate::block::Block;
-use crate::journal::Recovered;
+use crate::step::Recovered;
 
 /// What became of one command of a decided block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +85,7 @@ mod tests {
 
     use super::{Ledger, Settled};
     use crate::block::Block;
-    use crate::journal::Recovered;
-    use crate::step::Record;
+    use crate::step::{Record, Recovered};
     use crate::view::View;
     use crate::vote::Justify;
 

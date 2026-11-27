@@ -1,6 +1,8 @@
 //! What a replica asks its driver to do after each event, in an order the
 //! types enforce: make the safety state durable, then send.
 
+use std::collections::BTreeMap;
+
 use crate::block::Block;
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -46,7 +48,7 @@ pub enum To {
 
 /// A message to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Outgoing {
+pub(crate) struct Outgoing {
     to: To,
     message: Message,
 }
@@ -57,14 +59,14 @@ impl Outgoing {
     }
 
     /// Where it goes.
-    #[must_use]
-    pub const fn to(&self) -> To {
+    #[cfg(test)]
+    pub(crate) const fn to(&self) -> To {
         self.to
     }
 
     /// What it says.
-    #[must_use]
-    pub const fn message(&self) -> &Message {
+    #[cfg(test)]
+    pub(crate) const fn message(&self) -> &Message {
         &self.message
     }
 }
@@ -99,6 +101,19 @@ impl Timer {
     }
 }
 
+/// What carries out a step's [`Effects`]: the node a replica runs on.
+pub trait Act {
+    /// Applies `block`, the next decided block. Every honest replica
+    /// decides the same blocks in the same order.
+    fn decide(&mut self, block: &Block);
+
+    /// Sends `message` where `to` says.
+    fn send(&mut self, to: To, message: &Message);
+
+    /// Arms `timer`, replacing any armed before.
+    fn wait(&mut self, timer: Timer);
+}
+
 /// What a replica asks of its driver after an event, once its
 /// [`Safety`] is durable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -129,22 +144,35 @@ impl Effects {
         let _first: &mut Rejection = self.rejected.get_or_insert(rejection);
     }
 
+    /// Has `act` carry the effects out: apply the decided blocks, in
+    /// order, then send the messages, in order, then arm the timer.
+    pub fn carry_out(&self, act: &mut impl Act) {
+        for block in &self.decided {
+            act.decide(block);
+        }
+        for outgoing in &self.messages {
+            act.send(outgoing.to, &outgoing.message);
+        }
+        if let Some(timer) = self.timer {
+            act.wait(timer);
+        }
+    }
+
     /// The messages to send, in order.
-    #[must_use]
-    pub fn messages(&self) -> &[Outgoing] {
+    #[cfg(test)]
+    pub(crate) fn messages(&self) -> &[Outgoing] {
         &self.messages
     }
 
-    /// The blocks decided, in the order to apply them. Every honest
-    /// replica decides the same blocks in the same order.
-    #[must_use]
-    pub fn decided(&self) -> &[Block] {
+    /// The blocks decided, in the order to apply them.
+    #[cfg(test)]
+    pub(crate) fn decided(&self) -> &[Block] {
         &self.decided
     }
 
     /// The timer to arm, replacing any armed before.
-    #[must_use]
-    pub const fn timer(&self) -> Option<Timer> {
+    #[cfg(test)]
+    pub(crate) const fn timer(&self) -> Option<Timer> {
         self.timer
     }
 
@@ -164,6 +192,58 @@ pub(crate) enum Record {
     Safety(Safety),
     /// The last block it decided, and its view.
     Committed(BlockId, View),
+}
+
+/// What a replica remembers from before it stopped: enough to rejoin
+/// without voting twice in a view, voting against its lock or deciding a
+/// block again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovered {
+    safety: Safety,
+    blocks: BTreeMap<BlockId, Block>,
+    committed: (BlockId, View),
+}
+
+impl Default for Recovered {
+    /// A replica that never ran.
+    fn default() -> Self {
+        Self {
+            safety: Safety::new(View::GENESIS, Justify::Genesis),
+            blocks: BTreeMap::new(),
+            committed: (BlockId::GENESIS, View::GENESIS),
+        }
+    }
+}
+
+impl Recovered {
+    /// Takes in `record`, written after every record before it.
+    pub(crate) fn note(&mut self, record: Record) {
+        match record {
+            Record::Block(block) => {
+                let _stored: &mut Block = self.blocks.entry(block.id()).or_insert(block);
+            }
+            Record::Safety(safety) => self.safety = safety,
+            Record::Committed(block, view) => self.committed = (block, view),
+        }
+    }
+
+    /// The blocks the replica decided, oldest first, so that a state
+    /// machine can apply them again.
+    #[must_use]
+    pub fn decided(&self) -> Vec<&Block> {
+        let mut chain = Vec::new();
+        let mut id = self.committed.0;
+        while let Some(block) = self.blocks.get(&id) {
+            chain.push(block);
+            id = block.parent();
+        }
+        chain.reverse();
+        chain
+    }
+
+    pub(crate) fn into_parts(self) -> (Safety, BTreeMap<BlockId, Block>, (BlockId, View)) {
+        (self.safety, self.blocks, self.committed)
+    }
 }
 
 /// The outcome of one event.

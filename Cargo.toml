@@ -34,6 +34,7 @@ thiserror = "2.0.17"
 criterion = "0.8"
 tempfile = "3.20"
 proptest = "1.7"
+futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 openraft = { version = "0.10.1", default-features = false }
 openraft-rt-sim = "0.10.1"
