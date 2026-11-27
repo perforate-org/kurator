@@ -16,6 +16,7 @@ categories = ["database-implementations"]
 kurator-crypto = { path = "crates/crypto" }
 kurator-wal = { path = "crates/wal" }
 kurator-codec = { path = "crates/codec" }
+kurator-metrics = { path = "crates/metrics" }
 kurator-storage = { path = "crates/storage" }
 kurator-shard = { path = "crates/shard" }
 kurator-consensus = { path = "crates/consensus" }

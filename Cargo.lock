@@ -795,6 +795,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-metrics"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "kurator-net"
 version = "0.0.1"
 dependencies = [
@@ -840,6 +847,7 @@ dependencies = [
  "kurator-codec",
  "kurator-consensus",
  "kurator-crypto",
+ "kurator-metrics",
  "kurator-shard",
  "kurator-storage",
  "kurator-wal",
@@ -901,6 +909,7 @@ dependencies = [
  "blake3",
  "crc32c",
  "kurator-crypto",
+ "kurator-metrics",
  "proptest",
  "tempfile",
  "thiserror",

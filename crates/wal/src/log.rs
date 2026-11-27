@@ -3,11 +3,14 @@
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::error::{Corruption, Error, InvalidFrame, Result};
 use crate::frame::{self, Decoded};
 use crate::lsn::{Lsn, LsnRange};
 use kurator_crypto::{SigningKey, VerifyingKey};
+use kurator_metrics::Histogram;
 
 use crate::seal::{Digest, Head, Integrity, Opened, Seal, SealDamage};
 use crate::segment::{self, Format, Header, Segment, sync_dir};
@@ -255,6 +258,8 @@ pub struct Wal {
     chain: Chain,
     buffer: Vec<u8>,
     health: Health,
+    /// How long each `fdatasync` took.
+    syncs: Arc<Histogram>,
 }
 
 /// Where a segment is in the log.
@@ -415,6 +420,7 @@ impl Wal {
             chain,
             buffer: Vec::new(),
             health: Health::Ready,
+            syncs: Arc::default(),
         };
         Ok((wal, report))
     }
@@ -514,6 +520,12 @@ impl Wal {
         &self.dir
     }
 
+    /// How long each `fdatasync` of an append took, since the log opened.
+    #[must_use]
+    pub fn syncs(&self) -> Arc<Histogram> {
+        Arc::clone(&self.syncs)
+    }
+
     fn write_buffer(&mut self) -> std::io::Result<()> {
         if self.active_len >= self.segment_size {
             // The new segment's anchor is the head before this batch.
@@ -524,7 +536,10 @@ impl Wal {
             self.active_len = len_u64(format.header_len());
         }
         self.active.write_all(&self.buffer)?;
-        self.active.sync_data()
+        let started = Instant::now();
+        let synced = self.active.sync_data();
+        self.syncs.record(started.elapsed());
+        synced
     }
 }
 

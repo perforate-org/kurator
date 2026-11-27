@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kurator_crypto::SigningKey;
+use kurator_metrics::Histogram;
 use kurator_wal::{Integrity, Lsn, Start, Wal};
 use openraft::storage::{IOFlushed, RaftLogStorage};
 use openraft::{LogState, OptionalSend, RaftLogReader};
@@ -91,6 +92,12 @@ impl LogStore {
         Ok(Self {
             log: Arc::new(Mutex::new(log)),
         })
+    }
+
+    /// How long each `fdatasync` of the log took, since it opened.
+    #[must_use]
+    pub fn syncs(&self) -> Arc<Histogram> {
+        self.log.lock().wal.syncs()
     }
 }
 

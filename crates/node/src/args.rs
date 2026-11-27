@@ -2,13 +2,15 @@
 //!
 //! ```text
 //! kurator key <dir>
-//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--split-above <bytes>] [--found | --restore <backup>]
+//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
 //! kurator client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
 //! touch. A node splits a shard it leads once the shard's state takes more
 //! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
+//!
+//! `--metrics` serves the node's metrics over HTTP, at `/metrics`.
 //!
 //! `--restore` founds a new cluster from a backup the console's `backup`
 //! wrote: the node holds every shard of it, as their only voter, and
@@ -84,6 +86,7 @@ pub struct Settings {
     peers: Vec<(NodeId, Peer)>,
     clients: Vec<VerifyingKey>,
     ceiling: Ceiling,
+    metrics: Option<SocketAddr>,
     start: Start,
 }
 
@@ -136,6 +139,12 @@ impl Settings {
     #[must_use]
     pub const fn ceiling(&self) -> Ceiling {
         self.ceiling
+    }
+
+    /// Where it serves its metrics, if anywhere.
+    #[must_use]
+    pub const fn metrics(&self) -> Option<SocketAddr> {
+        self.metrics
     }
 
     /// How it comes into its cluster.
@@ -201,6 +210,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
     let mut peers = Vec::new();
     let mut clients = Vec::new();
     let mut ceiling = Ceiling::DEFAULT;
+    let mut metrics = None;
     let mut start = Start::Wait;
     while let Some(arg) = args.next() {
         let mut value = |option: &'static str| args.next().ok_or(UsageError::Missing(option));
@@ -213,6 +223,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
             "--split-above" => {
                 ceiling = read("--split-above", &value("--split-above")?, bytes)?;
             }
+            "--metrics" => metrics = Some(read("--metrics", &value("--metrics")?, addr)?),
             "--found" => start = Start::Found,
             "--restore" => start = Start::Restore(PathBuf::from(value("--restore")?)),
             _ => return Err(UsageError::Option(arg)),
@@ -225,6 +236,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
         peers,
         clients,
         ceiling,
+        metrics,
         start,
     })
 }
@@ -332,7 +344,7 @@ mod tests {
         let peer_key = NodeSecret::from_seed([2; 32]).public_key(KeyPurpose::Transport);
         let client_key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
         let line = format!(
-            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --split-above 4096 --found"
+            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --split-above 4096 --metrics 127.0.0.1:9100 --found"
         );
         let Ok(Invocation::Run(settings)) = parse(args(&line)) else {
             panic!("parses");
@@ -349,6 +361,11 @@ mod tests {
         assert_eq!(peer.key(), &peer_key, "peer key");
         assert_eq!(settings.clients(), [client_key], "client");
         assert_eq!(settings.ceiling().bytes().get(), 4096, "ceiling");
+        assert_eq!(
+            settings.metrics().map(|addr| addr.port()),
+            Some(9100),
+            "metrics"
+        );
         let Ok(Invocation::Run(waiting)) = parse(args("run --id 4 --dir d --listen [::1]:1"))
         else {
             panic!("parses");
@@ -367,6 +384,7 @@ mod tests {
         assert!(waiting.peers().is_empty(), "no peers");
         assert!(waiting.clients().is_empty(), "no clients");
         assert_eq!(waiting.ceiling(), Ceiling::DEFAULT, "the default ceiling");
+        assert_eq!(waiting.metrics(), None, "no metrics");
     }
 
     #[test]

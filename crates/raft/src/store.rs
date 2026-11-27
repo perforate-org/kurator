@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+use kurator_metrics::Exposition;
 use kurator_shard::{Halves, ShardId};
 use openraft::async_runtime::Mutex as _;
 use openraft::{AsyncRuntime, RaftTypeConfig};
@@ -186,6 +187,21 @@ impl<C: Config, T: Transport<C>> Store<C, T> {
                     (state, applied)
                 }),
         )
+    }
+
+    /// What every replica the node holds a state of is doing, as a page in
+    /// the Prometheus text format: by shard, whether it leads, its term,
+    /// its log positions, the shard's size, and how long syncs of its log
+    /// and its commits took.
+    #[must_use]
+    pub fn metrics(&self) -> String {
+        let mut out = Exposition::default();
+        for replica in self.replicas() {
+            if replica.is_initialized() {
+                replica.expose(&mut out);
+            }
+        }
+        out.into_text()
     }
 
     /// The id of the node.
