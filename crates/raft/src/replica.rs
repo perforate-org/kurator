@@ -6,7 +6,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Instant;
 
-use kurator_consensus::{Members, Replicated, Role, Transaction};
+use kurator_consensus::{Duty, Members, Reads, Replicated, Role, Route, Transaction};
 use kurator_metrics::{Exposition, Histogram, Histograms, Label, Values};
 use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
 use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
@@ -526,12 +526,25 @@ impl<C: Config> Replicated for Replica<C> {
         self.state.read(|state| state.shard().clone())
     }
 
-    fn role(&self) -> Role {
-        self.status().role()
+    const READS: Reads = Reads::Linearizable;
+
+    /// Here when this replica leads, else the leader it knows of.
+    fn route(&self) -> Route {
+        let status = self.status();
+        match (status.role(), status.leader()) {
+            (Role::Leader, _) => Route::Here,
+            (_, Some(leader)) => Route::Leader(leader),
+            (_, None) => Route::Unknown,
+        }
     }
 
-    fn leader(&self) -> Option<NodeId> {
-        self.status().leader()
+    /// Mine while this replica leads.
+    fn duty(&self) -> Duty {
+        if self.status().role() == Role::Leader {
+            Duty::Mine
+        } else {
+            Duty::Others
+        }
     }
 
     fn members(&self) -> Members {

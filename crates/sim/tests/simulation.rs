@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use kurator_consensus::{Duty, Route};
 use kurator_raft::NodeId;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_shard::{Shard, ShardId, ShardMap, ShardState};
@@ -285,6 +286,29 @@ fn the_same_seed_replays_the_same_run() {
     let second = run(seed);
     assert_eq!(first.trace, second.trace, "same steps and outcomes");
     assert_eq!(first, second, "same end state");
+}
+
+#[test]
+fn writes_and_chores_go_to_the_leader() {
+    SimRuntime::with_seed(1).block_on(async {
+        let mut cluster = Cluster::start(1, 3, Faults::default()).await.unwrap();
+        cluster.settle().await.unwrap();
+        let leader = cluster.leader().unwrap();
+        let routes = cluster.routes();
+        assert_eq!(routes.len(), 3, "every replica");
+        for (id, route, duty) in routes {
+            if id == leader {
+                assert_eq!((route, duty), (Route::Here, Duty::Mine), "the leader");
+            } else {
+                assert_eq!(
+                    (route, duty),
+                    (Route::Leader(leader), Duty::Others),
+                    "follower {id}"
+                );
+            }
+        }
+        cluster.shutdown().await.unwrap();
+    });
 }
 
 #[test]

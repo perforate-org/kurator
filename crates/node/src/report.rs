@@ -1,5 +1,6 @@
-//! Placement reports: every shard a node leads, told to the meta shard's
-//! leader, wherever it is, as a heartbeat.
+//! Placement reports: every shard whose chores are a node's [`Duty`] (the
+//! shards it leads, under Raft), told to the meta shard wherever writes to
+//! it go, as a heartbeat.
 //!
 //! The registry keeps a report only when it is newer than what it records,
 //! so reporting the same placement again changes nothing, and a report
@@ -7,15 +8,16 @@
 
 use std::time::Duration;
 
-use kurator_consensus::{Replicated as _, Role};
+use kurator_consensus::{Duty, Replicated as _};
 use kurator_meta::{Meta, MetaError, Placement};
 use kurator_net::{Quic, Store};
 use kurator_shard::ShardId;
 
-/// How often a node reports the shards it leads.
+/// How often a node reports the shards whose chores are its own.
 pub const EVERY: Duration = Duration::from_secs(2);
 
-/// Reports every shard but the meta shard that a replica of `store` leads,
+/// Reports every shard but the meta shard whose chores are the [`Duty`] of
+/// a replica of `store`,
 /// through the store's replica of the meta shard and `ask`. The first
 /// failure ends the beat.
 ///
@@ -32,7 +34,7 @@ pub async fn heartbeat(store: &Store, ask: &Quic) -> Result<(), Unreported> {
     let leading = store
         .replicas()
         .into_iter()
-        .filter(|replica| replica.shard_id() != ShardId::META && replica.role() == Role::Leader);
+        .filter(|replica| replica.shard_id() != ShardId::META && replica.duty() == Duty::Mine);
     for replica in leading {
         let _reported = meta.report(&Placement::of(&replica)).await?;
     }

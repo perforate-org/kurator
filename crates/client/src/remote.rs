@@ -476,7 +476,7 @@ mod tests {
     use std::ops::Bound;
 
     use futures_util::FutureExt as _;
-    use kurator_consensus::{Members, NodeId, Peer, Replicated, Role, Transaction};
+    use kurator_consensus::{Duty, Members, NodeId, Peer, Reads, Replicated, Route, Transaction};
     use kurator_crypto::{Algorithm, SigningKey};
     use kurator_meta::Registry;
     use kurator_shard::{Epoch, Shard, ShardId};
@@ -492,7 +492,7 @@ mod tests {
     #[derive(Debug)]
     struct Fake {
         state: Mutex<KvState>,
-        role: Role,
+        route: Route,
     }
 
     /// No transactions: a client builds its own.
@@ -527,20 +527,20 @@ mod tests {
     }
 
     impl Fake {
-        fn new(role: Role) -> Self {
+        fn new(route: Route) -> Self {
             Self {
                 state: Mutex::new(KvState::default()),
-                role,
+                route,
             }
         }
 
         fn leads(&self) -> kurator_consensus::Result<()> {
-            if self.role == Role::Leader {
-                Ok(())
-            } else {
-                Err(kurator_consensus::Error::NotLeader {
-                    leader: Some(NodeId::new(2)),
-                })
+            match self.route {
+                Route::Here => Ok(()),
+                Route::Leader(leader) => Err(kurator_consensus::Error::NotLeader {
+                    leader: Some(leader),
+                }),
+                Route::Unknown | _ => Err(kurator_consensus::Error::NotLeader { leader: None }),
             }
         }
     }
@@ -556,12 +556,14 @@ mod tests {
             left()
         }
 
-        fn role(&self) -> Role {
-            self.role
+        const READS: Reads = Reads::Linearizable;
+
+        fn route(&self) -> Route {
+            self.route
         }
 
-        fn leader(&self) -> Option<NodeId> {
-            None
+        fn duty(&self) -> Duty {
+            Duty::Others
         }
 
         fn members(&self) -> Members {
@@ -603,7 +605,7 @@ mod tests {
 
     #[test]
     fn a_leader_writes_and_reads_at_the_version_asked() {
-        let replica = Fake::new(Role::Leader);
+        let replica = Fake::new(Route::Here);
         assert_eq!(
             ask(&replica, put("a", "1")),
             Reply::Applied(Outcome::Committed(Version::new(1))),
@@ -657,7 +659,7 @@ mod tests {
 
     #[test]
     fn what_the_shard_does_not_hold_is_misrouted() {
-        let replica = Fake::new(Role::Leader);
+        let replica = Fake::new(Route::Here);
         let get = Call::Get {
             at: Version::ZERO,
             key: b"x".to_vec(),
@@ -677,7 +679,7 @@ mod tests {
 
     #[test]
     fn a_follower_names_the_leader() {
-        let replica = Fake::new(Role::Follower);
+        let replica = Fake::new(Route::Leader(NodeId::new(2)));
         for call in [Call::Begin, put("a", "1")] {
             assert_eq!(
                 ask(&replica, call),

@@ -393,7 +393,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use kurator_consensus::Replicated as _;
+    use kurator_consensus::{Replicated as _, Route};
     use kurator_shard::{Epoch, Shard, ShardId, ShardState, Split};
     use openraft::AsyncRuntime as _;
     use openraft::raft::VoteRequest;
@@ -505,7 +505,7 @@ mod tests {
                 planted.shard()
             );
             assert_eq!(planted.node(), NodeId::new(1), "this node");
-            assert_eq!(planted.leader(), None, "no leader yet");
+            assert_eq!(planted.route(), Route::Unknown, "no leader yet");
             store.shutdown().await.unwrap();
         });
     }
