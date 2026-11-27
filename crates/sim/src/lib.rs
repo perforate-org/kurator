@@ -38,7 +38,7 @@ mod holdings;
 mod network;
 mod rng;
 
-pub use cluster::{Across, Cluster, Collector, Coordinator, Outcome, SimError, Transacted};
+pub use cluster::{Cluster, Outcome, SimError};
 pub use holdings::Holdings;
 pub use network::{Endpoint, Faults, Garbled, Network, Wire};
 pub use rng::Rng;

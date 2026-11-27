@@ -16,7 +16,9 @@
 //!   reach the meta shard's leader. A third channel carries client
 //!   requests ([`kurator_client::Request`]): the shard map, and versioned
 //!   reads and writes on a replica this node holds. [`Quic`] implements
-//!   [`kurator_client::Reach`].
+//!   [`kurator_client::Reach`], and [`Wall`] implements
+//!   [`kurator_client::Time`], so a [`kurator_client::Client`] runs over
+//!   them.
 //! - **Mutual authentication by transport key.** TLS 1.3 with raw public
 //!   keys (RFC 7250), no certificates, signed with the key's own algorithm
 //!   (Ed25519 today), and a post-quantum key exchange only
@@ -58,9 +60,11 @@ mod connection;
 mod endpoint;
 mod roster;
 mod tls;
+mod wall;
 
 pub use connection::{Quic, QuicLink};
 pub use endpoint::{Endpoint, NetError, Server};
+pub use wall::Wall;
 
 kurator_raft::declare_config!(
     /// Replicas on Tokio, as the QUIC transport runs them.

@@ -4,48 +4,65 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use kurator_raft::Error;
-use kurator_shard::{Shard, ShardId};
-use kurator_storage::{Abort, Collect, Deadline};
+use kurator_shard::ShardId;
+use kurator_storage::{Abort, Collect, Command, Deadline, Outcome};
 
-use super::{Cluster, Lock, Outcome, now};
+use crate::remote::{Call, Reply};
+use crate::resolve::Lock;
+use crate::shards::Shards;
 
 /// How often a fence is tried on one shard, resolving what holds it back
 /// in between.
 const FENCE_TRIES: u32 = 8;
 
-/// The client as the collector of decisions no one can ask about any
-/// more.
-#[derive(Debug, Clone, Copy)]
-pub struct Collector<'cluster> {
-    cluster: &'cluster Cluster,
+/// How a collection came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Collected {
+    /// Every shard forgot the decisions past the horizon.
+    Forgotten,
+    /// A shard did not answer, or stayed held: try again later.
+    Unfinished,
 }
 
-impl<'cluster> Collector<'cluster> {
-    /// A collector on `cluster`.
+/// The client as the collector of decisions no one can ask about any
+/// more.
+#[derive(Debug)]
+pub struct Collector<'shards, S> {
+    shards: &'shards S,
+}
+
+impl<S> Clone for Collector<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> Copy for Collector<'_, S> {}
+
+impl<'shards, S: Shards> Collector<'shards, S> {
+    /// A collector on `shards`.
     #[must_use]
-    pub const fn new(cluster: &'cluster Cluster) -> Self {
-        Self { cluster }
+    pub const fn new(shards: &'shards S) -> Self {
+        Self { shards }
     }
 
     /// Forgets the decisions on the transactions whose deadline passed
     /// more than `grace` ago. Every shard is fenced first, the ones splits
     /// make meanwhile among them, resolving the transactions they hold
     /// prepared from before the fence; only then does any shard forget.
-    /// `Acked` once every shard forgot, `Unknown` when one did not answer
-    /// or stayed held.
-    pub async fn collect(self, grace: Duration) -> Outcome {
+    pub async fn collect(self, grace: Duration) -> Collected {
         let grace = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
-        let horizon = Deadline::new(now().millis().saturating_sub(grace));
+        let horizon = Deadline::new(self.shards.now().millis().saturating_sub(grace));
         let Some(fenced) = self.fence_all(horizon).await else {
-            return Outcome::Unknown;
+            return Collected::Unfinished;
         };
         for shard in fenced {
             if self.step(shard, Collect::Forget(horizon)).await.is_none() {
-                return Outcome::Unknown;
+                return Collected::Unfinished;
             }
         }
-        Outcome::Acked
+        Collected::Forgotten
     }
 
     /// Fences every shard at `horizon`, until the map shows none that is
@@ -55,12 +72,11 @@ impl<'cluster> Collector<'cluster> {
     async fn fence_all(self, horizon: Deadline) -> Option<BTreeSet<ShardId>> {
         let mut fenced = BTreeSet::new();
         loop {
-            self.cluster.refresh().await;
             let unfenced: Vec<ShardId> = self
-                .cluster
-                .shards()
-                .iter()
-                .map(Shard::id)
+                .shards
+                .refresh()
+                .await
+                .into_iter()
                 .filter(|shard| !fenced.contains(shard))
                 .collect();
             if unfenced.is_empty() {
@@ -88,8 +104,9 @@ impl<'cluster> Collector<'cluster> {
             else {
                 return None;
             };
-            let lock = Lock::new(by, primary, deadline);
-            self.cluster.resolve_lock(shard, lock).await;
+            Lock::new(by, primary, deadline)
+                .resolve(self.shards, shard)
+                .await;
         }
         None
     }
@@ -97,14 +114,17 @@ impl<'cluster> Collector<'cluster> {
     /// Takes `step` on `shard`'s leader: whether it applied, or why not;
     /// `None` when no leader answered.
     async fn step(self, shard: ShardId, step: Collect) -> Option<Result<(), Abort>> {
-        self.cluster
-            .on_leader(shard, |replica| async move {
-                match replica.collect(step).await {
-                    Ok(_) => Ok(Ok(())),
-                    Err(Error::Storage(kurator_storage::Error::Aborted(abort))) => Ok(Err(abort)),
-                    Err(error) => Err(error),
-                }
-            })
-            .await
+        let reply = self
+            .shards
+            .call(shard, Call::Propose(Command::Collect(step)))
+            .await?;
+        let Reply::Applied(outcome) = reply else {
+            return None;
+        };
+        match outcome {
+            Outcome::Committed(_) | Outcome::Prepared(_) => Some(Ok(())),
+            Outcome::Aborted(abort) => Some(Err(abort)),
+            _ => None,
+        }
     }
 }

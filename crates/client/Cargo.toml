@@ -16,6 +16,8 @@ kurator-consensus.workspace = true
 kurator-meta.workspace = true
 kurator-shard.workspace = true
 kurator-storage.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

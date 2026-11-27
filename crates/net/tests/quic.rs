@@ -11,11 +11,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_client::{Call as ClientCall, Reach as _, Reply, Request as ClientRequest};
+use kurator_client::{
+    Call as ClientCall, Client, Collected, Collector, Coordinator, Reach as _, Reply,
+    Request as ClientRequest, Transacted,
+};
 use kurator_consensus::Replicated as _;
 use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
 use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Registry, Reported};
-use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio};
+use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio, Wall};
 use kurator_raft::openraft::raft::VoteRequest;
 use kurator_raft::openraft::{self, SnapshotPolicy};
 use kurator_raft::{
@@ -478,6 +481,28 @@ async fn client_requests() {
         on_leader(&client, &peers, first, &get(Version::ZERO)).await,
         Reply::Value(None),
         "before it"
+    );
+
+    // The client routes a transaction in two phases and collects its
+    // decision.
+    let routed = Client::new(client.clone(), Wall::default(), peers.clone(), 1);
+    assert!(routed.learn().await, "learned the shards");
+    let mut txn = Coordinator::new(&routed).begin();
+    assert_eq!(txn.get(b"k").await.unwrap(), Some(b"v".to_vec()), "read");
+    txn.put(b"k", "w").await.unwrap();
+    txn.put(b"l", "x").await.unwrap();
+    let Transacted::Committed(moved) = txn.commit().await else {
+        panic!("the transaction did not commit");
+    };
+    assert_eq!(
+        on_leader(&client, &peers, first, &get(moved)).await,
+        Reply::Value(Some(b"w".to_vec())),
+        "its write"
+    );
+    assert_eq!(
+        Collector::new(&routed).collect(Duration::ZERO).await,
+        Collected::Forgotten,
+        "collected"
     );
 
     // A client may not take part in replication.

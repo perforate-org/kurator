@@ -11,11 +11,12 @@ use std::collections::BTreeSet;
 
 use std::ops::Bound::Unbounded;
 
+use kurator_client::Transacted;
 use kurator_consensus::Transaction as _;
 use kurator_raft::NodeId;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_shard::ShardId;
-use kurator_sim::{Cluster, Faults, Holdings, Outcome, Transacted};
+use kurator_sim::{Cluster, Faults, Holdings, Outcome};
 use kurator_storage::{Version, WriteBatch};
 use openraft_rt_sim::SimRuntime;
 

@@ -66,12 +66,25 @@ impl Draft {
     ///
     /// When `state` cannot read the read version.
     pub fn get(&mut self, state: &KvState, key: &[u8]) -> Result<Option<Vec<u8>>, Unreadable> {
-        if let Some(written) = self.writes.get(key) {
-            return Ok(written.clone());
+        if let Some(written) = self.written(key) {
+            return Ok(written.map(<[u8]>::to_vec));
         }
         let value = state.view(self.read_at)?.get(key).map(<[u8]>::to_vec);
-        self.reads.add_key(key);
+        self.note_read(key);
         Ok(value)
+    }
+
+    /// The transaction's own write of `key`, if it made one: `Some(None)`
+    /// when it removes the key. A read of a key it wrote needs no state.
+    #[must_use]
+    pub fn written(&self, key: &[u8]) -> Option<Option<&[u8]>> {
+        self.writes.get(key).map(Option::as_deref)
+    }
+
+    /// Notes that the transaction read `key` at its read version, from a
+    /// state it does not hold: a client reads a shard remotely.
+    pub fn note_read(&mut self, key: &[u8]) {
+        self.reads.add_key(key);
     }
 
     /// The entries between `start` and `end` in key order, with the
@@ -204,6 +217,19 @@ mod tests {
         assert_eq!(transaction.reads().keys().len(), 1, "own writes not read");
         assert_eq!(transaction.reads().ranges().len(), 2, "ranges");
         assert_eq!(transaction.writes().ops().len(), 3, "writes");
+    }
+
+    #[test]
+    fn a_read_made_elsewhere_is_noted() {
+        let mut draft = Draft::new(Version::new(3));
+        draft.put("b", "9");
+        draft.delete("c");
+        assert_eq!(draft.written(b"a"), None, "not written");
+        assert_eq!(draft.written(b"b"), Some(Some(b"9".as_slice())), "put");
+        assert_eq!(draft.written(b"c"), Some(None), "deleted");
+        draft.note_read(b"a");
+        let transaction = draft.into_transaction().unwrap();
+        assert_eq!(transaction.reads().keys().len(), 1, "the read noted");
     }
 
     #[test]

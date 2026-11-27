@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
 use kurator_consensus::{Replicated as _, Transaction as _};
 use kurator_crypto::NodeSecret;
 use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
@@ -17,21 +18,13 @@ use kurator_raft::{
     Error, Member, Membership, NodeId, Peer, Progress, Replica, Role, Status, Store, Txn,
 };
 use kurator_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
-use kurator_storage::{
-    Abort, Deadline, Decide, Decided, Decision, KvOp, KvState, Prepare, TxnId, Version, WriteBatch,
-};
+use kurator_storage::{Deadline, KvOp, KvState, TxnId, WriteBatch};
 use openraft_rt_sim::{SimInstant, SimRuntime};
 use parking_lot::Mutex;
 
 use crate::Sim;
 use crate::holdings::Holdings;
 use crate::network::{Endpoint, Faults, Garbled, Network};
-
-pub use self::across::{Across, Coordinator};
-pub use self::collect::Collector;
-
-mod across;
-mod collect;
 
 /// Why the simulation could not go on.
 #[derive(Debug, thiserror::Error)]
@@ -71,23 +64,6 @@ pub enum Outcome {
     Rejected,
     /// The request may or may not take effect: it timed out, or its leader
     /// lost leadership after logging it.
-    Unknown,
-}
-
-/// The outcome of a client transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Transacted {
-    /// A quorum holds the writes, made at this version; or the
-    /// transaction wrote nothing and read this version.
-    Committed(Version),
-    /// A write after its read version touched what it read: it wrote
-    /// nothing.
-    Aborted,
-    /// It never reached the log: no leader took it, or a read failed.
-    Rejected,
-    /// It may or may not take effect: it timed out, or its leader lost
-    /// leadership after logging it.
     Unknown,
 }
 
@@ -140,6 +116,15 @@ impl Redirect for MetaError {
     }
 }
 
+/// A replica that named the leader to try instead, if it knows one.
+struct Redirected(Option<NodeId>);
+
+impl Redirect for Redirected {
+    fn leader(&self) -> Option<NodeId> {
+        self.0
+    }
+}
+
 /// A store on the simulated network.
 type SimStore = Store<Sim, Endpoint>;
 
@@ -169,11 +154,6 @@ const CATCH_UP_POLL: Duration = Duration::from_millis(100);
 
 /// How long a client waits for a request.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// How long a coordinator means to take over a transaction across shards,
-/// from when it starts to prepare it: past that, whoever runs into its
-/// locks resolves it.
-const LOCK_TTL: Duration = Duration::from_secs(5);
 
 /// How many replicas a client tries before it gives up on a request.
 /// With [`ROUTE_BACKOFF`] this spans a few elections and stays inside
@@ -511,7 +491,7 @@ impl Cluster {
         match SimRuntime::timeout(CLIENT_TIMEOUT, attempt).await {
             Ok(Ok(version)) => Transacted::Committed(version),
             Ok(Err(kurator_consensus::Error::Storage(kurator_storage::Error::Aborted(abort)))) => {
-                let _resolved: bool = self.resolve_expired(ShardId::FIRST, &abort).await;
+                let _resolved: bool = resolve_expired(self, ShardId::FIRST, &abort).await;
                 Transacted::Aborted
             }
             Ok(Err(kurator_consensus::Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
@@ -557,7 +537,7 @@ impl Cluster {
         // its own term, and with it everything before: membership changes
         // and splits included.
         for _ in 0..60 {
-            self.refresh().await;
+            self.learn().await;
             let mut committed = true;
             for shard in self.groups() {
                 committed &= self.confirm(shard).await;
@@ -573,7 +553,7 @@ impl Cluster {
                 return Err(garbled.into());
             }
             // A split whose outcome was unknown may apply only now.
-            self.refresh().await;
+            self.learn().await;
             self.forget_outsiders().await?;
             self.resolve().await;
             if self.converged() && self.unlocked() {
@@ -670,47 +650,8 @@ impl Cluster {
             })
             .collect();
         for (shard, lock) in expired {
-            self.resolve_lock(shard, lock).await;
+            lock.resolve(self, shard).await;
         }
-    }
-
-    /// Resolves the transaction whose lock `abort` ran into on `shard`,
-    /// when its deadline passed; whether it did.
-    pub(super) async fn resolve_expired(&self, shard: ShardId, abort: &Abort) -> bool {
-        let Abort::Locked {
-            by,
-            primary,
-            deadline,
-            ..
-        } = abort
-        else {
-            return false;
-        };
-        if !deadline.has_passed(now()) {
-            return false;
-        }
-        self.resolve_lock(shard, Lock::new(*by, primary.clone(), *deadline))
-            .await;
-        true
-    }
-
-    /// Decides the transaction that holds `lock` on `shard` as its primary
-    /// decided it, or, when the primary never did, aborted there first.
-    /// The primary's log orders that abort and its coordinator's commit,
-    /// so whichever came first stands.
-    async fn resolve_lock(&self, shard: ShardId, lock: Lock) {
-        let Lock {
-            id,
-            primary,
-            deadline,
-        } = lock;
-        let primary_shard = self.locate(&primary);
-        let abort = Decide::new(id, primary.clone(), deadline, Decision::Abort);
-        let Some(decided) = self.decide(primary_shard, abort).await else {
-            return;
-        };
-        let outcome = Decide::new(id, primary, deadline, decision(decided));
-        let _decided: Option<Decided> = self.decide(shard, outcome).await;
     }
 
     /// Whether every shard has a leader, and none holds a transaction
@@ -721,28 +662,6 @@ impl Cluster {
             self.leader_replica(shard.id())
                 .is_some_and(|replica| !replica.read_local(|state| state.kv().is_locked()))
         })
-    }
-
-    /// Tells `shard`'s leader `decide`, until it answers how it decided.
-    pub(super) async fn decide(&self, shard: ShardId, decide: Decide) -> Option<Decided> {
-        self.on_leader(shard, |replica| {
-            let decide = decide.clone();
-            async move { replica.decide(decide).await }
-        })
-        .await
-    }
-
-    /// When a coordinator that starts now means to have decided.
-    fn lock_deadline() -> Deadline {
-        let ttl = u64::try_from(LOCK_TTL.as_millis()).unwrap_or(u64::MAX);
-        Deadline::new(now().millis().saturating_add(ttl))
-    }
-
-    /// An id no other transaction of this cluster has.
-    fn next_txn(&self) -> TxnId {
-        let mut next = self.txns.lock();
-        *next = next.saturating_add(1);
-        TxnId::new(*next)
     }
 
     fn leader_replica(&self, shard: ShardId) -> Option<Arc<Replica<Sim>>> {
@@ -842,7 +761,7 @@ impl Cluster {
 
     /// Learns where every shard is from the meta shard, after every
     /// replica reported where its shard is, as a heartbeat would.
-    async fn refresh(&self) {
+    async fn learn(&self) {
         for store in self.up.values() {
             let _planted: Result<(), Error> = store.plant().await;
         }
@@ -996,14 +915,14 @@ impl Cluster {
     async fn every_shard(&self, op: impl Fn(ShardId) -> Op) -> Outcome {
         // A split whose outcome the client did not learn made a shard it
         // does not know of yet.
-        self.refresh().await;
+        self.learn().await;
         self.each(self.groups(), op).await
     }
 
     /// Submits `op` to every shard whose membership holds `id`, or whose
     /// membership is not known.
     async fn holding(&self, id: NodeId, op: impl Fn(ShardId) -> Op) -> Outcome {
-        self.refresh().await;
+        self.learn().await;
         let memberships = self.memberships();
         let held = self.groups().into_iter().filter(|shard| {
             memberships
@@ -1035,11 +954,6 @@ impl Cluster {
             Op::Split { at, .. } => at,
         };
         self.locate(key)
-    }
-
-    /// The shard that holds `key`, as the client's map has it.
-    fn locate(&self, key: &[u8]) -> ShardId {
-        self.map.lock().locate(key).id()
     }
 
     /// Routes `op` to its shard's leader. Gives up after three seconds of
@@ -1087,7 +1001,7 @@ impl Cluster {
                 Ok(outcome) => return outcome,
                 Err(Retry::To(next)) => hint = next,
                 Err(Retry::Reroute) => {
-                    self.refresh().await;
+                    self.learn().await;
                     hint = None;
                 }
             }
@@ -1133,7 +1047,7 @@ impl Cluster {
             // A lock whose coordinator gave up is resolved, and the write
             // tried again.
             Err(Error::Storage(kurator_storage::Error::Aborted(abort)))
-                if self.resolve_expired(shard, &abort).await =>
+                if resolve_expired(self, shard, &abort).await =>
             {
                 Err(Retry::To(Some(id)))
             }
@@ -1143,7 +1057,7 @@ impl Cluster {
                 Ok(Outcome::Rejected)
             }
             Err(Error::Misrouted { .. }) if splits => {
-                self.refresh().await;
+                self.learn().await;
                 Ok(Outcome::Rejected)
             }
             Err(Error::Misrouted { .. }) => Err(Retry::Reroute),
@@ -1180,38 +1094,41 @@ fn peer(member: &Member) -> Peer {
     member.peer(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
 }
 
-/// The decision to tell the other shards once the primary `decided`.
-/// A lock a transaction across shards holds: what to resolve it by.
-#[derive(Debug)]
-struct Lock {
-    id: TxnId,
-    primary: Vec<u8>,
-    deadline: Deadline,
-}
-
-impl Lock {
-    const fn new(id: TxnId, primary: Vec<u8>, deadline: Deadline) -> Self {
-        Self {
-            id,
-            primary,
-            deadline,
-        }
+/// The client reaches each shard's leader directly, answering its calls
+/// as a node would.
+impl Shards for Cluster {
+    /// As the client's map has it.
+    fn locate(&self, key: &[u8]) -> ShardId {
+        self.map.lock().locate(key).id()
     }
 
-    /// The lock `prepared` holds.
-    fn of(prepared: &Prepare) -> Self {
-        Self::new(
-            prepared.id(),
-            prepared.primary().to_vec(),
-            prepared.deadline(),
-        )
+    async fn refresh(&self) -> Vec<ShardId> {
+        self.learn().await;
+        self.shards().iter().map(Shard::id).collect()
     }
-}
 
-const fn decision(decided: Decided) -> Decision {
-    match decided {
-        Decided::Committed(_) => Decision::Commit,
-        Decided::Aborted | _ => Decision::Abort,
+    async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {
+        self.on_leader(shard, |replica| {
+            let call = call.clone();
+            async move {
+                let reply = answer(&replica, call).await;
+                reply
+                    .redirect()
+                    .map_or(Ok(reply), |leader| Err(Redirected(leader)))
+            }
+        })
+        .await
+    }
+
+    fn now(&self) -> Deadline {
+        now()
+    }
+
+    /// The next of this cluster's ids.
+    fn next_txn(&self) -> TxnId {
+        let mut next = self.txns.lock();
+        *next = next.saturating_add(1);
+        TxnId::new(*next)
     }
 }
 

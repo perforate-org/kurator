@@ -17,12 +17,11 @@
 use std::time::Duration;
 
 use futures_util::future::join;
+use kurator_client::{Across, Collected, Collector, Coordinator, Error, Transacted};
 use kurator_consensus::Transaction as _;
+use kurator_raft::Txn;
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_raft::{Error, Txn};
-use kurator_sim::{
-    Across, Cluster, Collector, Coordinator, Faults, Holdings, Outcome, Rng, Sim, Transacted,
-};
+use kurator_sim::{Cluster, Faults, Holdings, Outcome, Rng, Sim};
 use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
@@ -60,8 +59,28 @@ fn balance(txn: &mut Txn<'_, Sim>, index: u64) -> kurator_consensus::Result<u64>
     Ok(txn.get(&account(index))?.map_or(0, |bytes| amount(&bytes)))
 }
 
-fn balance_across(txn: &mut Across<'_>, index: u64) -> Result<u64, Error> {
-    Ok(txn.get(&account(index))?.map_or(0, |bytes| amount(&bytes)))
+async fn balance_across(txn: &mut Across<'_, Cluster>, index: u64) -> Result<u64, Error> {
+    Ok(txn
+        .get(&account(index))
+        .await?
+        .map_or(0, |bytes| amount(&bytes)))
+}
+
+/// Moves `sum` from one account to another in `txn`, as [`transfer`] does.
+async fn transfer_across(
+    txn: &mut Across<'_, Cluster>,
+    from: u64,
+    to: u64,
+    sum: u64,
+) -> Result<(), Error> {
+    let source = balance_across(txn, from).await?;
+    let target = balance_across(txn, to).await?;
+    let Some(left) = left(from, to, source, sum) else {
+        return Ok(());
+    };
+    txn.put(&account(from), left.to_le_bytes()).await?;
+    txn.put(&account(to), target.checked_add(sum).unwrap().to_le_bytes())
+        .await
 }
 
 /// The money in every account a replica holds.
@@ -107,17 +126,11 @@ async fn transfer(cluster: &Cluster, client: Client, from: u64, to: u64, sum: u6
                 .await
         }
         Client::Across => {
-            Coordinator::new(cluster)
-                .transact(|txn| {
-                    let source = balance_across(txn, from)?;
-                    let target = balance_across(txn, to)?;
-                    let Some(left) = left(from, to, source, sum) else {
-                        return Ok(());
-                    };
-                    txn.put(&account(from), left.to_le_bytes())?;
-                    txn.put(&account(to), target.checked_add(sum).unwrap().to_le_bytes())
-                })
-                .await
+            let mut txn = Coordinator::new(cluster).begin();
+            match transfer_across(&mut txn, from, to, sum).await {
+                Ok(()) => txn.commit().await,
+                Err(_) => Transacted::Rejected,
+            }
         }
     }
 }
@@ -212,7 +225,7 @@ fn run(client: Client, seed: u64) -> Tally {
         // Past the deadline of every transaction, so none is still kept.
         SimRuntime::sleep(Duration::from_secs(6)).await;
         let collected = Collector::new(&cluster).collect(Duration::ZERO).await;
-        assert_eq!(collected, Outcome::Acked, "seed {seed}: collected");
+        assert_eq!(collected, Collected::Forgotten, "seed {seed}: collected");
         cluster
             .settle()
             .await

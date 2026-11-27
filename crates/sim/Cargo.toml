@@ -12,6 +12,7 @@ categories.workspace = true
 publish = false
 
 [dependencies]
+kurator-client.workspace = true
 kurator-codec.workspace = true
 kurator-consensus.workspace = true
 kurator-crypto.workspace = true
