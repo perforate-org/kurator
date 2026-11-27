@@ -16,7 +16,8 @@
 //!   reach the meta shard's leader.
 //! - **Mutual authentication by transport key.** TLS 1.3 with raw public
 //!   keys (RFC 7250), no certificates, signed with the key's own algorithm
-//!   (Ed25519 today): each side proves it holds the
+//!   (Ed25519 today), and a post-quantum key exchange only
+//!   (X25519MLKEM768, so recorded traffic stays secret): each side proves it holds the
 //!   transport key derived from its [`NodeSecret`](kurator_crypto::NodeSecret)
 //!   ([`KeyPurpose::Transport`](kurator_crypto::KeyPurpose::Transport),
 //!   separate from the key that signs its WAL). The client expects the

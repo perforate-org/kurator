@@ -10,6 +10,13 @@
 //! [`KeyPurpose::Transport`]'s, by the TLS signature scheme that
 //! [`Algorithm::tls_scheme`] names; a peer must sign with the scheme of
 //! the key it presents.
+//!
+//! The key exchange is post-quantum: X25519MLKEM768, which combines X25519
+//! with ML-KEM-768 (FIPS 203) so that the traffic stays secret unless both
+//! are broken. A replica offers and accepts nothing else, since every peer
+//! is a Kurator replica: no one can push a handshake down to a classical
+//! exchange, and traffic recorded today cannot be read once a quantum
+//! computer breaks X25519.
 
 use std::fmt;
 use std::sync::Arc;
@@ -46,6 +53,15 @@ fn schemes() -> Vec<SignatureScheme> {
     Algorithm::ALL.into_iter().map(scheme).collect()
 }
 
+/// The cryptography every replica's TLS uses: aws-lc-rs, limited to the
+/// post-quantum key exchange.
+fn provider() -> CryptoProvider {
+    CryptoProvider {
+        kx_groups: vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768],
+        ..rustls::crypto::aws_lc_rs::default_provider()
+    }
+}
+
 /// This replica's transport key, ready for TLS.
 #[derive(Debug, Clone)]
 pub(crate) struct Identity {
@@ -56,7 +72,7 @@ pub(crate) struct Identity {
 impl Identity {
     /// The transport identity derived from `secret`.
     pub(crate) fn new(secret: &NodeSecret) -> Result<Self, Error> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let provider = Arc::new(provider());
         let signing = secret.signing_key(KeyPurpose::Transport);
         let signer = provider
             .key_provider
@@ -246,16 +262,102 @@ mod tests {
     use std::sync::Arc;
 
     use kurator_crypto::{KeyPurpose, NodeSecret};
-    use rustls::SignatureScheme;
+    use rustls::crypto::{CryptoProvider, SupportedKxGroup};
+    use rustls::pki_types::ServerName;
+    use rustls::server::AlwaysResolvesServerRawPublicKeys;
+    use rustls::{ClientConnection, IoState, NamedGroup, ServerConnection, SignatureScheme};
 
-    use super::{Expected, schemes};
+    use super::{ALPN, Expected, Identity, schemes};
+
+    /// A server that holds `identity`'s key and asks clients for none.
+    fn server(identity: &Identity) -> rustls::ServerConfig {
+        let mut config =
+            rustls::ServerConfig::builder_with_provider(Arc::clone(&identity.provider))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(
+                    Arc::clone(&identity.key),
+                )));
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        config
+    }
+
+    /// Runs a handshake in memory, and returns the client's side of it.
+    fn handshake(
+        client: rustls::ClientConfig,
+        server: rustls::ServerConfig,
+    ) -> Result<ClientConnection, Box<dyn std::error::Error>> {
+        let mut client = ClientConnection::new(Arc::new(client), ServerName::try_from("kurator")?)?;
+        let mut server = ServerConnection::new(Arc::new(server))?;
+        while client.is_handshaking() || server.is_handshaking() {
+            let mut bytes = Vec::new();
+            while client.wants_write() {
+                let _: usize = client.write_tls(&mut bytes)?;
+            }
+            let _: usize = server.read_tls(&mut bytes.as_slice())?;
+            let _: IoState = server.process_new_packets()?;
+            bytes.clear();
+            while server.wants_write() {
+                let _: usize = server.write_tls(&mut bytes)?;
+            }
+            let _: usize = client.read_tls(&mut bytes.as_slice())?;
+            let _: IoState = client.process_new_packets()?;
+        }
+        Ok(client)
+    }
+
+    /// A client with `provider` that expects `secret`'s server and
+    /// presents no key of its own.
+    fn client(provider: Arc<CryptoProvider>, secret: &NodeSecret) -> rustls::ClientConfig {
+        let verifier = Arc::new(Expected {
+            spki: secret.public_key(KeyPurpose::Transport).to_spki(),
+            provider: Arc::clone(&provider),
+        });
+        let mut config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        config
+    }
+
+    #[test]
+    fn replicas_agree_on_the_post_quantum_key_exchange() {
+        let secret = NodeSecret::from_seed([5; 32]);
+        let identity = Identity::new(&secret).unwrap();
+        let replica = client(Arc::clone(&identity.provider), &secret);
+        let done = handshake(replica, server(&identity)).unwrap();
+        assert_eq!(
+            done.negotiated_key_exchange_group()
+                .map(SupportedKxGroup::name),
+            Some(NamedGroup::X25519MLKEM768),
+            "hybrid X25519 and ML-KEM-768"
+        );
+    }
+
+    #[test]
+    fn a_classical_key_exchange_is_refused() {
+        let secret = NodeSecret::from_seed([5; 32]);
+        let identity = Identity::new(&secret).unwrap();
+        let classical = Arc::new(CryptoProvider {
+            kx_groups: vec![rustls::crypto::aws_lc_rs::kx_group::X25519],
+            ..rustls::crypto::aws_lc_rs::default_provider()
+        });
+        assert!(
+            handshake(client(classical, &secret), server(&identity)).is_err(),
+            "X25519 alone is not enough"
+        );
+    }
 
     #[test]
     fn an_expectation_shows_the_key_it_expects() {
         let key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
         let expected = Expected {
             spki: key.to_spki(),
-            provider: Arc::new(rustls::crypto::ring::default_provider()),
+            provider: Arc::new(super::provider()),
         };
         assert_eq!(
             format!("{expected:?}"),
