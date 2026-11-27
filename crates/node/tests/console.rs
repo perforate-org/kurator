@@ -188,5 +188,10 @@ fn a_node_that_holds_no_shard_says_so() {
             "{line}"
         );
     }
+    assert_eq!(
+        console.ask("shards", 1),
+        "error: this node holds no replica of the meta shard",
+        "no registry to read"
+    );
     assert!(console.quit().is_empty(), "nothing more");
 }
