@@ -149,6 +149,7 @@ mod tests {
         assert_eq!(four.size(), 4, "size");
         assert_eq!(four.faults(), 1, "faults");
         assert_eq!(four.quorum(), 3, "quorum");
+        assert_eq!(committee(7).faults(), 2, "faults of seven");
     }
 
     #[test]

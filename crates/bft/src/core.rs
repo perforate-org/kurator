@@ -101,7 +101,7 @@ pub struct Core {
     /// the committee is faulty.
     certified: BTreeMap<View, BlockId>,
     /// Votes it collects as the next view's leader.
-    votes: BTreeMap<(View, BlockId), BTreeMap<NodeId, Signature>>,
+    votes: BTreeMap<View, BTreeMap<BlockId, BTreeMap<NodeId, Signature>>>,
     /// Timeouts of the current view.
     timeouts: BTreeMap<NodeId, (View, Signature)>,
     /// Commands submitted and not yet decided.
@@ -220,8 +220,10 @@ impl Core {
     fn enter(&mut self, view: View) {
         self.view = view;
         self.timeouts.clear();
-        let stale = self.view.get().saturating_sub(1);
-        self.votes.retain(|(voted, _), _| voted.get() >= stale);
+        // Votes of the view before can still certify it; older ones
+        // cannot move anything on.
+        let before = View::new(view.get().saturating_sub(1));
+        self.votes = self.votes.split_off(&before);
         self.wait(self.failures);
         self.ask_again();
         if self.config.committee.leader(view) == Some(self.node()) {
@@ -390,14 +392,10 @@ impl Core {
         if self.proposed >= view {
             return;
         }
-        let timeout = if view.follows(self.lock.view()) {
-            None
-        } else {
-            match &self.entered {
-                Some(certificate) if view.follows(certificate.view()) => Some(certificate.clone()),
-                _ => return,
-            }
-        };
+        // It entered the view by a timeout certificate, which then
+        // justifies the proposal, or by a certificate of the view before,
+        // which its lock now is.
+        let timeout = self.entered.clone();
         self.proposed = view;
         let commands = self.unproposed();
         let block = Block::new(view, self.lock.clone(), commands);
@@ -484,7 +482,12 @@ impl Core {
         vote.verify(&self.config.committee, self.config.domain)?;
         let block = vote.block();
         let voter = vote.voter();
-        let ballot = self.votes.entry((view, block)).or_default();
+        let ballot = self
+            .votes
+            .entry(view)
+            .or_default()
+            .entry(block)
+            .or_default();
         drop(ballot.insert(voter, vote.into_signature()));
         if ballot.len() >= self.config.committee.quorum() {
             let certificate = Certificate::new(view, block, ballot.clone());

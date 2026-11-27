@@ -585,3 +585,36 @@ fn a_block_commits_once_its_child_in_the_next_view_is_certified() {
         "the last decided"
     );
 }
+
+#[test]
+fn a_leader_of_two_views_in_a_row_counts_its_own_vote() {
+    let view = (2..100)
+        .find(|view| leader(*view) == leader(view.saturating_add(1)))
+        .unwrap();
+    let node = leader(view);
+    let mut replica = started(node);
+    let effects = receive(
+        &mut replica,
+        Message::Skip(timed_out(view.saturating_sub(1), &Justify::Genesis)),
+    );
+    let proposed = proposal_in(&effects).unwrap();
+    assert!(
+        effects
+            .messages()
+            .iter()
+            .all(|outgoing| !matches!(outgoing.message(), Message::Vote(_))),
+        "keeps its vote"
+    );
+    let block = proposed.block().id();
+    let others = (1..=4).map(NodeId::new).filter(|other| *other != node);
+    let mut next = None;
+    for other in others.take(2) {
+        let vote = Vote::sign(&key(other.get()), DOMAIN, other, View::new(view), block);
+        next = proposal_in(&receive(&mut replica, Message::Vote(vote)));
+    }
+    assert_eq!(
+        next.map(|next| next.block().view()),
+        Some(View::new(view.saturating_add(1))),
+        "two more votes make a quorum"
+    );
+}

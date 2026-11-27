@@ -298,3 +298,87 @@ fn read_signatures(reader: &mut Reader<'_>) -> Result<BTreeMap<NodeId, Signature
     }
     Ok(signatures)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use kurator_consensus::NodeId;
+
+    use super::{BlockId, Certificate, Vote};
+    use crate::committee::Domain;
+    use crate::fixture::{DOMAIN, committee, key};
+    use crate::rejection::Rejection;
+    use crate::view::View;
+
+    fn vote(node: u64, view: u64, block: u8) -> Vote {
+        Vote::sign(
+            &key(node),
+            DOMAIN,
+            NodeId::new(node),
+            View::new(view),
+            BlockId::new([block; 32]),
+        )
+    }
+
+    #[test]
+    fn a_vote_is_its_voters_in_its_domain() {
+        let committee = committee();
+        assert_eq!(vote(1, 3, 7).verify(&committee, DOMAIN), Ok(()), "valid");
+        assert_eq!(
+            vote(1, 3, 7).verify(&committee, Domain::new([2; 32])),
+            Err(Rejection::Forged(NodeId::new(1))),
+            "other domain"
+        );
+        let stolen = Vote {
+            voter: NodeId::new(2),
+            ..vote(1, 3, 7)
+        };
+        assert_eq!(
+            stolen.verify(&committee, DOMAIN),
+            Err(Rejection::Forged(NodeId::new(2))),
+            "another's name"
+        );
+        let stranger = Vote::sign(
+            &key(9),
+            DOMAIN,
+            NodeId::new(9),
+            View::new(3),
+            BlockId::GENESIS,
+        );
+        assert_eq!(
+            stranger.verify(&committee, DOMAIN),
+            Err(Rejection::Stranger(NodeId::new(9))),
+            "stranger"
+        );
+    }
+
+    #[test]
+    fn a_signature_covers_its_view_and_block() {
+        let committee = committee();
+        let signatures = |view, block| -> BTreeMap<NodeId, _> {
+            (1..=3)
+                .map(|node| (NodeId::new(node), vote(node, view, block).into_signature()))
+                .collect()
+        };
+        let certificate = |view, block, signed: BTreeMap<_, _>| {
+            Certificate::new(View::new(view), BlockId::new([block; 32]), signed)
+        };
+        assert_eq!(
+            certificate(3, 7, signatures(3, 7)).verify(&committee, DOMAIN),
+            Ok(()),
+            "valid"
+        );
+        let forged = Err(Rejection::Forged(NodeId::new(1)));
+        assert_eq!(
+            certificate(4, 7, signatures(3, 7)).verify(&committee, DOMAIN),
+            forged,
+            "other view"
+        );
+        assert_eq!(
+            certificate(3, 8, signatures(3, 7)).verify(&committee, DOMAIN),
+            forged,
+            "other block"
+        );
+    }
+}

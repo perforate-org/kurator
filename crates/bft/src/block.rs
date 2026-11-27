@@ -293,6 +293,17 @@ mod tests {
         for other in others {
             assert_ne!(block.id(), other.id(), "{other:?}");
         }
+        let empty_last = Block::new(
+            View::new(5),
+            certified(4, 1),
+            vec![b"a".to_vec(), Vec::new()],
+        );
+        for length in [0_u64, 1] {
+            let mut padded = b"a".to_vec();
+            padded.extend_from_slice(&length.to_le_bytes());
+            let one = Block::new(View::new(5), certified(4, 1), vec![padded]);
+            assert_ne!(empty_last.id(), one.id(), "lengths count: {length}");
+        }
         assert_ne!(block.id(), BlockId::GENESIS, "not genesis");
         assert_eq!(block.parent(), BlockId::new([1; 32]), "parent");
         assert_eq!(block.commands(), commands, "commands");
