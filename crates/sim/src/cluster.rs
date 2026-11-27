@@ -613,18 +613,14 @@ impl Cluster {
     }
 
     /// The membership of each shard's leader, the meta shard's among them,
-    /// once it committed it. A leader that removed itself steps down: its
-    /// shard has no leader yet.
+    /// once it committed it.
     fn memberships(&self) -> BTreeMap<ShardId, Membership> {
         self.groups()
             .into_iter()
             .filter_map(|shard| {
-                let leader = self.leader_of(shard)?;
                 let membership = self.leader_replica(shard)?.membership();
                 // Joint configs exist only while a change is in flight.
-                let settled = membership.get_joint_config().len() == 1
-                    && membership.voter_ids().any(|voter| voter == leader);
-                settled.then_some((shard, membership))
+                (membership.get_joint_config().len() == 1).then_some((shard, membership))
             })
             .collect()
     }

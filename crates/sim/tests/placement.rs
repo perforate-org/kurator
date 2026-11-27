@@ -137,3 +137,24 @@ fn a_replica_moves_and_the_registry_follows() {
         cluster.shutdown().await.expect("shutdown");
     });
 }
+
+#[test]
+fn settling_waits_for_a_new_leader_after_the_leader_moves_off() {
+    SimRuntime::with_seed(24).block_on(async {
+        let mut cluster = Cluster::start(24, 3, Faults::default())
+            .await
+            .expect("start");
+        cluster.settle().await.expect("settle");
+        let first = ShardId::FIRST;
+        let leader = cluster.leader_of(first).expect("a leader");
+        cluster.add_node(NodeId::new(4)).await.expect("a new node");
+        let moved = cluster.move_replica(first, leader, NodeId::new(4)).await;
+        assert_eq!(moved, Outcome::Acked, "moved off the leader");
+        cluster.settle().await.expect("settle");
+        let next = cluster.leader_of(first).expect("a new leader");
+        assert_ne!(next, leader, "the old leader stepped down");
+        let voters = cluster.voters_of(first).expect("a leader");
+        assert!(voters.contains(&next), "{next} votes");
+        cluster.shutdown().await.expect("shutdown");
+    });
+}
