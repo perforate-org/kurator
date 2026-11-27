@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 getrandom = "0.4.3"
+kurator-meta.workspace = true
 kurator-net.workspace = true
 kurator-raft.workspace = true
 kurator-shard.workspace = true

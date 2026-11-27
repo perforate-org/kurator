@@ -5,8 +5,8 @@ use std::io;
 use std::sync::Arc;
 
 use futures_util::{Stream, TryStreamExt as _};
-use kurator_shard::{Applied, ShardState, Split};
-use kurator_storage::{Outcome, Version};
+use kurator_shard::{Applied, Shard, ShardId, ShardState, Split};
+use kurator_storage::{KvState, Outcome, Version};
 use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
 use parking_lot::Mutex;
@@ -37,14 +37,15 @@ struct Machine {
 }
 
 impl StateMachine {
-    /// Opens the state machine of the replica at `home`, starting from its
-    /// snapshot. The entries after the snapshot come back from the Raft
+    /// Opens the state machine of the replica of `shard` at `home`,
+    /// starting from its snapshot, or from the whole, empty shard when it
+    /// has none. The entries after the snapshot come back from the Raft
     /// log.
     ///
     /// # Errors
     ///
     /// When the snapshot is damaged or cannot be read.
-    pub(crate) fn open(home: Home) -> Result<Self> {
+    pub(crate) fn open(home: Home, shard: ShardId) -> Result<Self> {
         let snapshots = SnapshotDir::open(&home.snapshot())?;
         let current = snapshots
             .load()?
@@ -65,7 +66,7 @@ impl StateMachine {
                 home,
             },
             None => Machine {
-                state: ShardState::default(),
+                state: ShardState::new(Shard::whole(shard), KvState::default()),
                 applied: None,
                 membership: StoredMembership::default(),
                 snapshots,

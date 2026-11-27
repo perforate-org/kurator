@@ -164,7 +164,7 @@ impl<C: Config> Replica<C> {
             &home.log(),
             member.secret.signing_key(KeyPurpose::WalSigning),
         )?;
-        let state = StateMachine::open(home)?;
+        let state = StateMachine::open(home, shard)?;
         let raft = Raft::new(member.id, config, network, log, state.clone())
             .await
             .map_err(stopped)?;
@@ -364,6 +364,18 @@ impl<C: Config> Replica<C> {
             .membership_config
             .membership()
             .clone()
+    }
+
+    /// The log entry the membership of [`Replica::membership`] comes from,
+    /// if any: a later change has a later entry.
+    #[must_use]
+    pub fn membership_log(&self) -> Option<LogId> {
+        self.raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .log_id()
+            .to_owned()
     }
 
     fn not_leader(&self) -> Error {

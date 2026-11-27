@@ -27,7 +27,15 @@ impl Shard {
     /// every key, at [`Epoch::ZERO`].
     #[must_use]
     pub const fn first() -> Self {
-        Self::new(ShardId::FIRST, Span::FULL, Epoch::ZERO)
+        Self::whole(ShardId::FIRST)
+    }
+
+    /// Shard `id` holding every key at [`Epoch::ZERO`]: how the first and
+    /// the meta shard start, and how a replica that holds no state yet
+    /// describes its shard.
+    #[must_use]
+    pub const fn whole(id: ShardId) -> Self {
+        Self::new(id, Span::FULL, Epoch::ZERO)
     }
 
     /// Its id.
@@ -50,11 +58,13 @@ impl Shard {
 
     /// The two shards `split` makes of this one, or `None` when it does not
     /// apply: it names another epoch, or a key not strictly inside the
-    /// span, or this shard's own id for the new shard.
+    /// span, or this shard's own id or [`ShardId::META`] for the new shard.
+    /// The meta shard never splits.
     #[must_use]
     pub fn split(&self, split: &Split) -> Option<Halves> {
         let renames_itself = split.right == self.id;
-        if renames_itself || split.epoch != self.epoch {
+        let meta = [self.id, split.right].contains(&ShardId::META);
+        if renames_itself || meta || split.epoch != self.epoch {
             return None;
         }
         let epoch = self.epoch.next()?;
@@ -228,6 +238,10 @@ mod tests {
         let last = Shard::new(ShardId::FIRST, Span::FULL, Epoch::new(u64::MAX));
         let at_last = Split::new("m", ShardId::new(2), Epoch::new(u64::MAX));
         assert_eq!(last.split(&at_last), None, "no next epoch");
+        let into_meta = Split::new("m", ShardId::META, Epoch::ZERO);
+        assert_eq!(first.split(&into_meta), None, "the meta shard's id");
+        let meta = Shard::whole(ShardId::META);
+        assert_eq!(meta.split(&split), None, "the meta shard");
     }
 
     #[test]

@@ -8,6 +8,10 @@ use std::fmt;
 pub struct ShardId(u64);
 
 impl ShardId {
+    /// The meta shard: it holds the registry of every other shard, in a
+    /// key space of its own, and never splits.
+    pub const META: Self = Self(0);
+
     /// The shard a new cluster starts with: it holds every key.
     pub const FIRST: Self = Self(1);
 
