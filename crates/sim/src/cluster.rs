@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kurator_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
-use kurator_consensus::{Replicated as _, Transaction as _};
+use kurator_consensus::{Duty, Replicated as _, Route, Transaction as _};
 use kurator_crypto::NodeSecret;
 use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
 use kurator_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
@@ -604,6 +604,16 @@ impl Cluster {
     pub fn statuses(&self) -> Vec<(NodeId, Status)> {
         self.replicas(ShardId::FIRST)
             .map(|(id, replica)| (id, replica.status()))
+            .collect()
+    }
+
+    /// Where each replica of the first shard that is up routes writes, and
+    /// whether the shard's chores are its own, as the layers above
+    /// consensus see it.
+    #[must_use]
+    pub fn routes(&self) -> Vec<(NodeId, Route, Duty)> {
+        self.replicas(ShardId::FIRST)
+            .map(|(id, replica)| (id, replica.route(), replica.duty()))
             .collect()
     }
 

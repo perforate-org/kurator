@@ -274,15 +274,18 @@ impl<'node, R: Replicated, A: Ask> Meta<'node, R, A> {
         Ok(registry)
     }
 
-    /// Runs `call` on the leader this node's replica knows of, following
-    /// the leader each node it asks names, and returns the last answer.
+    /// Runs `call` where this node's replica routes writes, following the
+    /// leader each node it asks names, and returns the last answer.
     ///
     /// # Errors
     ///
     /// [`MetaError::Unreachable`] when a node cannot be asked, or is not in
     /// the meta shard's membership.
     pub async fn call(&self, call: Call) -> Result<Answer> {
-        follow(self.replica.leader(), |node| self.call_on(node, &call)).await
+        follow(self.replica.route().node(self.replica.node()), |node| {
+            self.call_on(node, &call)
+        })
+        .await
     }
 
     /// Runs `call` on `node`: on this node's replica, or by asking.

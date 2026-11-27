@@ -12,7 +12,11 @@ use kurator_storage::{Command, KeyValue, KvState, Outcome, Version};
 use crate::error::Result;
 use crate::node::{NodeId, Peer};
 
-/// What a replica is doing in its shard's consensus.
+/// What a Raft replica is doing in its shard's consensus.
+///
+/// It is for an operator to look at. Layers above consensus ask [`Replicated::route`]
+/// and [`Replicated::duty`] instead: in a Byzantine fault tolerant shard
+/// the leader changes every view, and every replica takes writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Role {
@@ -26,6 +30,55 @@ pub enum Role {
     Leader,
     /// Shut down.
     Stopped,
+}
+
+/// Where to send a write, or a call that must run where writes do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Route {
+    /// This replica takes it.
+    Here,
+    /// The leader takes it, and this replica does not lead.
+    Leader(NodeId),
+    /// No replica is known to take it now: try again later.
+    Unknown,
+}
+
+impl Route {
+    /// The node to send to first, if any: this replica's own node when it
+    /// takes the write.
+    #[must_use]
+    pub const fn node(self, here: NodeId) -> Option<NodeId> {
+        match self {
+            Self::Here => Some(here),
+            Self::Leader(leader) => Some(leader),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// Whether a chore that one replica of a shard runs at a time, such as
+/// reporting the shard to the meta shard, is this replica's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Duty {
+    /// This replica runs it now.
+    Mine,
+    /// Another replica runs it, or none does until a leader is known.
+    Others,
+}
+
+/// What a read of a replica sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reads {
+    /// Every write that returned before the read, as a Raft leader
+    /// confirms it still leads.
+    Linearizable,
+    /// Every block the replica decided, at the version of its state: it
+    /// may lag the others, and a faulty replica may lie. Checking a read
+    /// against a quorum's proof comes with state hashes.
+    Decided,
 }
 
 /// The nodes that hold a shard's replicas, each with the [`Peer`] it is
@@ -91,11 +144,14 @@ pub trait Replicated: Send + Sync {
     /// The shard, as this replica holds it now.
     fn shard(&self) -> Shard;
 
-    /// What this replica is doing.
-    fn role(&self) -> Role;
+    /// What [`Replicated::read`] and [`Replicated::begin`] see.
+    const READS: Reads;
 
-    /// The leader this replica knows of.
-    fn leader(&self) -> Option<NodeId>;
+    /// Where writes to the shard go now.
+    fn route(&self) -> Route;
+
+    /// Whether this replica runs the shard's chores now.
+    fn duty(&self) -> Duty;
 
     /// The members this replica knows of, decided or not: who may send to
     /// it.
@@ -111,8 +167,8 @@ pub trait Replicated: Send + Sync {
     /// does not lead.
     fn begin(&self) -> impl Future<Output = Result<Self::Txn<'_>>> + Send;
 
-    /// Runs `read` against a state that reflects every write that returned
-    /// before this call.
+    /// Runs `read` against the shard's state, as [`Replicated::READS`]
+    /// says.
     ///
     /// # Errors
     ///
@@ -189,12 +245,14 @@ impl<T: Replicated + ?Sized> Replicated for Arc<T> {
         T::shard(self)
     }
 
-    fn role(&self) -> Role {
-        T::role(self)
+    const READS: Reads = T::READS;
+
+    fn route(&self) -> Route {
+        T::route(self)
     }
 
-    fn leader(&self) -> Option<NodeId> {
-        T::leader(self)
+    fn duty(&self) -> Duty {
+        T::duty(self)
     }
 
     fn members(&self) -> Members {
@@ -229,7 +287,7 @@ mod tests {
     use kurator_shard::Shard;
     use kurator_storage::{Command, KeyValue, KvState, Outcome, Version, WriteBatch};
 
-    use super::{Members, Replicated, Role, Transaction};
+    use super::{Duty, Members, Reads, Replicated, Route, Transaction};
     use crate::error::{Error, Result};
     use crate::node::{NodeId, Peer};
 
@@ -280,12 +338,14 @@ mod tests {
             Shard::first()
         }
 
-        fn role(&self) -> Role {
-            Role::Leader
+        const READS: Reads = Reads::Linearizable;
+
+        fn route(&self) -> Route {
+            Route::Here
         }
 
-        fn leader(&self) -> Option<NodeId> {
-            Some(NodeId::new(3))
+        fn duty(&self) -> Duty {
+            Duty::Mine
         }
 
         fn members(&self) -> Members {
@@ -306,6 +366,15 @@ mod tests {
     }
 
     #[test]
+    fn a_route_names_whom_to_ask_first() {
+        let here = NodeId::new(3);
+        assert_eq!(Route::Here.node(here), Some(here), "here");
+        let leader = NodeId::new(2);
+        assert_eq!(Route::Leader(leader).node(here), Some(leader), "leader");
+        assert_eq!(Route::Unknown.node(here), None, "nobody yet");
+    }
+
+    #[test]
     fn members_tell_voters_from_learners() {
         let members = members();
         assert!(members.votes(NodeId::new(3)), "a voter");
@@ -322,8 +391,13 @@ mod tests {
         let shared = Arc::new(Fixed);
         assert_eq!(shared.node(), NodeId::new(3), "node");
         assert_eq!(shared.shard(), Shard::first(), "shard");
-        assert_eq!(shared.role(), Role::Leader, "role");
-        assert_eq!(shared.leader(), Some(NodeId::new(3)), "leader");
+        assert_eq!(shared.route(), Route::Here, "route");
+        assert_eq!(shared.duty(), Duty::Mine, "duty");
+        assert_eq!(
+            <Arc<Fixed> as Replicated>::READS,
+            Reads::Linearizable,
+            "reads"
+        );
         assert_eq!(shared.members(), members(), "members");
         let read = shared.read(KvState::version).now_or_never().unwrap();
         assert_eq!(read.unwrap(), Version::ZERO, "read");

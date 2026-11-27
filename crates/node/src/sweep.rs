@@ -1,11 +1,13 @@
-//! Forgetting old decisions: the node that leads the meta shard collects,
-//! now and then, the decisions on transactions across shards that no one
-//! can ask about any more.
+//! Forgetting old decisions on transactions across shards that no one can
+//! ask about any more.
+//!
+//! The node whose [`Duty`] the meta shard's chores are (its leader, under
+//! Raft) collects them now and then.
 
 use std::time::Duration;
 
 use kurator_client::{Client, Collected, Collector};
-use kurator_consensus::{Replicated as _, Role};
+use kurator_consensus::{Duty, Replicated as _};
 use kurator_net::{Quic, Store, Wall};
 use kurator_shard::ShardId;
 
@@ -17,12 +19,12 @@ pub const EVERY: Duration = Duration::from_secs(60);
 /// at the primary; this leaves them that long to.
 pub const GRACE: Duration = Duration::from_secs(600);
 
-/// Collects the decisions past [`GRACE`] when this node leads the meta
-/// shard, so that one node collects at a time: how it came out, or `None`
+/// Collects the decisions past [`GRACE`] when the meta shard's chores are
+/// this node's [`Duty`], so that one node collects at a time: how it came out, or `None`
 /// when another node collects.
 pub async fn sweep(store: &Store, quic: &Quic) -> Option<Collected> {
     let meta = store.inbox().replica(ShardId::META)?;
-    if meta.role() != Role::Leader {
+    if meta.duty() != Duty::Mine {
         return None;
     }
     Some(collect(store, quic).await)
