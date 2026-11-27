@@ -660,9 +660,10 @@ impl Cluster {
         }
     }
 
-    /// Whether no shard's leader holds a transaction across shards
-    /// prepared and undecided.
-    fn unlocked(&self) -> bool {
+    /// Whether every shard has a leader, and none holds a transaction
+    /// across shards prepared and undecided.
+    #[must_use]
+    pub fn unlocked(&self) -> bool {
         self.shards().iter().all(|shard| {
             self.leader_replica(shard.id())
                 .is_some_and(|replica| !replica.read_local(|state| state.kv().is_locked()))
