@@ -9,11 +9,18 @@ use std::ops::Bound;
 use kurator_codec::{DecodeError, Reader, put_bytes};
 use kurator_wal::Lsn;
 
-use crate::batch::KvOp;
+use crate::batch::{KvOp, WriteBatch};
 use crate::command::Command;
 use crate::outcome::{Abort, Outcome, Unreadable};
-use crate::txn::Transaction;
+use crate::span::Span;
+use crate::two_phase::{Decide, Decided, Decision, Prepare};
+use crate::txn::{ReadSet, Transaction};
+use crate::txn_id::TxnId;
 use crate::version::{Retention, Version};
+
+use self::locks::Locks;
+
+mod locks;
 
 /// The key-value state, versioned: each key keeps the values it had at
 /// every version its [`Retention`] still reads.
@@ -22,7 +29,9 @@ use crate::version::{Retention, Version};
 /// each at a version above the last, so replicas that apply the same
 /// commands at the same versions hold the same state. A
 /// [`Transaction`] command commits or aborts by what the state holds when
-/// it applies, so they also make the same decisions.
+/// it applies, so they also make the same decisions. So do the two phases
+/// of a transaction across shards, [`Prepare`] and [`Decide`]: the state
+/// holds the parts it prepared, locked, until they are decided.
 ///
 /// Reads look at one version through a [`View`]: [`KvState::latest`] for
 /// the newest, [`KvState::view`] for an older one.
@@ -31,6 +40,7 @@ pub struct KvState {
     keys: BTreeMap<Vec<u8>, History>,
     version: Version,
     retention: Retention,
+    locks: Locks,
 }
 
 impl Default for KvState {
@@ -47,21 +57,72 @@ impl KvState {
             keys: BTreeMap::new(),
             version: Version::ZERO,
             retention,
+            locks: Locks::EMPTY,
         }
     }
 
     /// Applies `command` at `version`, which must be above
-    /// [`KvState::version`]. A write batch always commits; a transaction
-    /// commits unless a command after its read version wrote what it read.
+    /// [`KvState::version`]. A write batch commits unless a prepared
+    /// transaction holds a key it writes; a transaction commits unless,
+    /// besides, a command after its read version wrote what it read. A
+    /// prepare checks its part as a transaction and locks it; a decision
+    /// applies the part it decides, or drops it.
     pub fn apply(&mut self, version: Version, command: Command) -> Outcome {
         debug_assert!(version > self.version, "versions only grow");
         let writes = match command {
-            Command::Kv(batch) => batch,
+            Command::Kv(batch) => match self.locks.conflict(&ReadSet::default(), &batch) {
+                None => batch,
+                Some(abort) => return Outcome::Aborted(abort),
+            },
             Command::Txn(transaction) => match self.check(&transaction) {
                 Ok(()) => transaction.into_writes(),
                 Err(abort) => return Outcome::Aborted(abort),
             },
+            Command::Prepare(prepare) => return self.prepare(version, prepare),
+            Command::Decide(decide) => match self.decide(version, &decide) {
+                Ok(writes) => writes,
+                Err(outcome) => return outcome,
+            },
         };
+        self.write(version, writes)
+    }
+
+    /// Prepares `prepare` at `version`, unless its transaction was decided
+    /// already: then this is how.
+    fn prepare(&mut self, version: Version, prepare: Prepare) -> Outcome {
+        if let Some(outcome) = self.locks.told(prepare.id()) {
+            return outcome;
+        }
+        if !self.locks.is_prepared(prepare.id()) {
+            if let Err(abort) = self.check(prepare.transaction()) {
+                return Outcome::Aborted(abort);
+            }
+            self.locks.lock(prepare);
+        }
+        Outcome::Prepared(version)
+    }
+
+    /// Decides `decide` at `version`: the writes to apply when it commits
+    /// a part this state prepared, otherwise how the transaction came out.
+    fn decide(&mut self, version: Version, decide: &Decide) -> Result<WriteBatch, Outcome> {
+        let id = decide.id();
+        if let Some(outcome) = self.locks.told(id) {
+            return Err(outcome);
+        }
+        let commits = decide.decision() == Decision::Commit && self.locks.is_prepared(id);
+        let decided = if commits {
+            Decided::Committed(version)
+        } else {
+            Decided::Aborted
+        };
+        match self.locks.decide(id, decide.primary(), decided) {
+            Some(prepared) if commits => Ok(prepared.into_transaction().into_writes()),
+            Some(_) | None => Err(Outcome::Aborted(Abort::RolledBack(id))),
+        }
+    }
+
+    /// Applies `writes` at `version`.
+    fn write(&mut self, version: Version, writes: WriteBatch) -> Outcome {
         let entering = self.retention.window(version) != self.retention.window(self.version);
         self.version = version;
         let horizon = self.horizon();
@@ -93,12 +154,50 @@ impl KvState {
             keys: self.keys.split_off(at),
             version: self.version,
             retention: self.retention,
+            locks: self.locks.split_off(at),
         }
     }
 
-    /// Whether `transaction` may commit now: its read version is readable
-    /// and nothing it read was written after it.
+    /// Whether a transaction across shards is prepared here and not decided
+    /// yet. A shard does not split while one is: its keys could straddle
+    /// the halves.
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        self.locks.is_locked()
+    }
+
+    /// The transactions across shards prepared here and not decided yet,
+    /// with their primary keys: where to ask how they were decided.
+    pub fn pending(&self) -> impl Iterator<Item = (TxnId, &[u8])> {
+        self.locks.pending()
+    }
+
+    /// Whether every key, and every part of a transaction prepared here,
+    /// is in `span`.
+    #[must_use]
+    pub fn fits(&self, span: &Span) -> bool {
+        self.keys.keys().all(|key| span.contains(key)) && self.locks.fits(span)
+    }
+
+    /// How the transaction `id` was decided here, if it was.
+    #[must_use]
+    pub fn decided(&self, id: TxnId) -> Option<Decided> {
+        self.locks.decided(id)
+    }
+
+    /// Whether `transaction` may commit now: its read version is readable,
+    /// nothing it read was written after it, and no prepared transaction
+    /// holds what it touches.
     fn check(&self, transaction: &Transaction) -> Result<(), Abort> {
+        self.validate(transaction)?;
+        self.locks
+            .conflict(transaction.reads(), transaction.writes())
+            .map_or(Ok(()), Err)
+    }
+
+    /// Whether `transaction`'s read version is readable and nothing it read
+    /// was written after it.
+    fn validate(&self, transaction: &Transaction) -> Result<(), Abort> {
         let read_at = transaction.read_at();
         self.readable(read_at)?;
         let written_since = |key: &[u8], history: &History| {
@@ -232,10 +331,12 @@ impl KvState {
     /// ```text
     /// retention u64 | version u64 | keys u64
     /// (key | versions u32 | (version u64 | tag u8 | value?)*)*
+    /// locks
     /// ```
     ///
     /// keys in order and each key's versions oldest first; tag 1 carries a
-    /// length prefixed value, tag 0 marks a removal.
+    /// length prefixed value, tag 0 marks a removal. The locks are the
+    /// prepared transactions and the decisions.
     ///
     /// # Errors
     ///
@@ -249,7 +350,7 @@ impl KvState {
             put_bytes(out, key)?;
             history.encode(out)?;
         }
-        Ok(())
+        self.locks.encode(out)
     }
 
     /// Reads a state written by [`KvState::encode`] off the front of
@@ -260,7 +361,7 @@ impl KvState {
     /// [`DecodeError::Truncated`] when the input ends early, and
     /// [`DecodeError::Invalid`] when the retention is zero, keys are out of
     /// order, or a key's versions are empty, out of order or newer than
-    /// the state.
+    /// the state, or the locks repeat a transaction.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let retention = NonZeroU64::new(reader.read()?).ok_or(DecodeError::Invalid)?;
         let version = Version::new(reader.read()?);
@@ -278,6 +379,7 @@ impl KvState {
             keys,
             version,
             retention: Retention::new(retention),
+            locks: Locks::decode(reader, version)?,
         })
     }
 }

@@ -1,5 +1,6 @@
 //! What applying a command did, and why a version cannot be read.
 
+use crate::txn_id::TxnId;
 use crate::version::Version;
 
 /// What applying a command did.
@@ -8,19 +9,23 @@ use crate::version::Version;
 pub enum Outcome {
     /// Its writes applied at this version.
     Committed(Version),
+    /// The shard prepared its part of a transaction across shards, at this
+    /// version, and holds its writes back until it is decided.
+    Prepared(Version),
     /// It wrote nothing.
     Aborted(Abort),
 }
 
 impl Outcome {
-    /// The version the writes made, or why there were none.
+    /// The version the writes made, or the prepare applied at, or why
+    /// there were none.
     ///
     /// # Errors
     ///
     /// The [`Abort`] when the command aborted.
     pub fn into_result(self) -> Result<Version, Abort> {
         match self {
-            Self::Committed(version) => Ok(version),
+            Self::Committed(version) | Self::Prepared(version) => Ok(version),
             Self::Aborted(abort) => Err(abort),
         }
     }
@@ -39,6 +44,23 @@ pub enum Abort {
         /// The version that wrote it.
         version: Version,
     },
+    /// A transaction across shards that is prepared but not decided yet
+    /// holds `key`: it may write it, or it read it. Running again once the
+    /// transaction `by`, whose primary key is `primary`, is decided may
+    /// succeed.
+    #[error("{key:?} is locked by {by}, prepared but not decided yet")]
+    Locked {
+        /// The key.
+        key: Vec<u8>,
+        /// The transaction that holds it.
+        by: TxnId,
+        /// Its primary key, where it is decided.
+        primary: Vec<u8>,
+    },
+    /// The transaction across shards was aborted: by its coordinator, or by
+    /// whoever found it undecided.
+    #[error("{0} was aborted")]
+    RolledBack(TxnId),
     /// The read version is not readable any more, or not yet.
     #[error(transparent)]
     Unreadable(#[from] Unreadable),

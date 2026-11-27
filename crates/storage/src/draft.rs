@@ -6,7 +6,9 @@ use std::ops::Bound;
 use crate::batch::WriteBatch;
 use crate::outcome::Unreadable;
 use crate::state::KvState;
+use crate::two_phase::Prepare;
 use crate::txn::{KeyRange, ReadSet, Transaction};
+use crate::txn_id::TxnId;
 use crate::version::Version;
 
 /// A key and its value, as a transaction reads them.
@@ -110,6 +112,26 @@ impl Draft {
         drop(self.writes.insert(key.into(), None));
     }
 
+    /// The first key it writes, in key order, if it writes any.
+    #[must_use]
+    pub fn first_write(&self) -> Option<&[u8]> {
+        self.writes.keys().next().map(Vec::as_slice)
+    }
+
+    /// This shard's part of the transaction across shards `id`, whose
+    /// primary key is `primary`, to prepare: what it read and writes here,
+    /// which may be nothing written. Its reads must be checked even then,
+    /// since the other shards read at other versions.
+    #[must_use]
+    pub fn into_prepare(self, id: TxnId, primary: Vec<u8>) -> Prepare {
+        let Self {
+            read_at,
+            reads,
+            writes,
+        } = self;
+        Prepare::new(id, primary, Transaction::new(read_at, reads, batch(writes)))
+    }
+
     /// The transaction to commit, or `None` when it writes nothing: its
     /// reads all saw one version, so a read-only transaction is already
     /// serializable at its read version and needs no commit.
@@ -118,15 +140,22 @@ impl Draft {
         if self.writes.is_empty() {
             return None;
         }
-        let writes = self
-            .writes
-            .into_iter()
-            .fold(WriteBatch::new(), |batch, (key, value)| match value {
-                Some(value) => batch.put(key, value),
-                None => batch.delete(key),
-            });
-        Some(Transaction::new(self.read_at, self.reads, writes))
+        Some(Transaction::new(
+            self.read_at,
+            self.reads,
+            batch(self.writes),
+        ))
     }
+}
+
+/// `writes`, each a value or a removal, as one batch.
+fn batch(writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> WriteBatch {
+    writes
+        .into_iter()
+        .fold(WriteBatch::new(), |batch, (key, value)| match value {
+            Some(value) => batch.put(key, value),
+            None => batch.delete(key),
+        })
 }
 
 #[cfg(test)]

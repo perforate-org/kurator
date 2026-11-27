@@ -320,6 +320,8 @@ fn malformed_states_are_rejected() {
                 out.push(*tag);
             }
         }
+        // No transactions across shards: none prepared, none decided.
+        out.extend_from_slice(&[0; 8]);
         KvState::decode(&mut Reader::new(&out))
     };
     assert!(encode(1, 2, &[(b"a", &[(1, 0), (2, 0)])]).is_ok(), "valid");

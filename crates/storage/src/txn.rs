@@ -77,6 +77,16 @@ impl Transaction {
         &self.reads
     }
 
+    /// Whether it writes `key`.
+    pub(crate) fn writes_key(&self, key: &[u8]) -> bool {
+        self.writes.ops().iter().any(|op| op.key() == key)
+    }
+
+    /// Whether it read `key`, or scanned a range that holds it.
+    pub(crate) fn read_key(&self, key: &[u8]) -> bool {
+        self.reads.keys.contains(key) || self.reads.ranges.iter().any(|range| range.contains(key))
+    }
+
     pub(crate) fn into_writes(self) -> WriteBatch {
         self.writes
     }

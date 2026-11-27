@@ -132,7 +132,7 @@ impl Machine {
     fn split(&mut self, log_id: LogId, split: &Split) -> Result<Applied> {
         let (halves, right) = match self.state.split(split) {
             Ok(split) => split,
-            Err(shard) => return Ok(Applied::Misrouted(shard)),
+            Err(unsplit) => return Ok(unsplit.into()),
         };
         let seeded = LogId::new(SEED_LEADER, log_id.index);
         let meta = SnapshotMeta {

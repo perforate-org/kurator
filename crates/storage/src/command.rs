@@ -5,6 +5,7 @@ use kurator_codec::{DecodeError, Reader};
 use crate::batch::WriteBatch;
 use crate::error::{Error, Result};
 use crate::span::Span;
+use crate::two_phase::{Decide, Prepare};
 use crate::txn::Transaction;
 
 /// Everything that can be written to the log.
@@ -19,6 +20,10 @@ pub enum Command {
     /// Changes to the key-value model, made only if nothing the
     /// transaction read changed since it read it.
     Txn(Transaction),
+    /// The first phase of a transaction across shards, on this shard.
+    Prepare(Prepare),
+    /// The second phase of a transaction across shards, on this shard.
+    Decide(Decide),
 }
 
 /// A [`Command`] together with its log payload, ready to be committed.
@@ -66,36 +71,52 @@ impl Encoded {
 const VERSION: u8 = 1;
 const KIND_KV: u8 = 1;
 const KIND_TXN: u8 = 2;
+const KIND_PREPARE: u8 = 3;
+const KIND_DECIDE: u8 = 4;
 
 impl Command {
     /// Whether everything the command reads or writes is in `span`, so a
-    /// state that holds only `span` can apply it.
+    /// state that holds only `span` can apply it. A decision touches no
+    /// key: the shard that prepared the transaction decides it.
     #[must_use]
     pub fn fits(&self, span: &Span) -> bool {
         match self {
             Self::Kv(batch) => batch.fits(span),
             Self::Txn(transaction) => transaction.fits(span),
+            Self::Prepare(prepare) => prepare.fits(span),
+            Self::Decide(_) => true,
         }
     }
 
     /// Encodes the command as `version u8 | kind u8 | body`: kind 1 is a
-    /// write batch, as [`WriteBatch`] encodes it, and kind 2 a
-    /// transaction, its reads and then its writes.
+    /// write batch, as [`WriteBatch`] encodes it, kind 2 a transaction,
+    /// its reads and then its writes, kind 3 a [`Prepare`] and kind 4 a
+    /// [`Decide`].
     ///
     /// # Errors
     ///
-    /// [`Error::EmptyBatch`] when nothing is written, and
-    /// [`Error::BatchTooLarge`] when the payload does not fit one record.
+    /// [`Error::EmptyBatch`] when a write batch or a transaction writes
+    /// nothing, and [`Error::BatchTooLarge`] when the payload does not fit
+    /// one record.
     pub fn encode(self) -> Result<Encoded> {
         let mut payload = vec![VERSION];
         match &self {
             Self::Kv(batch) => {
                 payload.push(KIND_KV);
-                batch.encode(&mut payload)?;
+                written(batch)?.encode(&mut payload)?;
             }
             Self::Txn(transaction) => {
                 payload.push(KIND_TXN);
+                let _writes: &WriteBatch = written(transaction.writes())?;
                 transaction.encode(&mut payload)?;
+            }
+            Self::Prepare(prepare) => {
+                payload.push(KIND_PREPARE);
+                prepare.encode(&mut payload)?;
+            }
+            Self::Decide(decide) => {
+                payload.push(KIND_DECIDE);
+                decide.encode(&mut payload)?;
             }
         }
         if payload.len() > kurator_wal::MAX_PAYLOAD_LEN {
@@ -122,11 +143,21 @@ impl Command {
         let command = match reader.read::<u8>()? {
             KIND_KV => Self::Kv(WriteBatch::decode(&mut reader)?),
             KIND_TXN => Self::Txn(Transaction::decode(&mut reader)?),
+            KIND_PREPARE => Self::Prepare(Prepare::decode(&mut reader)?),
+            KIND_DECIDE => Self::Decide(Decide::decode(&mut reader)?),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
         Ok(command)
     }
+}
+
+/// `batch`, if it writes something.
+const fn written(batch: &WriteBatch) -> Result<&WriteBatch> {
+    if batch.is_empty() {
+        return Err(Error::EmptyBatch);
+    }
+    Ok(batch)
 }
 
 #[cfg(test)]
@@ -139,7 +170,9 @@ mod tests {
     use super::{Command, Encoded};
     use crate::batch::{KvOp, WriteBatch};
     use crate::error::Error;
+    use crate::two_phase::{Decide, Decision, Prepare};
     use crate::txn::{KeyRange, ReadSet, Transaction};
+    use crate::txn_id::TxnId;
     use crate::version::Version;
     use kurator_codec::DecodeError;
 
@@ -301,6 +334,23 @@ mod tests {
             let command = Command::Txn(transaction);
             let encoded = command.clone().encode().unwrap();
             prop_assert_eq!(Command::decode(encoded.payload()), Ok(command));
+        }
+
+        #[test]
+        fn both_phases_roundtrip(
+            id in any::<u128>(),
+            primary in bytes(),
+            transaction in transaction(),
+            commits in any::<bool>(),
+        ) {
+            let decision = if commits { Decision::Commit } else { Decision::Abort };
+            for command in [
+                Command::Prepare(Prepare::new(TxnId::new(id), primary.clone(), transaction)),
+                Command::Decide(Decide::new(TxnId::new(id), primary, decision)),
+            ] {
+                let encoded = command.clone().encode().unwrap();
+                prop_assert_eq!(Command::decode(encoded.payload()), Ok(command));
+            }
         }
 
         #[test]

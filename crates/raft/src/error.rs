@@ -79,6 +79,10 @@ pub enum Error {
         /// The shard as it is.
         shard: Box<Shard>,
     },
+    /// A split found a transaction across shards prepared on the shard and
+    /// not decided yet; it may apply once that is decided.
+    #[error("a transaction across shards holds locks on the shard")]
+    Locked,
     /// The node holds no replica of the shard.
     #[error("no replica of {shard} here")]
     NoReplica {

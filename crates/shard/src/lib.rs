@@ -40,4 +40,4 @@ mod state;
 pub use id::{Epoch, ShardId};
 pub use map::{ShardMap, Stale};
 pub use shard::{Halves, Shard, Split};
-pub use state::{Applied, ShardState};
+pub use state::{Applied, ShardState, Unsplit};

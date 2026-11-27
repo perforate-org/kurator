@@ -21,6 +21,29 @@ pub enum Applied {
     /// strictly inside it. Nothing changed; this is the shard as it is, for
     /// the sender to route again.
     Misrouted(Shard),
+    /// A split found a transaction across shards prepared and not decided
+    /// yet, whose keys could straddle the halves. Nothing changed; the
+    /// split may apply once the transaction is decided.
+    Locked,
+}
+
+/// Why a split did not apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unsplit {
+    /// It does not fit the shard as it is now, see [`Shard::split`].
+    Misfit(Shard),
+    /// A transaction across shards is prepared and not decided yet.
+    Locked,
+}
+
+impl From<Unsplit> for Applied {
+    fn from(unsplit: Unsplit) -> Self {
+        match unsplit {
+            Unsplit::Misfit(shard) => Self::Misrouted(shard),
+            Unsplit::Locked => Self::Locked,
+        }
+    }
 }
 
 /// One shard's state: the [`Shard`] it is and the [`KvState`] of its
@@ -76,12 +99,16 @@ impl ShardState {
     ///
     /// # Errors
     ///
-    /// When the split does not apply to this shard as it is now; see
-    /// [`Shard::split`]. Nothing changes.
-    pub fn split(&mut self, split: &Split) -> Result<(Halves, Self), Shard> {
+    /// When the split does not apply to this shard as it is now, see
+    /// [`Shard::split`], or a transaction across shards is prepared here.
+    /// Nothing changes.
+    pub fn split(&mut self, split: &Split) -> Result<(Halves, Self), Unsplit> {
         let Some(halves) = self.shard.split(split) else {
-            return Err(self.shard.clone());
+            return Err(Unsplit::Misfit(self.shard.clone()));
         };
+        if self.kv.is_locked() {
+            return Err(Unsplit::Locked);
+        }
         let right = self.kv.split_off(split.at());
         self.shard = halves.left().clone();
         let right = Self::new(halves.right().clone(), right);
@@ -105,13 +132,12 @@ impl ShardState {
     /// # Errors
     ///
     /// As [`Shard::decode`] and [`KvState::decode`], and
-    /// [`DecodeError::Invalid`] when a key lies outside the span.
+    /// [`DecodeError::Invalid`] when a key, or a prepared transaction's
+    /// part, lies outside the span.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let shard = Shard::decode(reader)?;
         let kv = KvState::decode(reader)?;
-        let span = shard.span();
-        let outside = kv.keys().any(|key| !span.contains(key));
-        if outside {
+        if !kv.fits(shard.span()) {
             return Err(DecodeError::Invalid);
         }
         Ok(Self::new(shard, kv))
@@ -121,9 +147,11 @@ impl ShardState {
 #[cfg(test)]
 mod tests {
     use kurator_codec::{DecodeError, Reader};
-    use kurator_storage::{Command, End, KvState, Outcome, Span, Version, WriteBatch};
+    use kurator_storage::{
+        Command, Decide, Decision, Draft, End, KvState, Outcome, Span, TxnId, Version, WriteBatch,
+    };
 
-    use super::{Applied, ShardState};
+    use super::{Applied, ShardState, Unsplit};
     use crate::id::{Epoch, ShardId};
     use crate::shard::{Shard, Split};
 
@@ -160,7 +188,7 @@ mod tests {
         assert_eq!(right.kv().version(), Version::new(3), "same version");
         assert_eq!(
             state.split(&split),
-            Err(halves.left().clone()),
+            Err(Unsplit::Misfit(halves.left().clone())),
             "a stale split"
         );
         assert_eq!(
@@ -171,6 +199,36 @@ mod tests {
         assert_eq!(state.kv().version(), Version::new(3), "nothing applied");
         assert_eq!(roundtrip(&state), Ok(state.clone()), "left roundtrips");
         assert_eq!(roundtrip(&right), Ok(right), "right roundtrips");
+    }
+
+    #[test]
+    fn a_split_waits_for_a_prepared_transaction() {
+        let mut state = ShardState::default();
+        let mut draft = Draft::new(state.kv().version());
+        draft.put("zucchini", "v");
+        let prepare = Command::Prepare(draft.into_prepare(TxnId::new(1), b"zucchini".to_vec()));
+        let prepared = state.apply(Version::new(1), prepare);
+        assert_eq!(
+            prepared,
+            Applied::Data(Outcome::Prepared(Version::new(1))),
+            "prepared"
+        );
+        let split = Split::new("m", ShardId::new(2), Epoch::ZERO);
+        assert_eq!(state.split(&split), Err(Unsplit::Locked), "locked");
+        assert_eq!(state.shard(), &Shard::first(), "unchanged");
+        let decide = Command::Decide(Decide::new(
+            TxnId::new(1),
+            b"zucchini".to_vec(),
+            Decision::Commit,
+        ));
+        let _committed = state.apply(Version::new(2), decide);
+        let (_halves, right) = state.split(&split).unwrap();
+        assert!(right.kv().get(b"zucchini").is_some(), "split once decided");
+        assert_eq!(
+            Applied::from(Unsplit::Locked),
+            Applied::Locked,
+            "an entry that waits"
+        );
     }
 
     #[test]
