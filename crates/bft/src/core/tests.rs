@@ -801,3 +801,21 @@ fn the_commands_a_block_leaves_out_go_with_the_vote() {
     );
     assert_eq!(sent[1], (To::One(leader(2)), &forward), "the commands");
 }
+
+#[test]
+fn a_leader_that_proposed_hands_later_commands_on() {
+    let node = leader(1);
+    assert_ne!(leader(2), node, "another leader next");
+    let mut first = started(node);
+    let late = b"late".to_vec();
+    let effects = first.handle(Event::Submitted(late.clone())).persisted();
+    let [outgoing] = effects.messages() else {
+        panic!("one message: {:?}", effects.messages());
+    };
+    assert_eq!(outgoing.to(), To::One(leader(2)), "to the next leader");
+    let Message::Forward(commands) = outgoing.message() else {
+        panic!("forwards: {outgoing:?}");
+    };
+    // Its own block is not certified yet: its commands go along too.
+    assert!(commands.contains(&late), "the command: {commands:?}");
+}
