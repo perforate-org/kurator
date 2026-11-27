@@ -9,10 +9,7 @@ use std::time::Instant;
 use kurator_consensus::{Members, Replicated, Role, Transaction};
 use kurator_metrics::{Exposition, Histogram, Histograms, Label, Values};
 use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
-use kurator_storage::{
-    Abort, Collect, Command, Decide, Decided, Draft, KeyValue, KvState, Outcome, Prepare, Version,
-    WriteBatch,
-};
+use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
 use openraft::raft::ClientWriteResponse;
@@ -246,61 +243,6 @@ impl<C: Config> Replica<C> {
     #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.state.is_initialized()
-    }
-
-    /// Prepares this shard's part of a transaction across shards: once it
-    /// applies, the shard holds the part's writes back and locks what it
-    /// read and writes, until [`Replica::decide`] tells it how the
-    /// transaction came out. Returns the version it applied at.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when the
-    /// shard refuses: a read changed since its read version, another
-    /// prepared transaction holds a key it touches, or the transaction was
-    /// decided already. Otherwise as [`Replica::write`].
-    pub async fn prepare(&self, prepare: Prepare) -> Result<Version> {
-        let proposal = Proposal::new(Command::Prepare(prepare))?;
-        let response = self.replicate(proposal).await?;
-        version(response.data)
-    }
-
-    /// Tells this shard how a transaction across shards came out, and
-    /// returns how the shard decided it: as told when it prepared its
-    /// part, as it was decided before when it was, and aborted otherwise.
-    /// A commit told to the primary is the transaction's commit point.
-    ///
-    /// # Errors
-    ///
-    /// As [`Replica::write`]; [`Error::Discarded`] leaves the decision
-    /// unknown, and telling it again is safe. [`Abort::Fenced`] when the
-    /// transaction is behind the shard's fence and the shard does not know
-    /// it: how it was decided may be forgotten.
-    pub async fn decide(&self, decide: Decide) -> Result<Decided> {
-        let proposal = Proposal::new(Command::Decide(decide))?;
-        let response = self.replicate(proposal).await?;
-        let rolled_back = matches!(
-            response.data,
-            Applied::Data(Outcome::Aborted(Abort::RolledBack(_)))
-        );
-        if rolled_back {
-            return Ok(Decided::Aborted);
-        }
-        version(response.data).map(Decided::Committed)
-    }
-
-    /// Takes `step` of forgetting the decisions on transactions across
-    /// shards, on this shard. Returns the version it applied at.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] holding
-    /// [`Abort::Held`] when a fence finds a transaction prepared from
-    /// before it. Otherwise as [`Replica::write`].
-    pub async fn collect(&self, step: Collect) -> Result<Version> {
-        let proposal = Proposal::new(Command::Collect(step))?;
-        let response = self.replicate(proposal).await?;
-        version(response.data)
     }
 
     /// Adds `id`, reached as `peer`, as a learner: the leader starts sending

@@ -106,3 +106,51 @@ async fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     }
     Ok(head)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::{HEAD, read_head};
+
+    /// What `read_head` takes from a client that sends `parts`, a pause
+    /// between each.
+    async fn head_of(parts: Vec<Vec<u8>>) -> Vec<u8> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            for part in parts {
+                stream.write_all(&part).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let head = read_head(&mut stream).await.unwrap();
+        client.await.unwrap();
+        head
+    }
+
+    #[tokio::test]
+    async fn a_head_is_read_to_its_blank_line_or_its_limit() {
+        let split = vec![b"GET /met".to_vec(), b"rics HTTP/1.1\r\n\r\n".to_vec()];
+        assert_eq!(
+            head_of(split).await,
+            b"GET /metrics HTTP/1.1\r\n\r\n",
+            "across two segments"
+        );
+        let endless = vec![vec![b'x'; HEAD + 4096]];
+        assert_eq!(
+            head_of(endless).await.len(),
+            HEAD,
+            "no further than the limit"
+        );
+        assert!(
+            head_of(Vec::new()).await.is_empty(),
+            "a client that hangs up"
+        );
+    }
+}
