@@ -297,3 +297,143 @@ fn a_trusted_client_runs_a_transaction_across_shards() {
     assert_eq!(said, "kurator: no node answered", "and is told so");
     assert!(console.quit().is_empty(), "nothing more");
 }
+
+#[test]
+fn a_node_splits_a_shard_that_outgrows_its_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut console = Console::start(
+        &[
+            "--id",
+            "1",
+            "--listen",
+            "127.0.0.1:0",
+            "--split-above",
+            "512",
+            "--found",
+        ],
+        dir.path(),
+    );
+    let started = Instant::now();
+    let value = "v".repeat(100);
+    for key in ["a", "b", "c", "d", "e", "f"] {
+        let mut answer = console.ask(&format!("put {key} {value}"), 1);
+        while !answer.starts_with("ok at") {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "no leader: {answer}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            answer = console.ask(&format!("put {key} {value}"), 1);
+        }
+    }
+    // Six keys of about 120 bytes: the node splits at the middle, d, on its
+    // next check, and the halves are under the ceiling.
+    loop {
+        let shards = console.ask("shards", 1);
+        if shards.starts_with("s1 [, d) at e1") {
+            assert_eq!(console.read(1), "s2 [d, ..) at e1 on n1", "{shards}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(40),
+            "never split: {shards}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(console.quit().is_empty(), "nothing more");
+}
+
+/// Asks `line` until the answer starts with `expected`, for up to 20
+/// seconds: until a shard elects its leader, say. Returns the answer.
+fn ask_until(console: &mut Console, line: &str, lines: usize, expected: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let answer = console.ask(line, lines);
+        if answer.starts_with(expected) {
+            return answer;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{line}: {answer}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_backup_restores_as_a_new_cluster() {
+    let (old, new, backups) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let backup = backups.path().join("monday");
+    let backup_arg = backup.to_str().unwrap();
+    let mut first = Console::start(
+        &["--id", "1", "--listen", "127.0.0.1:0", "--found"],
+        old.path(),
+    );
+    drop(ask_until(&mut first, "put apple red", 1, "ok at"));
+    drop(ask_until(&mut first, "split m", 1, "ok"));
+    drop(ask_until(&mut first, "put melon green", 1, "ok at"));
+    assert_eq!(
+        first.ask(&format!("backup {backup_arg}"), 1),
+        format!("ok: 3 shards in {backup_arg}"),
+        "the meta shard and both halves"
+    );
+    assert!(
+        first
+            .ask(&format!("backup {backup_arg}"), 1)
+            .starts_with("error"),
+        "not over a backup"
+    );
+    assert!(first.quit().is_empty(), "nothing more");
+
+    let mut second = Console::start(
+        &[
+            "--id",
+            "2",
+            "--listen",
+            "127.0.0.1:0",
+            "--restore",
+            backup_arg,
+        ],
+        new.path(),
+    );
+    assert_eq!(ask_until(&mut second, "get apple", 1, "red"), "red", "left");
+    assert_eq!(
+        ask_until(&mut second, "get melon", 1, "green"),
+        "green",
+        "right"
+    );
+    drop(ask_until(&mut second, "put kiwi brown", 1, "ok at"));
+    assert_eq!(
+        ask_until(&mut second, "shards", 2, "s1 [, m) at e1 on n2"),
+        "s1 [, m) at e1 on n2\ns2 [m, ..) at e1 on n2",
+        "the new node holds every shard"
+    );
+    assert_eq!(
+        ask_until(&mut second, "split t", 1, "ok"),
+        "ok: s2 [m, t) at e2 | s3 [t, ..) at e2",
+        "ids go on from the backup's"
+    );
+    assert!(second.quit().is_empty(), "nothing more");
+    // Restarting with the same flag goes on from what the node holds.
+    let mut again = Console::start(
+        &[
+            "--id",
+            "2",
+            "--listen",
+            "127.0.0.1:0",
+            "--restore",
+            backup_arg,
+        ],
+        new.path(),
+    );
+    assert_eq!(
+        ask_until(&mut again, "get kiwi", 1, "brown"),
+        "brown",
+        "kept"
+    );
+    assert!(again.quit().is_empty(), "nothing more");
+}

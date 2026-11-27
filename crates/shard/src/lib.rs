@@ -8,7 +8,8 @@
 //! hold: the shard and the [`KvState`](kurator_storage::KvState) of its
 //! keys.
 //!
-//! A shard grows until it [splits](Split): the split goes into the shard's
+//! A shard grows until its state passes its [`Ceiling`] and it
+//! [splits](Split) at the key that halves it: the split goes into the shard's
 //! own log like any command, and applying it cuts the state at the split
 //! key. The shard keeps its id and the keys before the key; the keys from
 //! it on become a new shard, at the same version, which a new Raft group
@@ -32,11 +33,13 @@
 //! assert_eq!(late, Applied::Misrouted(halves.left().clone()));
 //! ```
 
+mod ceiling;
 mod id;
 mod map;
 mod shard;
 mod state;
 
+pub use ceiling::Ceiling;
 pub use id::{Epoch, ShardId};
 pub use map::{ShardMap, Stale};
 pub use shard::{Halves, Shard, Split};

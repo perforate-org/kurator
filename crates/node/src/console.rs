@@ -17,17 +17,21 @@
 //! promote <id>             make a learner that caught up a voter in every shard
 //! remove <id>              take a node out of every shard
 //! collect                  forget the decisions on transactions across shards long past their deadline
+//! backup <dir>             write every shard this node holds to <dir>, which must not exist; see `run --restore`
 //! quit
 //! ```
 //!
 //! The node that leads the meta shard also collects on its own, every
-//! [`sweep::EVERY`](crate::sweep::EVERY).
+//! [`sweep::EVERY`](crate::sweep::EVERY), and every node splits the shards
+//! it leads once they pass their ceiling, every
+//! [`split::EVERY`](crate::split::EVERY).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use kurator_client::Collected;
 use kurator_consensus::{Members, NodeId, Peer, Replicated as _};
-use kurator_meta::{Meta, Placement};
+use kurator_meta::Meta;
 use kurator_net::{Quic, Replica, Store};
 use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
@@ -66,6 +70,8 @@ pub enum Command {
     Remove(NodeId),
     /// Forgets old decisions on transactions across shards.
     Collect,
+    /// Backs up every shard the node holds to a new directory.
+    Backup(PathBuf),
     /// Stops the node.
     Quit,
 }
@@ -82,7 +88,7 @@ pub enum Reply {
 
 const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k> | shards \
                     | status | members | add <id> <addr> <key> | promote <id> \
-                    | remove <id> | collect | quit";
+                    | remove <id> | collect | backup <dir> | quit";
 
 impl Command {
     /// Reads one line; `None` when it is not a command.
@@ -104,6 +110,7 @@ impl Command {
             ["promote", id] => Self::Promote(node_id(id)?),
             ["remove", id] => Self::Remove(node_id(id)?),
             ["collect"] => Self::Collect,
+            ["backup", dir] => Self::Backup(PathBuf::from(dir)),
             ["quit"] => Self::Quit,
             _ => return None,
         };
@@ -164,6 +171,14 @@ pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
             Collected::Forgotten => "ok: forgotten".to_owned(),
             Collected::Unfinished | _ => "error: a shard did not answer; try again".to_owned(),
         },
+        Command::Backup(dir) => {
+            let backup = store.back_up();
+            let shards = backup.shards().count();
+            match backup.write(&dir) {
+                Ok(()) => format!("ok: {shards} shards in {}", dir.display()),
+                Err(error) => format!("error: {error}"),
+            }
+        }
         Command::Quit => return Reply::Quit,
     };
     Reply::Show(shown)
@@ -213,34 +228,15 @@ async fn get(replica: &Replica, key: &str) -> String {
     }
 }
 
-/// Splits the shard that holds `at` under an id the meta shard allocates,
-/// and reports both halves to it.
+/// Splits the shard that holds `at` there; see [`crate::split::split`].
 async fn split(store: &Store, ask: &Quic, at: &str) -> String {
     let Some(replica) = holder(store, at) else {
         return unheld();
     };
-    let Some(meta) = meta(store) else {
-        return no_meta();
-    };
-    let meta = Meta::new(&meta, ask);
-    let right = match meta.allocate().await {
-        Ok(right) => right,
-        Err(error) => return format!("error: {error}"),
-    };
-    let halves = match store.split(replica.shard_id(), at.as_bytes(), right).await {
-        Ok(halves) => halves,
-        Err(error) => return format!("error: {error}"),
-    };
-    for shard in [halves.left(), halves.right()] {
-        let placement = match store.replica(shard.id()).await {
-            Ok(Some(half)) => Placement::of(&half),
-            Ok(None) | Err(_) => continue,
-        };
-        if let Err(error) = meta.report(&placement).await {
-            return format!("error: split, but not recorded: {error}");
-        }
+    match crate::split::split(store, ask, replica.shard_id(), at.as_bytes()).await {
+        Ok(halves) => format!("ok: {} | {}", halves.left(), halves.right()),
+        Err(error) => format!("error: {error}"),
     }
-    format!("ok: {} | {}", halves.left(), halves.right())
 }
 
 /// Reports every shard this node leads to the meta shard, then lists what
@@ -344,6 +340,8 @@ mod tests {
             ("promote 4", Some(Command::Promote(NodeId::new(4)))),
             ("remove 2", Some(Command::Remove(NodeId::new(2)))),
             ("quit", Some(Command::Quit)),
+            ("backup b", Some(Command::Backup("b".into()))),
+            ("backup", None),
             ("put k", None),
             ("promote four", None),
             ("add 4 nowhere key", None),

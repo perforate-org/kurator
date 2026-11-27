@@ -2,18 +2,24 @@
 //!
 //! ```text
 //! kurator key <dir>
-//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--found]
+//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--split-above <bytes>] [--found | --restore <backup>]
 //! kurator client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
-//! touch.
+//! touch. A node splits a shard it leads once the shard's state takes more
+//! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
+//!
+//! `--restore` founds a new cluster from a backup the console's `backup`
+//! wrote: the node holds every shard of it, as their only voter, and
+//! other nodes join it as learners.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use kurator_crypto::VerifyingKey;
 use kurator_raft::{NodeId, Peer};
+use kurator_shard::Ceiling;
 
 /// What the process was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,11 +83,12 @@ pub struct Settings {
     listen: SocketAddr,
     peers: Vec<(NodeId, Peer)>,
     clients: Vec<VerifyingKey>,
+    ceiling: Ceiling,
     start: Start,
 }
 
 /// How a replica comes into its cluster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Start {
     /// Wait: the cluster exists, or another node founds it, and a leader
@@ -89,6 +96,9 @@ pub enum Start {
     Wait,
     /// Found the cluster, with this node and its peers as voters.
     Found,
+    /// Found the cluster from the backup in this directory, with this node
+    /// as the only voter.
+    Restore(PathBuf),
 }
 
 impl Settings {
@@ -122,10 +132,16 @@ impl Settings {
         &self.clients
     }
 
+    /// How large a shard it leads grows before it splits it.
+    #[must_use]
+    pub const fn ceiling(&self) -> Ceiling {
+        self.ceiling
+    }
+
     /// How it comes into its cluster.
     #[must_use]
-    pub const fn start(&self) -> Start {
-        self.start
+    pub const fn start(&self) -> &Start {
+        &self.start
     }
 }
 
@@ -184,6 +200,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
     let mut listen = None;
     let mut peers = Vec::new();
     let mut clients = Vec::new();
+    let mut ceiling = Ceiling::DEFAULT;
     let mut start = Start::Wait;
     while let Some(arg) = args.next() {
         let mut value = |option: &'static str| args.next().ok_or(UsageError::Missing(option));
@@ -193,7 +210,11 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
             "--listen" => listen = Some(read("--listen", &value("--listen")?, addr)?),
             "--peer" => peers.push(read("--peer", &value("--peer")?, peer)?),
             "--client" => clients.push(read("--client", &value("--client")?, key)?),
+            "--split-above" => {
+                ceiling = read("--split-above", &value("--split-above")?, bytes)?;
+            }
             "--found" => start = Start::Found,
+            "--restore" => start = Start::Restore(PathBuf::from(value("--restore")?)),
             _ => return Err(UsageError::Option(arg)),
         }
     }
@@ -203,6 +224,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
         listen: listen.ok_or(UsageError::Missing("--listen"))?,
         peers,
         clients,
+        ceiling,
         start,
     })
 }
@@ -258,6 +280,11 @@ pub(crate) fn addr(text: &str) -> Option<SocketAddr> {
     text.parse().ok()
 }
 
+/// A ceiling: a positive number of bytes.
+fn bytes(text: &str) -> Option<Ceiling> {
+    text.parse().ok().map(Ceiling::new)
+}
+
 /// `<id>=<addr>,<key>`.
 fn peer(text: &str) -> Option<(NodeId, Peer)> {
     let (id, rest) = text.split_once('=')?;
@@ -275,6 +302,8 @@ pub(crate) fn key(text: &str) -> Option<VerifyingKey> {
 mod tests {
     use kurator_crypto::{KeyPurpose, NodeSecret};
     use kurator_raft::NodeId;
+
+    use kurator_shard::Ceiling;
 
     use super::{Invocation, Op, Start, UsageError, key, parse};
 
@@ -303,7 +332,7 @@ mod tests {
         let peer_key = NodeSecret::from_seed([2; 32]).public_key(KeyPurpose::Transport);
         let client_key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
         let line = format!(
-            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --found"
+            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --split-above 4096 --found"
         );
         let Ok(Invocation::Run(settings)) = parse(args(&line)) else {
             panic!("parses");
@@ -311,7 +340,7 @@ mod tests {
         assert_eq!(settings.id(), NodeId::new(1), "id");
         assert_eq!(settings.dir().to_str(), Some("n1"), "dir");
         assert_eq!(settings.listen().port(), 7001, "listen");
-        assert_eq!(settings.start(), Start::Found, "found");
+        assert_eq!(settings.start(), &Start::Found, "found");
         let [(id, peer)] = settings.peers() else {
             panic!("one peer");
         };
@@ -319,13 +348,25 @@ mod tests {
         assert_eq!(peer.addr().port(), 7002, "peer addr");
         assert_eq!(peer.key(), &peer_key, "peer key");
         assert_eq!(settings.clients(), [client_key], "client");
+        assert_eq!(settings.ceiling().bytes().get(), 4096, "ceiling");
         let Ok(Invocation::Run(waiting)) = parse(args("run --id 4 --dir d --listen [::1]:1"))
         else {
             panic!("parses");
         };
-        assert_eq!(waiting.start(), Start::Wait, "waits by default");
+        assert_eq!(waiting.start(), &Start::Wait, "waits by default");
+        let Ok(Invocation::Run(restoring)) =
+            parse(args("run --id 4 --dir d --listen [::1]:1 --restore b"))
+        else {
+            panic!("parses");
+        };
+        assert_eq!(
+            restoring.start(),
+            &Start::Restore("b".into()),
+            "restores a backup"
+        );
         assert!(waiting.peers().is_empty(), "no peers");
         assert!(waiting.clients().is_empty(), "no clients");
+        assert_eq!(waiting.ceiling(), Ceiling::DEFAULT, "the default ceiling");
     }
 
     #[test]
@@ -388,6 +429,7 @@ mod tests {
                 UsageError::Missing("--dir"),
             ),
             ("run --id 1 --dir d", UsageError::Missing("--listen")),
+            ("run --restore", UsageError::Missing("--restore")),
             ("run --id", UsageError::Missing("--id")),
             (
                 "run --id 1 --verbose",
@@ -405,6 +447,13 @@ mod tests {
                 UsageError::Value {
                     option: "--peer",
                     value: "2=127.0.0.1:1".to_owned(),
+                },
+            ),
+            (
+                "run --split-above 0",
+                UsageError::Value {
+                    option: "--split-above",
+                    value: "0".to_owned(),
                 },
             ),
             (

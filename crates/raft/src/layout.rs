@@ -76,6 +76,22 @@ impl Layout {
         Ok(ids(&self.root.join(SHARDS))?)
     }
 
+    /// Whether the node holds nothing yet: no shard has a home, and no
+    /// seed waits to be planted.
+    pub(crate) fn is_empty(&self) -> Result<bool> {
+        Ok(self.shards()?.is_empty() && ids(&self.root.join(SEEDS))?.is_empty())
+    }
+
+    /// Writes `seed` as the first snapshot of shard `id`, durably, for the
+    /// store to plant.
+    pub(crate) fn sow(&self, id: ShardId, seed: &SnapshotBytes) -> Result<()> {
+        let dir = self.seed_dir(id);
+        SnapshotDir::open(&dir)?.store(seed)?;
+        sync_dir(&self.root.join(SEEDS))?;
+        let _new: bool = self.sown.lock().insert(id);
+        Ok(())
+    }
+
     /// The seeds written since the last call, by shard, each with the
     /// snapshot it holds. A seed discarded since it was written is left
     /// out.
@@ -128,11 +144,7 @@ impl Home {
     /// Writes `seed` as the first snapshot of the new shard `id`, durably,
     /// for the store to plant.
     pub(crate) fn sow(&self, id: ShardId, seed: &SnapshotBytes) -> Result<()> {
-        let dir = self.layout.seed_dir(id);
-        SnapshotDir::open(&dir)?.store(seed)?;
-        sync_dir(&self.layout.root.join(SEEDS))?;
-        let _new: bool = self.layout.sown.lock().insert(id);
-        Ok(())
+        self.layout.sow(id, seed)
     }
 }
 
@@ -161,6 +173,7 @@ mod tests {
     fn seeds_stay_until_they_are_discarded() {
         let root = tempfile::tempdir().unwrap();
         let layout = Layout::open(root.path()).unwrap();
+        assert!(layout.is_empty().unwrap(), "new");
         let seed = SnapshotBytes::encode(&SnapshotMeta::default(), &ShardState::default()).unwrap();
         let home = layout.home(ShardId::FIRST);
         assert!(home.log().ends_with("shards/1/log"), "log");
@@ -175,6 +188,7 @@ mod tests {
         std::fs::create_dir_all(home.log()).unwrap();
         std::fs::create_dir_all(root.path().join("shards/not-a-shard")).unwrap();
         assert_eq!(layout.shards().unwrap(), [ShardId::FIRST].into(), "homes");
+        assert!(!layout.is_empty().unwrap(), "holds a shard");
 
         let reopened = Layout::open(root.path()).unwrap();
         assert_eq!(

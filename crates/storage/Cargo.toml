@@ -26,5 +26,9 @@ proptest.workspace = true
 name = "commit"
 harness = false
 
+[[bench]]
+name = "footprint"
+harness = false
+
 [lints]
 workspace = true

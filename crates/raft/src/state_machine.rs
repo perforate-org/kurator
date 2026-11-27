@@ -177,7 +177,7 @@ impl Machine {
 /// The leader a seed's entry is written by: nobody, before the first term.
 /// Any leader of the new shard is in a later term, so its entries come
 /// after the seed's.
-const SEED_LEADER: LeaderId = LeaderId {
+pub(crate) const SEED_LEADER: LeaderId = LeaderId {
     term: 0,
     node_id: NodeId::new(0),
 };
