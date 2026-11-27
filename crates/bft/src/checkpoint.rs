@@ -565,6 +565,7 @@ mod tests {
         assert!(!ten.at(Height::new(11)), "not at eleven");
         assert_eq!(Height::new(4).next(), Some(Height::new(5)), "next");
         assert_eq!(Height::new(u64::MAX).next(), None, "the last");
+        assert_eq!(Height::new(42).get(), 42, "counts blocks");
         assert_eq!(Height::new(3).to_string(), "height 3", "shown");
         assert_eq!(Interval::DEFAULT, every(1000), "a thousand");
     }
