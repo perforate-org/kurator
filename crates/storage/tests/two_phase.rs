@@ -11,8 +11,8 @@ use std::ops::Bound::{Excluded, Included};
 use criterion as _;
 use kurator_codec::Reader;
 use kurator_storage::{
-    Abort, Command, Deadline, Decide, Decided, Decision, Draft, KvState, Outcome, Prepare, TxnId,
-    Version, WriteBatch,
+    Abort, Collect, Command, Deadline, Decide, Decided, Decision, Draft, KvState, Outcome, Prepare,
+    TxnId, Version, WriteBatch,
 };
 use proptest as _;
 use tempfile as _;
@@ -38,7 +38,12 @@ fn part(state: &KvState, id: u128) -> Prepare {
 }
 
 fn decide(id: u128, decision: Decision) -> Command {
-    Command::Decide(Decide::new(TxnId::new(id), b"a".to_vec(), decision))
+    Command::Decide(Decide::new(
+        TxnId::new(id),
+        b"a".to_vec(),
+        DEADLINE,
+        decision,
+    ))
 }
 
 fn locked(key: &str, id: u128) -> Outcome {
@@ -133,7 +138,7 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
 #[test]
 fn a_split_hands_each_decision_to_the_half_of_its_primary_key() {
     let mut state = state();
-    let elsewhere = Decide::new(TxnId::new(9), b"z".to_vec(), Decision::Abort);
+    let elsewhere = Decide::new(TxnId::new(9), b"z".to_vec(), DEADLINE, Decision::Abort);
     let _decided = state.apply(Version::new(2), Command::Decide(elsewhere));
     let _here = state.apply(Version::new(3), decide(8, Decision::Abort));
     let right = state.split_off(b"m");
@@ -267,6 +272,111 @@ fn commands_of_both_phases_roundtrip() {
         assert_eq!(Command::decode(encoded.payload()), Ok(command), "roundtrip");
     }
     assert_eq!(TxnId::new(255).to_string(), "tff", "display");
+}
+
+/// A step of collecting at `horizon` milliseconds.
+const fn fence(horizon: u64) -> Command {
+    Command::Collect(Collect::Fence(Deadline::new(horizon)))
+}
+
+const fn forget(horizon: u64) -> Command {
+    Command::Collect(Collect::Forget(Deadline::new(horizon)))
+}
+
+#[test]
+fn a_fence_waits_for_the_transactions_prepared_before_it() {
+    let mut state = state();
+    let _prepared = state.apply(Version::new(2), Command::Prepare(part(&state, 7)));
+    let held = Outcome::Aborted(Abort::Held {
+        by: TxnId::new(7),
+        primary: b"a".to_vec(),
+        deadline: DEADLINE,
+    });
+    assert_eq!(state.apply(Version::new(3), fence(1_001)), held, "held");
+    assert_eq!(
+        state.apply(Version::new(4), fence(1_000)),
+        Outcome::Committed(Version::new(4)),
+        "a fence at the deadline passes"
+    );
+    let _aborted = state.apply(Version::new(5), decide(7, Decision::Abort));
+    assert_eq!(
+        state.apply(Version::new(6), fence(1_001)),
+        Outcome::Committed(Version::new(6)),
+        "once it is decided"
+    );
+    assert_eq!(state.version(), Version::new(1), "nothing written");
+}
+
+#[test]
+fn behind_the_fence_nothing_is_prepared_or_decided_and_decisions_are_forgotten() {
+    let mut state = state();
+    let _aborted = state.apply(Version::new(2), decide(7, Decision::Abort));
+    let _prepared = state.apply(Version::new(3), Command::Prepare(part(&state, 8)));
+    let _committed = state.apply(Version::new(4), decide(8, Decision::Commit));
+    assert_eq!(
+        state.apply(Version::new(5), forget(2_000)),
+        Outcome::Committed(Version::new(5)),
+        "forgets"
+    );
+    assert_eq!(
+        state.decided(TxnId::new(7)),
+        Some(Decided::Aborted),
+        "nothing before the fence"
+    );
+    assert_eq!(state.decisions().count(), 2, "both kept");
+    let _fenced = state.apply(Version::new(6), fence(2_000));
+    let _lower = state.apply(Version::new(7), fence(500));
+    let _forgotten = state.apply(Version::new(8), forget(3_000));
+    assert_eq!(state.decided(TxnId::new(7)), None, "forgotten");
+    assert_eq!(state.decisions().count(), 0, "none kept");
+    assert_eq!(state.decided(TxnId::new(8)), None, "forgotten too");
+    let fenced = |id| Outcome::Aborted(Abort::Fenced(TxnId::new(id)));
+    assert_eq!(
+        state.apply(Version::new(9), Command::Prepare(part(&state, 7))),
+        fenced(7),
+        "a late prepare"
+    );
+    assert_eq!(
+        state.apply(Version::new(10), decide(8, Decision::Commit)),
+        fenced(8),
+        "a late decision"
+    );
+    assert!(!state.is_locked(), "nothing locked");
+    assert_eq!(state.decided(TxnId::new(8)), None, "nor recorded");
+    let later = |id| {
+        let mut draft = Draft::new(state.version());
+        draft.put("c", "1");
+        draft.into_prepare(TxnId::new(id), b"c".to_vec(), Deadline::new(2_000))
+    };
+    assert_eq!(
+        state.apply(Version::new(11), Command::Prepare(later(9))),
+        Outcome::Prepared(Version::new(11)),
+        "a transaction at the fence"
+    );
+    let right = state.split_off(b"b");
+    assert!(right.is_locked(), "by its primary key");
+    let mut right = right;
+    assert_eq!(
+        right.apply(Version::new(12), Command::Prepare(part(&state, 10))),
+        fenced(10),
+        "the other half keeps the fence"
+    );
+}
+
+#[test]
+fn the_fence_and_what_it_kept_survive_encoding() {
+    let mut state = state();
+    let _aborted = state.apply(Version::new(2), decide(7, Decision::Abort));
+    let _fenced = state.apply(Version::new(3), fence(2_000));
+    let mut out = Vec::new();
+    state.encode(&mut out).unwrap();
+    let mut decoded = KvState::decode(&mut Reader::new(&out)).unwrap();
+    assert_eq!(decoded, state, "roundtrip");
+    assert_eq!(
+        decoded.apply(Version::new(4), Command::Prepare(part(&state, 8))),
+        Outcome::Aborted(Abort::Fenced(TxnId::new(8))),
+        "still fenced"
+    );
 }
 
 #[test]

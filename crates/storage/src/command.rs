@@ -5,7 +5,7 @@ use kurator_codec::{DecodeError, Reader};
 use crate::batch::WriteBatch;
 use crate::error::{Error, Result};
 use crate::span::Span;
-use crate::two_phase::{Decide, Prepare};
+use crate::two_phase::{Collect, Decide, Prepare};
 use crate::txn::Transaction;
 
 /// Everything that can be written to the log.
@@ -24,6 +24,8 @@ pub enum Command {
     Prepare(Prepare),
     /// The second phase of a transaction across shards, on this shard.
     Decide(Decide),
+    /// A step of forgetting the decisions on transactions across shards.
+    Collect(Collect),
 }
 
 /// A [`Command`] together with its log payload, ready to be committed.
@@ -73,25 +75,27 @@ const KIND_KV: u8 = 1;
 const KIND_TXN: u8 = 2;
 const KIND_PREPARE: u8 = 3;
 const KIND_DECIDE: u8 = 4;
+const KIND_COLLECT: u8 = 5;
 
 impl Command {
     /// Whether everything the command reads or writes is in `span`, so a
     /// state that holds only `span` can apply it. A decision touches no
-    /// key: the shard that prepared the transaction decides it.
+    /// key: the shard that prepared the transaction decides it, and
+    /// neither does collecting.
     #[must_use]
     pub fn fits(&self, span: &Span) -> bool {
         match self {
             Self::Kv(batch) => batch.fits(span),
             Self::Txn(transaction) => transaction.fits(span),
             Self::Prepare(prepare) => prepare.fits(span),
-            Self::Decide(_) => true,
+            Self::Decide(_) | Self::Collect(_) => true,
         }
     }
 
     /// Encodes the command as `version u8 | kind u8 | body`: kind 1 is a
     /// write batch, as [`WriteBatch`] encodes it, kind 2 a transaction,
-    /// its reads and then its writes, kind 3 a [`Prepare`] and kind 4 a
-    /// [`Decide`].
+    /// its reads and then its writes, kind 3 a [`Prepare`], kind 4 a
+    /// [`Decide`] and kind 5 a step of [`Collect`].
     ///
     /// # Errors
     ///
@@ -117,6 +121,10 @@ impl Command {
             Self::Decide(decide) => {
                 payload.push(KIND_DECIDE);
                 decide.encode(&mut payload)?;
+            }
+            Self::Collect(step) => {
+                payload.push(KIND_COLLECT);
+                step.encode(&mut payload);
             }
         }
         if payload.len() > kurator_wal::MAX_PAYLOAD_LEN {
@@ -145,6 +153,7 @@ impl Command {
             KIND_TXN => Self::Txn(Transaction::decode(&mut reader)?),
             KIND_PREPARE => Self::Prepare(Prepare::decode(&mut reader)?),
             KIND_DECIDE => Self::Decide(Decide::decode(&mut reader)?),
+            KIND_COLLECT => Self::Collect(Collect::decode(&mut reader)?),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -171,7 +180,7 @@ mod tests {
     use crate::across::{Deadline, TxnId};
     use crate::batch::{KvOp, WriteBatch};
     use crate::error::Error;
-    use crate::two_phase::{Decide, Decision, Prepare};
+    use crate::two_phase::{Collect, Decide, Decision, Prepare};
     use crate::txn::{KeyRange, ReadSet, Transaction};
     use crate::version::Version;
     use kurator_codec::DecodeError;
@@ -347,7 +356,9 @@ mod tests {
             let decision = if commits { Decision::Commit } else { Decision::Abort };
             for command in [
                 Command::Prepare(Prepare::new(TxnId::new(id), primary.clone(), Deadline::new(deadline), transaction)),
-                Command::Decide(Decide::new(TxnId::new(id), primary, decision)),
+                Command::Decide(Decide::new(TxnId::new(id), primary, Deadline::new(deadline), decision)),
+                Command::Collect(Collect::Fence(Deadline::new(deadline))),
+                Command::Collect(Collect::Forget(Deadline::new(deadline))),
             ] {
                 let encoded = command.clone().encode().unwrap();
                 prop_assert_eq!(Command::decode(encoded.payload()), Ok(command));

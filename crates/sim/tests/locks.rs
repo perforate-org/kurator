@@ -1,6 +1,7 @@
 //! Locks a coordinator of a transaction across shards left behind: they
 //! hold writes and a split back until their deadline passes, and then
-//! whoever runs into them, or settling, resolves them at the primary.
+//! whoever runs into them, or settling, resolves them at the primary. Long
+//! after, the decisions are forgotten.
 #![expect(
     clippy::expect_used,
     reason = "test code: a failure should panic with context"
@@ -9,7 +10,7 @@
 use std::time::Duration;
 
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_sim::{Cluster, Coordinator, Faults, Outcome, Transacted};
+use kurator_sim::{Cluster, Collector, Coordinator, Faults, Holdings, Outcome, Transacted};
 use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
@@ -134,6 +135,61 @@ fn whoever_runs_into_a_lock_past_its_deadline_resolves_it() {
         for value in values(&cluster) {
             assert_eq!(value, three, "only the write after the deadline");
         }
+        cluster.shutdown().await.expect("shutdown");
+    });
+}
+
+/// How many decisions on transactions across shards the replicas keep.
+fn decisions(cluster: &Cluster) -> usize {
+    cluster
+        .states()
+        .values()
+        .flat_map(Holdings::shards)
+        .map(|state| state.kv().decisions().count())
+        .sum()
+}
+
+#[test]
+fn decisions_long_past_their_deadline_are_forgotten() {
+    SimRuntime::with_seed(34).block_on(async {
+        let mut cluster = cluster(34).await;
+        let moved = Coordinator::new(&cluster)
+            .transact(|txn| {
+                txn.put(b"a", "0")?;
+                txn.put(b"z", "2")
+            })
+            .await;
+        assert!(matches!(moved, Transacted::Committed(_)), "{moved:?}");
+        abandon(&cluster).await;
+        assert!(decisions(&cluster) > 0, "kept while it may be asked");
+        assert_eq!(
+            Collector::new(&cluster).collect(Duration::ZERO).await,
+            Outcome::Acked,
+            "nothing to forget yet"
+        );
+        assert!(decisions(&cluster) > 0, "still kept");
+        SimRuntime::sleep(2 * PAST_THE_DEADLINE).await;
+        assert_eq!(
+            Collector::new(&cluster)
+                .collect(Duration::from_secs(1))
+                .await,
+            Outcome::Acked,
+            "collected"
+        );
+        assert!(cluster.unlocked(), "the lock left behind was resolved");
+        cluster.settle().await.expect("settle");
+        assert_eq!(decisions(&cluster), 0, "forgotten on every replica");
+        let committed = (Some(b"0".to_vec()), Some(b"2".to_vec()));
+        for value in values(&cluster) {
+            assert_eq!(value, committed, "the commit stands, the abandoned one not");
+        }
+        let again = Coordinator::new(&cluster)
+            .transact(|txn| {
+                txn.put(b"a", "4")?;
+                txn.put(b"z", "4")
+            })
+            .await;
+        assert!(matches!(again, Transacted::Committed(_)), "{again:?}");
         cluster.shutdown().await.expect("shutdown");
     });
 }

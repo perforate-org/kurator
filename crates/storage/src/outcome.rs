@@ -64,6 +64,23 @@ pub enum Abort {
     /// whoever found it undecided.
     #[error("{0} was aborted")]
     RolledBack(TxnId),
+    /// The transaction's deadline is before the shard's fence: its
+    /// decision may be forgotten, so the shard takes no part in it any
+    /// more.
+    #[error("{0} is past the fence")]
+    Fenced(TxnId),
+    /// A fence found the transaction `by`, whose primary key is `primary`,
+    /// prepared with a deadline before the fence. Fencing again once it
+    /// is decided may succeed.
+    #[error("{by} is prepared from before the fence")]
+    Held {
+        /// The transaction.
+        by: TxnId,
+        /// Its primary key, where it is decided.
+        primary: Vec<u8>,
+        /// Its deadline.
+        deadline: Deadline,
+    },
     /// The read version is not readable any more, or not yet.
     #[error(transparent)]
     Unreadable(#[from] Unreadable),

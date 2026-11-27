@@ -62,6 +62,6 @@ pub use kurator_wal::{Lsn, RecoveryReport};
 pub use outcome::{Abort, Outcome, Unreadable};
 pub use span::{End, Span};
 pub use state::{KvState, View};
-pub use two_phase::{Decide, Decided, Decision, Prepare};
+pub use two_phase::{Collect, Decide, Decided, Decision, Prepare};
 pub use txn::Transaction;
 pub use version::{Retention, Version};

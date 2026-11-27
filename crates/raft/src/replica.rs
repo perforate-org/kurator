@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
 use kurator_storage::{
-    Abort, Command, Decide, Decided, Draft, KeyValue, KvState, Outcome, Prepare, Version,
+    Abort, Collect, Command, Decide, Decided, Draft, KeyValue, KvState, Outcome, Prepare, Version,
     WriteBatch,
 };
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
@@ -308,7 +308,9 @@ impl<C: Config> Replica<C> {
     /// # Errors
     ///
     /// As [`Replica::write`]; [`Error::Discarded`] leaves the decision
-    /// unknown, and telling it again is safe.
+    /// unknown, and telling it again is safe. [`Abort::Fenced`] when the
+    /// transaction is behind the shard's fence and the shard does not know
+    /// it: how it was decided may be forgotten.
     pub async fn decide(&self, decide: Decide) -> Result<Decided> {
         let proposal = Proposal::new(Command::Decide(decide))?;
         let response = written(self.raft.client_write(proposal).await)?;
@@ -320,6 +322,20 @@ impl<C: Config> Replica<C> {
             return Ok(Decided::Aborted);
         }
         version(response.data).map(Decided::Committed)
+    }
+
+    /// Takes `step` of forgetting the decisions on transactions across
+    /// shards, on this shard. Returns the version it applied at.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] holding
+    /// [`Abort::Held`] when a fence finds a transaction prepared from
+    /// before it. Otherwise as [`Replica::write`].
+    pub async fn collect(&self, step: Collect) -> Result<Version> {
+        let proposal = Proposal::new(Command::Collect(step))?;
+        let response = written(self.raft.client_write(proposal).await)?;
+        version(response.data)
     }
 
     /// Adds `id`, reached as `peer`, as a learner: the leader starts sending

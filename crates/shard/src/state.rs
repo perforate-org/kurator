@@ -224,6 +224,7 @@ mod tests {
         let decide = Command::Decide(Decide::new(
             TxnId::new(1),
             b"zucchini".to_vec(),
+            Deadline::new(0),
             Decision::Commit,
         ));
         let _committed = state.apply(Version::new(2), decide);
