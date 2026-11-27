@@ -226,7 +226,8 @@ impl<R: Reach, T: Time> Shards for Client<R, T> {
     fn next_txn(&self) -> TxnId {
         let low = self.txns.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         let high = u128::from(self.origin).checked_shl(u64::BITS).unwrap_or(0);
-        TxnId::new(high | u128::from(low))
+        // The low half of `high` is zero, so the sum is exact.
+        TxnId::new(high.saturating_add(u128::from(low)))
     }
 }
 
