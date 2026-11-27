@@ -2,13 +2,17 @@
 //!
 //! ```text
 //! kurator key <dir>
-//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--split-above <bytes>] [--found]
+//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--split-above <bytes>] [--found | --restore <backup>]
 //! kurator client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
 //! touch. A node splits a shard it leads once the shard's state takes more
 //! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
+//!
+//! `--restore` founds a new cluster from a backup the console's `backup`
+//! wrote: the node holds every shard of it, as their only voter, and
+//! other nodes join it as learners.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -84,7 +88,7 @@ pub struct Settings {
 }
 
 /// How a replica comes into its cluster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Start {
     /// Wait: the cluster exists, or another node founds it, and a leader
@@ -92,6 +96,9 @@ pub enum Start {
     Wait,
     /// Found the cluster, with this node and its peers as voters.
     Found,
+    /// Found the cluster from the backup in this directory, with this node
+    /// as the only voter.
+    Restore(PathBuf),
 }
 
 impl Settings {
@@ -133,8 +140,8 @@ impl Settings {
 
     /// How it comes into its cluster.
     #[must_use]
-    pub const fn start(&self) -> Start {
-        self.start
+    pub const fn start(&self) -> &Start {
+        &self.start
     }
 }
 
@@ -207,6 +214,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
                 ceiling = read("--split-above", &value("--split-above")?, bytes)?;
             }
             "--found" => start = Start::Found,
+            "--restore" => start = Start::Restore(PathBuf::from(value("--restore")?)),
             _ => return Err(UsageError::Option(arg)),
         }
     }
@@ -332,7 +340,7 @@ mod tests {
         assert_eq!(settings.id(), NodeId::new(1), "id");
         assert_eq!(settings.dir().to_str(), Some("n1"), "dir");
         assert_eq!(settings.listen().port(), 7001, "listen");
-        assert_eq!(settings.start(), Start::Found, "found");
+        assert_eq!(settings.start(), &Start::Found, "found");
         let [(id, peer)] = settings.peers() else {
             panic!("one peer");
         };
@@ -345,7 +353,17 @@ mod tests {
         else {
             panic!("parses");
         };
-        assert_eq!(waiting.start(), Start::Wait, "waits by default");
+        assert_eq!(waiting.start(), &Start::Wait, "waits by default");
+        let Ok(Invocation::Run(restoring)) =
+            parse(args("run --id 4 --dir d --listen [::1]:1 --restore b"))
+        else {
+            panic!("parses");
+        };
+        assert_eq!(
+            restoring.start(),
+            &Start::Restore("b".into()),
+            "restores a backup"
+        );
         assert!(waiting.peers().is_empty(), "no peers");
         assert!(waiting.clients().is_empty(), "no clients");
         assert_eq!(waiting.ceiling(), Ceiling::DEFAULT, "the default ceiling");
@@ -411,6 +429,7 @@ mod tests {
                 UsageError::Missing("--dir"),
             ),
             ("run --id 1 --dir d", UsageError::Missing("--listen")),
+            ("run --restore", UsageError::Missing("--restore")),
             ("run --id", UsageError::Missing("--id")),
             (
                 "run --id 1 --verbose",

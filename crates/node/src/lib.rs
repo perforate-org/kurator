@@ -5,7 +5,7 @@
 //! <dir>/node.secret              the node secret every key is derived from
 //! <dir>/shards/<id>/log/         the signed Raft log of each shard's replica
 //! <dir>/shards/<id>/snapshot/    its latest snapshot
-//! <dir>/seeds/<id>/              a shard a split made, until it is planted
+//! <dir>/seeds/<id>/              a shard a split or a restore made, until it is planted
 //! ```
 
 pub mod args;
@@ -18,11 +18,12 @@ pub mod sweep;
 
 use std::collections::BTreeMap;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
 use kurator_net::{Endpoint, NetError, Quic, Server, Store};
-use kurator_raft::Member;
+use kurator_raft::{Backup, Member, NodeId, Peer};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::args::{Settings, Start};
@@ -58,7 +59,7 @@ pub enum NodeError {
 /// # Errors
 ///
 /// When the secret cannot be read or written.
-pub fn key(dir: &std::path::Path) -> io::Result<VerifyingKey> {
+pub fn key(dir: &Path) -> io::Result<VerifyingKey> {
     let (secret, _) = secret::load_or_create(dir)?;
     Ok(secret.public_key(KeyPurpose::Transport))
 }
@@ -124,6 +125,9 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         .with_clients(settings.clients().to_vec());
     let me = member.peer(endpoint.local_addr()?);
     let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
+    if let Start::Restore(from) = settings.start() {
+        restore(from, settings.dir(), settings.id(), me.clone())?;
+    }
     let store = Store::open(member, settings.dir(), config, endpoint.transport()).await?;
     let quic = endpoint.transport();
     let server = endpoint.serve(store.inbox())?;
@@ -140,7 +144,17 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
                 Err(error) => return Err(error.into()),
             }
         }
-        Start::Wait => {}
+        Start::Wait | Start::Restore(_) => {}
     }
     Ok((store, quic, server))
+}
+
+/// Plants the backup in `from` in the node directory `dir`, with `node`,
+/// reached as `peer`, as the only voter of every shard. A node that
+/// restored before holds its shards already, and goes on from them.
+fn restore(from: &Path, dir: &Path, node: NodeId, peer: Peer) -> Result<(), NodeError> {
+    match Backup::read(from)?.plant(dir, node, peer) {
+        Ok(()) | Err(kurator_raft::Error::Initialized) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
