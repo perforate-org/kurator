@@ -23,7 +23,7 @@ use std::future::Future;
 use std::io;
 
 use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_raft::{Config, NodeId, Peer, Replica};
+use kurator_consensus::{NodeId, Peer, Replicated};
 use kurator_shard::ShardId;
 
 use crate::client::{allocate, registry, report};
@@ -192,14 +192,14 @@ impl Answer {
 
 /// Runs `call` on `meta`, this node's replica of the meta shard, as its
 /// leader would: what a node answers a call from another.
-pub async fn answer<C: Config>(meta: &Replica<C>, call: &Call) -> Answer {
+pub async fn answer(meta: &impl Replicated, call: &Call) -> Answer {
     let answered = match call {
         Call::Allocate => allocate(meta).await.map(Answer::Allocated),
         Call::Report(placement) => report(meta, placement).await.map(Answer::Reported),
         Call::Registry => registry(meta).await.map(Answer::Registry),
     };
     answered.unwrap_or_else(|error| {
-        if let MetaError::Raft(kurator_raft::Error::NotLeader { leader }) = &error {
+        if let MetaError::Consensus(kurator_consensus::Error::NotLeader { leader }) = &error {
             return Answer::NotLeader(*leader);
         }
         Answer::Failed(error.to_string())
@@ -222,16 +222,16 @@ pub trait Ask: Sync {
 /// The meta shard as a node sees it: its own replica of the meta shard,
 /// and an [`Ask`] to reach the others.
 #[derive(Debug)]
-pub struct Meta<'node, C: Config, A> {
-    replica: &'node Replica<C>,
+pub struct Meta<'node, R, A> {
+    replica: &'node R,
     ask: &'node A,
 }
 
-impl<'node, C: Config, A: Ask> Meta<'node, C, A> {
+impl<'node, R: Replicated, A: Ask> Meta<'node, R, A> {
     /// The meta shard through `replica`, this node's replica of it,
     /// asking other nodes through `ask`.
     #[must_use]
-    pub const fn new(replica: &'node Replica<C>, ask: &'node A) -> Self {
+    pub const fn new(replica: &'node R, ask: &'node A) -> Self {
         Self { replica, ask }
     }
 
@@ -282,21 +282,18 @@ impl<'node, C: Config, A: Ask> Meta<'node, C, A> {
     /// [`MetaError::Unreachable`] when a node cannot be asked, or is not in
     /// the meta shard's membership.
     pub async fn call(&self, call: Call) -> Result<Answer> {
-        follow(self.replica.status().leader(), |node| {
-            self.call_on(node, &call)
-        })
-        .await
+        follow(self.replica.leader(), |node| self.call_on(node, &call)).await
     }
 
     /// Runs `call` on `node`: on this node's replica, or by asking.
     async fn call_on(&self, node: NodeId, call: &Call) -> Result<Answer> {
-        if node == self.replica.id() {
+        if node == self.replica.node() {
             return Ok(answer(self.replica, call).await);
         }
         let unreachable = |source| MetaError::Unreachable { node, source };
-        let membership = self.replica.membership();
-        let peer = membership
-            .get_node(&node)
+        let members = self.replica.members();
+        let peer = members
+            .peer(node)
             .ok_or_else(|| unreachable(io::Error::other("not in the meta shard's membership")))?;
         self.ask.ask(node, peer, call).await.map_err(unreachable)
     }
@@ -342,7 +339,7 @@ mod tests {
 
     use futures_util::FutureExt as _;
     use kurator_codec::{DecodeError, Reader, put_bytes};
-    use kurator_raft::NodeId;
+    use kurator_consensus::NodeId;
     use kurator_shard::ShardId;
     use proptest::prelude::*;
 

@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::ops::Bound;
 use std::sync::Arc;
 
+use kurator_consensus::{Members, Replicated, Role, Transaction};
 use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
 use kurator_storage::{
     Abort, Collect, Command, Decide, Decided, Draft, KeyValue, KvState, Outcome, Prepare, Version,
@@ -86,22 +87,6 @@ pub struct Status {
     applied: Option<LogId>,
     snapshot: Option<LogId>,
     purged: Option<LogId>,
-}
-
-/// The role a replica plays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Role {
-    /// Receives entries but does not vote.
-    Learner,
-    /// Votes and follows a leader.
-    Follower,
-    /// Asks for votes.
-    Candidate,
-    /// Accepts writes and replicates them.
-    Leader,
-    /// Shut down.
-    Stopped,
 }
 
 impl Status {
@@ -238,12 +223,6 @@ impl<C: Config> Replica<C> {
         }
     }
 
-    /// The shard as this replica last applied it.
-    #[must_use]
-    pub fn shard(&self) -> Shard {
-        self.state.read(|state| state.shard().clone())
-    }
-
     /// The id of the shard it replicates.
     #[must_use]
     pub const fn shard_id(&self) -> ShardId {
@@ -253,34 +232,10 @@ impl<C: Config> Replica<C> {
     /// Whether the replica holds a state yet: one it was seeded with, a
     /// snapshot it received, or entries it applied. A replica that a
     /// message opened holds none until the leader sends it a snapshot, and
-    /// until then [`Replica::shard`] does not describe its shard.
+    /// until then [`Replicated::shard`] does not describe its shard.
     #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.state.is_initialized()
-    }
-
-    /// Starts a transaction that reads the newest version this cluster
-    /// committed: the leader confirms it still leads, as for
-    /// [`Replica::read`], and the transaction reads that version from this
-    /// replica's state.
-    ///
-    /// ```text
-    /// let mut txn = replica.begin().await?;
-    /// let balance = txn.get(b"alice")?;
-    /// txn.put("alice", debit(balance));
-    /// txn.commit().await?;   // Err(Aborted) when alice changed meanwhile
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NotLeader`] when this replica is not the leader.
-    pub async fn begin(&self) -> Result<Txn<'_, C>> {
-        let read_at = self.read(KvState::version).await?;
-        Ok(Txn {
-            replica: self,
-            shard: self.shard(),
-            draft: Draft::new(read_at),
-        })
     }
 
     /// Prepares this shard's part of a transaction across shards: once it
@@ -443,31 +398,6 @@ impl<C: Config> Replica<C> {
         }
     }
 
-    /// Runs `read` against a state that reflects every write that returned
-    /// before this call: the leader confirms with a quorum that it still
-    /// leads, and waits until it applied everything committed by then. The
-    /// state holds the keys of the shard's span only.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NotLeader`] when this replica is not the leader.
-    pub async fn read<R>(&self, read: impl FnOnce(&KvState) -> R) -> Result<R> {
-        let _read_from = self
-            .raft
-            .ensure_linearizable(ReadPolicy::ReadIndex)
-            .await
-            .map_err(|error| match error {
-                RaftError::APIError(LinearizableReadError::ForwardToLeader(forward)) => {
-                    Error::NotLeader {
-                        leader: forward.leader_id,
-                    }
-                }
-                RaftError::APIError(other) => Error::Raft(Box::new(other)),
-                RaftError::Fatal(fatal) => stopped(fatal),
-            })?;
-        Ok(self.state.read(|state| read(state.kv())))
-    }
-
     /// Runs `read` against the shard's state as this replica applied it,
     /// which may lag the cluster.
     pub fn read_local<R>(&self, read: impl FnOnce(&ShardState) -> R) -> R {
@@ -553,71 +483,6 @@ impl<C: Config> Txn<'_, C> {
     pub const fn read_at(&self) -> Version {
         self.draft.read_at()
     }
-
-    /// The value of `key`, with the transaction's own writes applied.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Misrouted`] when `key` is not in the shard, and
-    /// [`Error::Storage`] when so many writes committed since the
-    /// transaction began that its version is forgotten.
-    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if !self.shard.span().contains(key) {
-            return Err(misrouted(self.shard.clone()));
-        }
-        let value = self
-            .replica
-            .state
-            .read(|state| self.draft.get(state.kv(), key));
-        Ok(value.map_err(kurator_storage::Error::from)?)
-    }
-
-    /// The entries between `start` and `end` that the shard holds, in key
-    /// order, with the transaction's own writes applied.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Storage`] when the version is forgotten, as for
-    /// [`Txn::get`].
-    pub fn range(&mut self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<KeyValue>> {
-        let (start, end) = self.shard.span().clip(start, end);
-        let entries = self
-            .replica
-            .state
-            .read(|state| self.draft.range(state.kv(), start, end));
-        Ok(entries.map_err(kurator_storage::Error::from)?)
-    }
-
-    /// Sets `key` to `value` when the transaction commits.
-    pub fn put(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
-        self.draft.put(key, value);
-    }
-
-    /// Removes `key` when the transaction commits.
-    pub fn delete(&mut self, key: impl Into<Vec<u8>>) {
-        self.draft.delete(key);
-    }
-
-    /// Replicates the transaction and returns the version its writes made,
-    /// once a quorum holds it and this replica applied it. A transaction
-    /// that wrote nothing returns its read version and logs nothing.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when a
-    /// write after the read version touched what it read: it wrote
-    /// nothing, and running it again may succeed. Otherwise as
-    /// [`Replica::write`]; [`Error::Misrouted`] means the shard split
-    /// before the transaction applied, and a key it touched moved.
-    pub async fn commit(self) -> Result<Version> {
-        let read_at = self.draft.read_at();
-        let Some(transaction) = self.draft.into_transaction() else {
-            return Ok(read_at);
-        };
-        let proposal = Proposal::new(Command::Txn(transaction))?;
-        let response = written(self.replica.raft.client_write(proposal).await)?;
-        version(response.data)
-    }
 }
 
 /// The version a command's writes made, or why it made none.
@@ -661,4 +526,159 @@ fn written<C: Config>(
 
 fn stopped<C: Config>(fatal: Fatal<C>) -> Error {
     Error::Stopped(Box::new(fatal))
+}
+
+impl<C: Config> Replicated for Replica<C> {
+    type Txn<'replica> = Txn<'replica, C>;
+
+    fn node(&self) -> NodeId {
+        self.id
+    }
+
+    /// The shard as this replica last applied it.
+    fn shard(&self) -> Shard {
+        self.state.read(|state| state.shard().clone())
+    }
+
+    fn role(&self) -> Role {
+        self.status().role()
+    }
+
+    fn leader(&self) -> Option<NodeId> {
+        self.status().leader()
+    }
+
+    fn members(&self) -> Members {
+        let membership = self.membership();
+        let voters = membership.voter_ids().collect();
+        let peers = membership
+            .nodes()
+            .map(|(id, peer)| (*id, peer.clone()))
+            .collect();
+        let position = self.membership_log().map_or(0, |log_id| log_id.index);
+        Members::new(voters, peers, position)
+    }
+
+    /// Starts a transaction that reads the newest version this cluster
+    /// committed: the leader confirms it still leads, as for
+    /// [`Replicated::read`], and the transaction reads that version from this
+    /// replica's state.
+    ///
+    /// ```text
+    /// let mut txn = replica.begin().await?;
+    /// let balance = txn.get(b"alice")?;
+    /// txn.put("alice", debit(balance));
+    /// txn.commit().await?;   // Err(Aborted) when alice changed meanwhile
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`] when this replica is not the leader.
+    async fn begin(&self) -> kurator_consensus::Result<Self::Txn<'_>> {
+        let read_at = self.read(KvState::version).await?;
+        Ok(Txn {
+            replica: self,
+            shard: self.shard(),
+            draft: Draft::new(read_at),
+        })
+    }
+
+    /// Runs `read` against a state that reflects every write that returned
+    /// before this call: the leader confirms with a quorum that it still
+    /// leads, and waits until it applied everything committed by then. The
+    /// state holds the keys of the shard's span only.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`] when this replica is not the leader.
+    async fn read<R: Send>(
+        &self,
+        read: impl FnOnce(&KvState) -> R + Send,
+    ) -> kurator_consensus::Result<R> {
+        let _read_from = self
+            .raft
+            .ensure_linearizable(ReadPolicy::ReadIndex)
+            .await
+            .map_err(|error| match error {
+                RaftError::APIError(LinearizableReadError::ForwardToLeader(forward)) => {
+                    Error::NotLeader {
+                        leader: forward.leader_id,
+                    }
+                }
+                RaftError::APIError(other) => Error::Raft(Box::new(other)),
+                RaftError::Fatal(fatal) => stopped(fatal),
+            })?;
+        Ok(self.state.read(|state| read(state.kv())))
+    }
+}
+
+impl<C: Config> Transaction for Txn<'_, C> {
+    /// The value of `key`, with the transaction's own writes applied.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Misrouted`] when `key` is not in the shard, and
+    /// [`Error::Storage`] when so many writes committed since the
+    /// transaction began that its version is forgotten.
+    fn get(&mut self, key: &[u8]) -> kurator_consensus::Result<Option<Vec<u8>>> {
+        if !self.shard.span().contains(key) {
+            return Err(misrouted(self.shard.clone()).into());
+        }
+        let value = self
+            .replica
+            .state
+            .read(|state| self.draft.get(state.kv(), key));
+        Ok(value.map_err(kurator_storage::Error::from)?)
+    }
+
+    /// The entries between `start` and `end` that the shard holds, in key
+    /// order, with the transaction's own writes applied.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`] when the version is forgotten, as for
+    /// [`Transaction::get`].
+    fn range(
+        &mut self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> kurator_consensus::Result<Vec<KeyValue>> {
+        let (start, end) = self.shard.span().clip(start, end);
+        let entries = self
+            .replica
+            .state
+            .read(|state| self.draft.range(state.kv(), start, end));
+        Ok(entries.map_err(kurator_storage::Error::from)?)
+    }
+
+    /// Sets `key` to `value` when the transaction commits.
+    fn put(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
+        self.draft.put(key, value);
+    }
+
+    /// Removes `key` when the transaction commits.
+    fn delete(&mut self, key: impl Into<Vec<u8>>) {
+        self.draft.delete(key);
+    }
+
+    /// Replicates the transaction and returns the version its writes made,
+    /// once a quorum holds it and this replica applied it. A transaction
+    /// that wrote nothing returns its read version and logs nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when a
+    /// write after the read version touched what it read: it wrote
+    /// nothing, and running it again may succeed. Otherwise as
+    /// [`Replica::write`]; [`Error::Misrouted`] means the shard split
+    /// before the transaction applied, and a key it touched moved.
+    async fn commit(self) -> kurator_consensus::Result<Version> {
+        let read_at = self.draft.read_at();
+        let Some(transaction) = self.draft.into_transaction() else {
+            return Ok(read_at);
+        };
+        let proposal = Proposal::new(Command::Txn(transaction))?;
+        let response = written(self.replica.raft.client_write(proposal).await)?;
+        Ok(version(response.data)?)
+    }
 }

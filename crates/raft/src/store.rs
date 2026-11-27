@@ -359,6 +359,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use kurator_consensus::Replicated as _;
     use kurator_shard::{Epoch, Shard, ShardId, ShardState, Split};
     use openraft::AsyncRuntime as _;
     use openraft::raft::VoteRequest;

@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use kurator_consensus::Transaction as _;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_sim::{Cluster, Collector, Coordinator, Faults, Holdings, Outcome, Transacted};
 use kurator_storage::WriteBatch;

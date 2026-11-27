@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{self, Write};
 
 use kurator_codec::{DecodeError, Reader};
-use kurator_raft::{Config, NodeId, Replica};
+use kurator_consensus::{NodeId, Replicated};
 use kurator_shard::{Epoch, Shard, ShardId};
 
 /// A shard as the registry records it: the shard, the nodes in its
@@ -43,10 +43,10 @@ impl Placement {
 
     /// Where `replica`'s shard is, as `replica` knows it.
     #[must_use]
-    pub fn of<C: Config>(replica: &Replica<C>) -> Self {
-        let replicas = replica.membership().nodes().map(|(id, _)| *id).collect();
-        let membership = replica.membership_log().map_or(0, |log_id| log_id.index);
-        Self::new(replica.shard(), replicas, membership)
+    pub fn of(replica: &impl Replicated) -> Self {
+        let members = replica.members();
+        let replicas = members.peers().map(|(id, _)| id).collect();
+        Self::new(replica.shard(), replicas, members.position())
     }
 
     /// The shard.
@@ -137,7 +137,7 @@ pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use kurator_codec::DecodeError;
-    use kurator_raft::NodeId;
+    use kurator_consensus::NodeId;
     use kurator_shard::{Epoch, Shard, ShardId};
     use kurator_storage::{End, Span};
     use proptest::prelude::*;
