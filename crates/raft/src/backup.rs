@@ -91,10 +91,14 @@ impl Backup {
                 io::Error::new(io::ErrorKind::AlreadyExists, to.display().to_string()).into(),
             );
         }
-        let parent = to
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+        // Absolute, so that even a bare name has a parent to write beside.
+        let to = std::path::absolute(to)?;
+        let parent = to.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a backup needs a parent directory",
+            )
+        })?;
         let temp = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
             .tempdir_in(parent)?;
@@ -108,7 +112,7 @@ impl Backup {
             file.sync_all()?;
         }
         sync_dir(temp.path())?;
-        fs::rename(temp.keep(), to)?;
+        fs::rename(temp.keep(), &to)?;
         sync_dir(parent)?;
         Ok(())
     }
