@@ -21,7 +21,7 @@ const BASE_LEN: usize = 16;
 const ANCHOR_LEN: usize = 32;
 
 const MAGIC: [u8; 4] = *b"KRWL";
-const VERSION: u16 = 2;
+const VERSION: u16 = 1;
 const FLAG_SIGNED: u16 = 1;
 const FILES: LsnFiles = LsnFiles::new(".wal");
 
