@@ -470,6 +470,8 @@ mod tests {
                 "the right half: {}",
                 planted.shard()
             );
+            assert_eq!(planted.node(), NodeId::new(1), "this node");
+            assert_eq!(planted.leader(), None, "no leader yet");
             store.shutdown().await.unwrap();
         });
     }
