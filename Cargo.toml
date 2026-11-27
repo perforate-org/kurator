@@ -20,6 +20,7 @@ kurator-metrics = { path = "crates/metrics" }
 kurator-storage = { path = "crates/storage" }
 kurator-shard = { path = "crates/shard" }
 kurator-consensus = { path = "crates/consensus" }
+kurator-bft = { path = "crates/bft" }
 kurator-client = { path = "crates/client" }
 kurator-raft = { path = "crates/raft" }
 kurator-meta = { path = "crates/meta" }

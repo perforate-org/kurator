@@ -735,6 +735,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-bft"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "kurator-codec",
+ "kurator-consensus",
+ "kurator-crypto",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "kurator-client"
 version = "0.0.1"
 dependencies = [
