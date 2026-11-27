@@ -588,9 +588,7 @@ impl Core {
             None => Ok(()),
         };
         // The commands this block leaves out go with the vote.
-        if self.view == view {
-            self.offer(id);
-        }
+        self.offer(id);
         counted
     }
 

@@ -775,3 +775,29 @@ fn next_leader(chain: &[&Proposal], view: u64) -> (Proposal, Vec<BlockId>) {
     assert_eq!(replica.view(), View::new(view), "in view {view}");
     (proposed.unwrap_or_else(|| (*last).clone()), decided)
 }
+
+#[test]
+fn the_commands_a_block_leaves_out_go_with_the_vote() {
+    let node = follower(&[1, 2]);
+    let mut replica = started(node);
+    let other = Proposal::sign(
+        &key(leader(1).get()),
+        DOMAIN,
+        leader(1),
+        Block::new(View::new(1), Justify::Genesis, vec![b"other".to_vec()]),
+        None,
+    );
+    let effects = receive(&mut replica, Message::Proposal(other));
+    let sent: Vec<(To, &Message)> = effects
+        .messages()
+        .iter()
+        .map(|outgoing| (outgoing.to(), outgoing.message()))
+        .collect();
+    let forward = Message::Forward(vec![b"command".to_vec()]);
+    assert_eq!(sent.len(), 2, "a vote and its commands: {sent:?}");
+    assert!(
+        matches!(sent[0], (To::One(to), Message::Vote(_)) if to == leader(2)),
+        "the vote"
+    );
+    assert_eq!(sent[1], (To::One(leader(2)), &forward), "the commands");
+}
