@@ -13,6 +13,7 @@ pub mod console;
 pub mod report;
 pub mod secret;
 pub mod session;
+pub mod split;
 pub mod sweep;
 
 use std::collections::BTreeMap;
@@ -77,6 +78,7 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut beats = tokio::time::interval(report::EVERY);
     let mut sweeps = tokio::time::interval(sweep::EVERY);
+    let mut checks = tokio::time::interval(split::EVERY);
     loop {
         let line = tokio::select! {
             line = lines.next_line() => line?,
@@ -88,6 +90,11 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
             _ = sweeps.tick() => {
                 // A sweep that did not finish is made again on the next one.
                 let _swept: Option<kurator_client::Collected> = sweep::sweep(&store, &quic).await;
+                continue;
+            }
+            _ = checks.tick() => {
+                // A shard left too large is split on the next check.
+                drop(split::grow(&store, &quic, settings.ceiling()).await);
                 continue;
             }
         };

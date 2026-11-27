@@ -21,13 +21,15 @@
 //! ```
 //!
 //! The node that leads the meta shard also collects on its own, every
-//! [`sweep::EVERY`](crate::sweep::EVERY).
+//! [`sweep::EVERY`](crate::sweep::EVERY), and every node splits the shards
+//! it leads once they pass their ceiling, every
+//! [`split::EVERY`](crate::split::EVERY).
 
 use std::sync::Arc;
 
 use kurator_client::Collected;
 use kurator_consensus::{Members, NodeId, Peer, Replicated as _};
-use kurator_meta::{Meta, Placement};
+use kurator_meta::Meta;
 use kurator_net::{Quic, Replica, Store};
 use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
@@ -213,34 +215,15 @@ async fn get(replica: &Replica, key: &str) -> String {
     }
 }
 
-/// Splits the shard that holds `at` under an id the meta shard allocates,
-/// and reports both halves to it.
+/// Splits the shard that holds `at` there; see [`crate::split::split`].
 async fn split(store: &Store, ask: &Quic, at: &str) -> String {
     let Some(replica) = holder(store, at) else {
         return unheld();
     };
-    let Some(meta) = meta(store) else {
-        return no_meta();
-    };
-    let meta = Meta::new(&meta, ask);
-    let right = match meta.allocate().await {
-        Ok(right) => right,
-        Err(error) => return format!("error: {error}"),
-    };
-    let halves = match store.split(replica.shard_id(), at.as_bytes(), right).await {
-        Ok(halves) => halves,
-        Err(error) => return format!("error: {error}"),
-    };
-    for shard in [halves.left(), halves.right()] {
-        let placement = match store.replica(shard.id()).await {
-            Ok(Some(half)) => Placement::of(&half),
-            Ok(None) | Err(_) => continue,
-        };
-        if let Err(error) = meta.report(&placement).await {
-            return format!("error: split, but not recorded: {error}");
-        }
+    match crate::split::split(store, ask, replica.shard_id(), at.as_bytes()).await {
+        Ok(halves) => format!("ok: {} | {}", halves.left(), halves.right()),
+        Err(error) => format!("error: {error}"),
     }
-    format!("ok: {} | {}", halves.left(), halves.right())
 }
 
 /// Reports every shard this node leads to the meta shard, then lists what
