@@ -215,3 +215,62 @@ fn put_count(out: &mut (impl Write + ?Sized), len: usize) -> io::Result<()> {
     let count = u32::try_from(len).map_err(io::Error::other)?;
     out.write_all(&count.to_le_bytes())
 }
+
+#[cfg(test)]
+mod tests {
+    use kurator_codec::{DecodeError, Reader, put_bytes};
+
+    use super::{DECIDED_ABORTED, DECIDED_COMMITTED, Locks};
+    use crate::draft::Draft;
+    use crate::txn_id::TxnId;
+    use crate::version::Version;
+
+    /// Locks with the transactions `prepared`, then `decided`, each
+    /// committed at its version or aborted.
+    fn encode(prepared: &[u128], decided: &[(u128, Option<u64>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&u32::try_from(prepared.len()).unwrap().to_le_bytes());
+        for id in prepared {
+            let prepare = Draft::new(Version::ZERO).into_prepare(TxnId::new(*id), b"p".to_vec());
+            prepare.encode(&mut out).unwrap();
+        }
+        out.extend_from_slice(&u32::try_from(decided.len()).unwrap().to_le_bytes());
+        for (id, committed) in decided {
+            out.extend_from_slice(&id.to_le_bytes());
+            put_bytes(&mut out, b"p").unwrap();
+            match committed {
+                Some(version) => {
+                    out.push(DECIDED_COMMITTED);
+                    out.extend_from_slice(&version.to_le_bytes());
+                }
+                None => out.push(DECIDED_ABORTED),
+            }
+        }
+        out
+    }
+
+    /// The locks `encoded` holds, read back as of version 3.
+    fn decode(encoded: &[u8]) -> Result<Locks, DecodeError> {
+        let mut reader = Reader::new(encoded);
+        let locks = Locks::decode(&mut reader, Version::new(3))?;
+        reader.finish()?;
+        Ok(locks)
+    }
+
+    #[test]
+    fn malformed_locks_are_rejected() {
+        let valid = encode(&[1], &[(2, Some(3)), (3, None)]);
+        assert!(decode(&valid).is_ok(), "valid");
+        for (prepared, decided, what) in [
+            (&[1, 1][..], &[][..], "prepared twice"),
+            (&[2, 1], &[], "prepared out of order"),
+            (&[], &[(2, None), (2, None)], "decided twice"),
+            (&[], &[(3, None), (2, None)], "decided out of order"),
+            (&[], &[(2, Some(4))], "committed after the state"),
+            (&[1], &[(1, None)], "prepared and decided"),
+        ] {
+            let malformed = encode(prepared, decided);
+            assert_eq!(decode(&malformed), Err(DecodeError::Invalid), "{what}");
+        }
+    }
+}
