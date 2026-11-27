@@ -505,6 +505,17 @@ async fn client_requests() {
         "collected"
     );
 
+    // A shard no replica here holds has none to answer.
+    let nowhere = ClientRequest::Shard(ShardId::new(99), ClientCall::Begin);
+    assert_eq!(
+        client
+            .reach(first, &nodes[&1].peer, &nowhere)
+            .await
+            .unwrap(),
+        Reply::NoReplica,
+        "no replica"
+    );
+
     // A client may not take part in replication.
     let mut link = client.connect(first, &nodes[&1].peer);
     let refused = link

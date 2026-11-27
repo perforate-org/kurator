@@ -242,10 +242,14 @@ async fn stream(
         }
         (Some((Channel::Meta, call)), Caller::Node(_)) => meta(call, &serving.inbox).await,
         (Some((Channel::Client, request)), _) => client(request, &serving).await,
+        #[cfg(feature = "bft")]
         (Some((Channel::Bft, frame)), Caller::Node(sender) | Caller::Member(sender)) => {
-            bft(sender, frame, &serving).await;
+            serving.committees.deliver(sender, frame).await;
             Vec::new()
         }
+        // A build without BFT holds no BFT replica to hand a message to.
+        #[cfg(not(feature = "bft"))]
+        (Some((Channel::Bft, _)), Caller::Node(_) | Caller::Member(_)) => Vec::new(),
         (Some((Channel::Raft | Channel::Meta, _)), Caller::Client | Caller::Member(_))
         | (Some((Channel::Bft, _)), Caller::Client) => {
             Response::<Tokio>::Refused(Refusal::Forged).encode()
@@ -286,41 +290,19 @@ async fn client(bytes: &[u8], serving: &Serving) -> Vec<u8> {
         Ok(Request::Map) => map(serving).await,
         Ok(Request::Shard(shard, call)) => match serving.inbox.replica(shard) {
             Some(replica) => kurator_client::answer(&replica, call).await,
-            None => elsewhere(shard, call, serving).await,
+            #[cfg(feature = "bft")]
+            None => serving
+                .committees
+                .answer(shard, call)
+                .await
+                .unwrap_or(Reply::NoReplica),
+            #[cfg(not(feature = "bft"))]
+            None => Reply::NoReplica,
         },
         Ok(_) => Reply::Failed("a request this node does not know".to_owned()),
         Err(error) => Reply::Failed(format!("the request does not decode: {error}")),
     };
     reply.encode().unwrap_or_default()
-}
-
-/// Hands the BFT message `frame` from `sender` to its shard's replica.
-#[cfg(feature = "bft")]
-async fn bft(sender: NodeId, frame: &[u8], serving: &Serving) {
-    serving.committees.deliver(sender, frame).await;
-}
-
-/// A build without BFT holds no BFT replica to hand a message to.
-#[cfg(not(feature = "bft"))]
-#[expect(clippy::unused_async, reason = "the same call as the BFT build's")]
-async fn bft(_sender: NodeId, _frame: &[u8], _serving: &Serving) {}
-
-/// Answers `call` on `shard`, which no Raft replica here holds, from the
-/// BFT replica of it.
-#[cfg(feature = "bft")]
-async fn elsewhere(shard: ShardId, call: kurator_client::Call, serving: &Serving) -> Reply {
-    serving
-        .committees
-        .answer(shard, call)
-        .await
-        .unwrap_or(Reply::NoReplica)
-}
-
-/// A build without BFT holds no other replica.
-#[cfg(not(feature = "bft"))]
-#[expect(clippy::unused_async, reason = "the same call as the BFT build's")]
-async fn elsewhere(_shard: ShardId, _call: kurator_client::Call, _serving: &Serving) -> Reply {
-    Reply::NoReplica
 }
 
 /// The registry, from the meta shard's leader wherever it is, and the
