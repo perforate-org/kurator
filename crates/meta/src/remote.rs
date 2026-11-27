@@ -282,22 +282,10 @@ impl<'node, C: Config, A: Ask> Meta<'node, C, A> {
     /// [`MetaError::Unreachable`] when a node cannot be asked, or is not in
     /// the meta shard's membership.
     pub async fn call(&self, call: Call) -> Result<Answer> {
-        let mut leader = self.replica.status().leader();
-        let mut answer = Answer::NotLeader(leader);
-        for _ in 0..HOPS {
-            let Some(target) = leader else {
-                break;
-            };
-            answer = self.call_on(target, &call).await?;
-            let Answer::NotLeader(next) = answer else {
-                break;
-            };
-            if next == Some(target) {
-                break;
-            }
-            leader = next;
-        }
-        Ok(answer)
+        follow(self.replica.status().leader(), |node| {
+            self.call_on(node, &call)
+        })
+        .await
     }
 
     /// Runs `call` on `node`: on this node's replica, or by asking.
@@ -314,6 +302,31 @@ impl<'node, C: Config, A: Ask> Meta<'node, C, A> {
     }
 }
 
+/// Asks `leader`, then each leader a node that does not lead names, for at
+/// most [`HOPS`] asks, and returns the last answer: `NotLeader` when no
+/// node asked leads, or when a node names itself or no one.
+async fn follow<F, Fut>(mut leader: Option<NodeId>, mut ask: F) -> Result<Answer>
+where
+    F: FnMut(NodeId) -> Fut,
+    Fut: Future<Output = Result<Answer>>,
+{
+    let mut answer = Answer::NotLeader(leader);
+    for _ in 0..HOPS {
+        let Some(target) = leader else {
+            break;
+        };
+        answer = ask(target).await?;
+        let Answer::NotLeader(next) = answer else {
+            break;
+        };
+        if next == Some(target) {
+            break;
+        }
+        leader = next;
+    }
+    Ok(answer)
+}
+
 /// The error for an answer that is not the one the call expects.
 fn unanswered(answer: Answer) -> MetaError {
     match answer {
@@ -327,12 +340,13 @@ fn unanswered(answer: Answer) -> MetaError {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use futures_util::FutureExt as _;
     use kurator_codec::{DecodeError, Reader, put_bytes};
     use kurator_raft::NodeId;
     use kurator_shard::ShardId;
     use proptest::prelude::*;
 
-    use super::{Answer, Call};
+    use super::{Answer, Call, HOPS, follow};
     use crate::placement::Reported;
     use crate::placement::tests::placements;
     use crate::registry::Registry;
@@ -374,6 +388,58 @@ mod tests {
                 .prop_map(|leader| Answer::NotLeader(leader.map(NodeId::new))),
             ".{0,8}".prop_map(Answer::Failed),
         ]
+    }
+
+    /// Runs [`follow`] from `leader` against nodes that answer as
+    /// `answers` says, and returns the answer and the nodes asked in turn.
+    fn followed(leader: Option<u64>, answers: impl Fn(NodeId) -> Answer) -> (Answer, Vec<u64>) {
+        let mut asked = Vec::new();
+        let answer = follow(leader.map(NodeId::new), |node| {
+            asked.push(node.get());
+            std::future::ready(Ok(answers(node)))
+        })
+        .now_or_never()
+        .unwrap()
+        .unwrap();
+        (answer, asked)
+    }
+
+    #[test]
+    fn calls_follow_the_leader_each_node_names() {
+        let (answer, asked) = followed(Some(1), |node| match node.get() {
+            3 => Answer::Allocated(ShardId::new(7)),
+            other => Answer::NotLeader(Some(NodeId::new(other.saturating_add(1)))),
+        });
+        assert_eq!(
+            answer,
+            Answer::Allocated(ShardId::new(7)),
+            "the leader answers"
+        );
+        assert_eq!(asked, [1, 2, 3], "each hint followed");
+    }
+
+    #[test]
+    fn calls_stop_where_no_leader_is_known() {
+        let none = Answer::NotLeader(None);
+        assert_eq!(
+            followed(None, |_| Answer::Allocated(ShardId::new(7))),
+            (none.clone(), vec![]),
+            "no one to ask"
+        );
+        assert_eq!(
+            followed(Some(1), |_| Answer::NotLeader(None)),
+            (none, vec![1]),
+            "no one named"
+        );
+        assert_eq!(
+            followed(Some(1), |node| Answer::NotLeader(Some(node))),
+            (Answer::NotLeader(Some(NodeId::new(1))), vec![1]),
+            "names itself, and is not asked again"
+        );
+        let (_, asked) = followed(Some(1), |node| {
+            Answer::NotLeader(Some(NodeId::new(node.get().saturating_add(1))))
+        });
+        assert_eq!(asked.len(), HOPS, "at most {HOPS} asks");
     }
 
     #[test]
