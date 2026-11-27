@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_sim::{Cluster, Coordinator, Faults, Outcome};
+use kurator_sim::{Cluster, Coordinator, Faults, Outcome, Transacted};
 use kurator_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
@@ -20,6 +20,21 @@ fn a_lock_left_behind_holds_a_split_back_until_settling_resolves_it() {
         assert_eq!(cluster.split(b"m").await, Outcome::Acked, "split");
         cluster.settle().await.expect("settle");
         assert!(cluster.unlocked(), "nothing prepared yet");
+        let moved = Coordinator::new(&cluster)
+            .transact(|txn| {
+                txn.put(b"a", "0")?;
+                txn.put(b"z", "2")
+            })
+            .await;
+        assert!(matches!(moved, Transacted::Committed(_)), "{moved:?}");
+        assert!(cluster.unlocked(), "every shard was told");
+        let undo = Coordinator::new(&cluster)
+            .transact(|txn| {
+                txn.put(b"a", "1")?;
+                txn.put(b"z", "1")
+            })
+            .await;
+        assert!(matches!(undo, Transacted::Committed(_)), "{undo:?}");
 
         let abandoned = SimRuntime::timeout(
             Duration::from_millis(1),

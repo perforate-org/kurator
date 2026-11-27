@@ -250,3 +250,15 @@ fn commands_of_both_phases_roundtrip() {
     }
     assert_eq!(TxnId::new(255).to_string(), "tff", "display");
 }
+
+#[test]
+fn the_primary_key_is_the_first_key_written() {
+    let state = state();
+    let mut draft = Draft::new(state.version());
+    assert_eq!(draft.first_write(), None, "nothing written");
+    let _a = draft.get(&state, b"a").unwrap();
+    assert_eq!(draft.first_write(), None, "only read");
+    draft.put("c", "1");
+    draft.delete("b");
+    assert_eq!(draft.first_write(), Some(b"b".as_slice()), "in key order");
+}
