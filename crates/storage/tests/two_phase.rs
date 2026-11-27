@@ -117,6 +117,23 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
 }
 
 #[test]
+fn a_split_hands_each_decision_to_the_half_of_its_primary_key() {
+    let mut state = state();
+    let elsewhere = Decide::new(TxnId::new(9), b"z".to_vec(), Decision::Abort);
+    let _decided = state.apply(Version::new(2), Command::Decide(elsewhere));
+    let _here = state.apply(Version::new(3), decide(8, Decision::Abort));
+    let right = state.split_off(b"m");
+    assert_eq!(
+        right.decided(TxnId::new(9)),
+        Some(Decided::Aborted),
+        "right"
+    );
+    assert_eq!(state.decided(TxnId::new(9)), None, "not left");
+    assert_eq!(state.decided(TxnId::new(8)), Some(Decided::Aborted), "left");
+    assert_eq!(right.decided(TxnId::new(8)), None, "not right");
+}
+
+#[test]
 fn a_commit_applies_the_writes_held_back_once() {
     let mut state = state();
     let _prepared = state.apply(Version::new(2), Command::Prepare(part(&state, 7)));
