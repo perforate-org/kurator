@@ -301,6 +301,18 @@ mod tests {
             Err(CharterError::Absent(NodeId::new(3))),
             "not a member"
         );
+        // One key of its own is not enough.
+        let transport = secret(1).public_key(KeyPurpose::Transport);
+        let consensus = secret(2).public_key(KeyPurpose::Consensus);
+        let mixed = format!("shard 1\nmember 1 127.0.0.1:1 {transport} {consensus} a");
+        assert_eq!(
+            Charter::parse(&mixed)
+                .unwrap()
+                .seat(NodeId::new(1), &secret(1))
+                .map(|_| ()),
+            Err(CharterError::OtherKeys(NodeId::new(1))),
+            "another's consensus key"
+        );
     }
 
     #[test]
