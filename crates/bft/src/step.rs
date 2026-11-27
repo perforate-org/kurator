@@ -5,7 +5,7 @@ use crate::block::Block;
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::view::View;
-use crate::vote::Justify;
+use crate::vote::{BlockId, Justify};
 
 /// What a replica must not forget across a crash: the last view it voted
 /// or gave up in, so it never votes twice in a view, and the newest
@@ -155,34 +155,53 @@ impl Effects {
     }
 }
 
+/// One thing a replica must not forget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Record {
+    /// A block whose body it holds.
+    Block(Block),
+    /// Its safety state.
+    Safety(Safety),
+    /// The last block it decided, and its view.
+    Committed(BlockId, View),
+}
+
 /// The outcome of one event.
 ///
-/// The messages it sends may include a vote or
-/// a timeout, which commit the replica to never voting again in that view,
-/// so they are only to be had once the new [`Safety`] is durable:
-/// [`Step::persisted`] hands them over.
+/// The messages it sends may include a vote or a timeout, which commit
+/// the replica to never voting again in that view, so they are only to be
+/// had once what the event changed is durable:
+/// [`Journal::persist`](crate::Journal::persist) writes it down and hands
+/// them over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "a step's messages and decisions are lost unless it is persisted"]
 pub struct Step {
-    safety: Option<Safety>,
+    records: Vec<Record>,
     effects: Effects,
 }
 
 impl Step {
-    pub(crate) const fn new(safety: Option<Safety>, effects: Effects) -> Self {
-        Self { safety, effects }
+    pub(crate) const fn new(records: Vec<Record>, effects: Effects) -> Self {
+        Self { records, effects }
     }
 
-    /// The safety state to make durable before anything else, if the
-    /// event changed it.
+    /// The safety state the event moved the replica to, if it did.
     #[must_use]
-    pub const fn safety(&self) -> Option<&Safety> {
-        self.safety.as_ref()
+    pub fn safety(&self) -> Option<&Safety> {
+        self.records.iter().find_map(|record| match record {
+            Record::Safety(safety) => Some(safety),
+            Record::Block(_) | Record::Committed(..) => None,
+        })
     }
 
-    /// What to do, once [`Step::safety`] is durable.
-    #[must_use]
-    pub fn persisted(self) -> Effects {
+    /// What to do, taken without writing anything down: for tests and
+    /// simulations, which keep the records themselves.
+    #[cfg(test)]
+    pub(crate) fn persisted(self) -> Effects {
         self.effects
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<Record>, Effects) {
+        (self.records, self.effects)
     }
 }

@@ -2,6 +2,7 @@
 //! events in, a [`Step`] out. It reads no clock, opens no socket and
 //! writes no file, so a simulation and a real node drive the same code.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cmp, mem};
 
@@ -10,9 +11,10 @@ use kurator_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Proposal};
 use crate::committee::{Committee, Domain};
+use crate::journal::Recovered;
 use crate::message::Message;
 use crate::rejection::Rejection;
-use crate::step::{Effects, Safety, Step, Timer, To};
+use crate::step::{Effects, Record, Safety, Step, Timer, To};
 use crate::timeout::{Timeout, TimeoutCertificate};
 use crate::view::View;
 use crate::vote::{BlockId, Certificate, Justify, Vote};
@@ -106,29 +108,42 @@ pub struct Core {
     timeouts: BTreeMap<NodeId, (View, Signature)>,
     /// Commands submitted and not yet decided.
     pending: Vec<Vec<u8>>,
+    /// Blocks the event in hand taught it, to write down.
+    learned: Vec<Block>,
     /// What the event in hand asks of the driver.
     effects: Effects,
 }
 
 impl Core {
-    /// A replica that has not started: it knows only the genesis block.
+    /// A replica that never ran: it knows only the genesis block.
     #[must_use]
     pub fn new(config: Config) -> Self {
+        Self::recover(config, Recovered::default())
+    }
+
+    /// A replica that ran before and remembers `recovered`. It starts in
+    /// the view after its lock's, or in the last view it voted or gave up
+    /// in, whichever is later, and does not propose in a view it voted in:
+    /// a leader votes for its own block, so it may have proposed there.
+    #[must_use]
+    pub fn recover(config: Config, recovered: Recovered) -> Self {
+        let (safety, blocks, committed) = recovered.into_parts();
         Self {
             config,
             view: View::GENESIS,
-            voted: View::GENESIS,
-            lock: Justify::Genesis,
-            proposed: View::GENESIS,
+            voted: safety.voted(),
+            lock: safety.lock().clone(),
+            proposed: safety.voted(),
             entered: None,
             failures: 0,
-            committed: (BlockId::GENESIS, View::GENESIS),
-            blocks: BTreeMap::new(),
+            committed,
+            blocks,
             wanted: BTreeSet::new(),
             certified: BTreeMap::new(),
             votes: BTreeMap::new(),
             timeouts: BTreeMap::new(),
             pending: Vec::new(),
+            learned: Vec::new(),
             effects: Effects::default(),
         }
     }
@@ -154,6 +169,7 @@ impl Core {
     /// Handles `event`.
     pub fn handle(&mut self, event: Event) -> Step {
         let before = (self.voted, self.lock.view());
+        let committed = self.committed;
         let handled = match event {
             Event::Start => {
                 self.start();
@@ -174,16 +190,25 @@ impl Core {
         if let Err(rejection) = handled {
             self.effects.reject(rejection);
         }
-        let safety = (before != (self.voted, self.lock.view()))
-            .then(|| Safety::new(self.voted, self.lock.clone()));
-        Step::new(safety, mem::take(&mut self.effects))
+        // Ancestors first, so that any prefix of the records makes sense.
+        let mut records: Vec<Record> = mem::take(&mut self.learned)
+            .into_iter()
+            .map(Record::Block)
+            .collect();
+        if before != (self.voted, self.lock.view()) {
+            records.push(Record::Safety(Safety::new(self.voted, self.lock.clone())));
+        }
+        if committed != self.committed {
+            records.push(Record::Committed(self.committed.0, self.committed.1));
+        }
+        Step::new(records, mem::take(&mut self.effects))
     }
 
     fn start(&mut self) {
         if self.view == View::GENESIS
-            && let Some(first) = View::GENESIS.next()
+            && let Some(first) = self.lock.view().next()
         {
-            self.enter(first);
+            self.enter(cmp::max(first, self.voted));
         }
     }
 
@@ -382,7 +407,10 @@ impl Core {
     fn store(&mut self, block: Block) {
         let id = block.id();
         let _known: bool = self.wanted.remove(&id);
-        let _stored: &mut Block = self.blocks.entry(id).or_insert(block);
+        if let Entry::Vacant(entry) = self.blocks.entry(id) {
+            self.learned.push(block.clone());
+            let _stored: &mut Block = entry.insert(block);
+        }
         self.find_commit();
     }
 
@@ -497,5 +525,7 @@ impl Core {
     }
 }
 
+#[cfg(test)]
+mod sim;
 #[cfg(test)]
 mod tests;

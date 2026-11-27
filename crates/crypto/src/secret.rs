@@ -27,6 +27,10 @@ pub enum KeyPurpose {
     /// Authenticates the node to other nodes in the transport's handshake.
     /// Its public half is the key in the node's `Peer`.
     Transport,
+    /// Signs the node's proposals, votes and timeouts in Byzantine fault
+    /// tolerant shards (`kurator_bft`). Its public half is what the
+    /// committee checks them with.
+    Consensus,
 }
 
 impl KeyPurpose {
@@ -39,7 +43,7 @@ impl KeyPurpose {
     #[must_use]
     pub const fn algorithm(self) -> Algorithm {
         match self {
-            Self::WalSigning | Self::Transport => Algorithm::Ed25519,
+            Self::WalSigning | Self::Transport | Self::Consensus => Algorithm::Ed25519,
         }
     }
 
@@ -49,6 +53,7 @@ impl KeyPurpose {
         match (self, algorithm) {
             (Self::WalSigning, Algorithm::Ed25519) => "kurator 2026-11 replica WAL signing key",
             (Self::Transport, Algorithm::Ed25519) => "kurator 2026-11 replica transport key",
+            (Self::Consensus, Algorithm::Ed25519) => "kurator 2026-11 replica consensus key",
         }
     }
 }
@@ -102,7 +107,10 @@ mod tests {
         let secret = NodeSecret::from_seed([7; 32]);
         let wal = secret.public_key(KeyPurpose::WalSigning);
         let transport = secret.public_key(KeyPurpose::Transport);
+        let consensus = secret.public_key(KeyPurpose::Consensus);
         assert_ne!(wal, transport, "one key per purpose");
+        assert_ne!(consensus, transport, "consensus is not transport");
+        assert_ne!(consensus, wal, "consensus is not WAL");
         assert_ne!(
             transport,
             SigningKey::from_seed(Algorithm::Ed25519, [7; 32]).verifying_key(),
@@ -124,7 +132,11 @@ mod tests {
     #[test]
     fn keys_use_their_purposes_algorithm() {
         let secret = NodeSecret::from_seed([7; 32]);
-        for purpose in [KeyPurpose::WalSigning, KeyPurpose::Transport] {
+        for purpose in [
+            KeyPurpose::WalSigning,
+            KeyPurpose::Transport,
+            KeyPurpose::Consensus,
+        ] {
             assert_eq!(
                 secret.signing_key(purpose).algorithm(),
                 purpose.algorithm(),
@@ -147,10 +159,17 @@ mod tests {
             WAL_KEY_OF_ZERO_SEED,
             "WAL"
         );
+        assert_eq!(
+            secret.public_key(KeyPurpose::Consensus).to_string(),
+            CONSENSUS_KEY_OF_ZERO_SEED,
+            "consensus"
+        );
     }
 
     const TRANSPORT_KEY_OF_ZERO_SEED: &str =
         "ed25519:1143ed0efdb8425791bfc3fd92e758ed6f627e48c5800b080376b1a8f78b8940";
     const WAL_KEY_OF_ZERO_SEED: &str =
         "ed25519:9a708b2b2d9f535bdeebf1f3f67fb62ee51a706aa49b67849c22347158dc87a9";
+    const CONSENSUS_KEY_OF_ZERO_SEED: &str =
+        "ed25519:777483e09d11455320bc17c3e691e7c3045f4a571a5c5498c46d3ff246a7a5d2";
 }

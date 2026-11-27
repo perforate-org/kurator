@@ -15,10 +15,14 @@ blake3.workspace = true
 kurator-codec.workspace = true
 kurator-consensus.workspace = true
 kurator-crypto.workspace = true
+kurator-shard.workspace = true
+kurator-storage.workspace = true
+kurator-wal.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

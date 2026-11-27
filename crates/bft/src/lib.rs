@@ -21,8 +21,12 @@
 //! [`Event`] and returns a [`Step`]. It reads no clock and does no I/O, so
 //! a simulation drives exactly the code a node runs. A step's messages
 //! may include a vote, which binds the replica never to vote again in that
-//! view, so they are handed over only once its [`Safety`] state is
-//! durable.
+//! view, so they are handed over only once what the event changed is
+//! durable: a [`Journal`] writes the step's records to a write-ahead log
+//! and only then hands over its [`Effects`]. After a crash,
+//! [`Journal::open`] reads them back into a [`Recovered`] replica, which
+//! [`Core::recover`] restarts without voting twice in a view, and a
+//! [`Ledger`] applies the decided blocks' commands to the shard's state.
 //!
 //! Signatures are [`kurator_crypto`]'s, tagged with their algorithm, so a
 //! certificate is a set of signatures that can move to a post-quantum
@@ -33,10 +37,10 @@ mod committee;
 mod core;
 #[cfg(test)]
 mod fixture;
+mod journal;
+mod ledger;
 mod message;
 mod rejection;
-#[cfg(test)]
-mod sim;
 mod step;
 mod timeout;
 mod view;
@@ -46,6 +50,8 @@ mod wire;
 pub use block::{Block, Proposal};
 pub use committee::{Committee, Domain};
 pub use core::{Config, Core, Event};
+pub use journal::{Journal, Recovered};
+pub use ledger::{Ledger, Settled};
 pub use message::Message;
 pub use rejection::Rejection;
 pub use step::{Effects, Outgoing, Safety, Step, Timer, To};
