@@ -10,13 +10,14 @@
 
 pub mod args;
 pub mod console;
+pub mod report;
 pub mod secret;
 
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
-use kurator_net::{Endpoint, NetError, Server, Store};
+use kurator_net::{Endpoint, NetError, Quic, Server, Store};
 use kurator_raft::{KeyPurpose, Member, NodeSecret};
 use kurator_wal::VerifyingKey;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -61,13 +62,25 @@ pub fn key(dir: &std::path::Path) -> io::Result<VerifyingKey> {
 /// When the node cannot start, or the console fails.
 pub async fn run(settings: Settings) -> Result<(), NodeError> {
     let (secret, _) = secret::load_or_create(settings.dir())?;
-    let (store, _server) = open(&settings, secret).await?;
+    let (store, quic, _server) = open(&settings, secret).await?;
     let mut out = tokio::io::stdout();
     out.write_all(b"ready; type a command, or anything else for help\n")
         .await?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = lines.next_line().await? {
-        match execute(&store, &line).await {
+    let mut beats = tokio::time::interval(report::EVERY);
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = beats.tick() => {
+                // A beat that failed is made again on the next one.
+                drop(report::heartbeat(&store, &quic).await);
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            break;
+        };
+        match execute(&store, &quic, &line).await {
             Reply::Show(text) => {
                 out.write_all(text.as_bytes()).await?;
                 out.write_all(b"\n").await?;
@@ -79,7 +92,7 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
     Ok(())
 }
 
-async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Server), NodeError> {
+async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, Server), NodeError> {
     let member = Member::new(settings.id(), secret);
     let bootstrap: BTreeMap<_, _> = settings
         .peers()
@@ -90,6 +103,7 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Server)
     let me = member.peer(endpoint.local_addr()?);
     let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
     let store = Store::open(member, settings.dir(), config, endpoint.transport()).await?;
+    let quic = endpoint.transport();
     let server = endpoint.serve(store.inbox())?;
     match settings.start() {
         Start::Found => {
@@ -106,5 +120,5 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Server)
         }
         Start::Wait => {}
     }
-    Ok((store, server))
+    Ok((store, quic, server))
 }

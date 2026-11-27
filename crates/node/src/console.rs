@@ -2,8 +2,8 @@
 //!
 //! Reads and writes go to the node's replica of the shard that holds the
 //! key; membership changes go to every shard the node holds, the meta
-//! shard among them. A split and `shards` ask the meta shard through this
-//! node's replica of it, which must lead.
+//! shard among them. A split and `shards` ask the meta shard's leader,
+//! found through this node's replica of the meta shard, wherever it is.
 //!
 //! ```text
 //! put <key> <value>        write through this node, which must lead the key's shard
@@ -21,13 +21,14 @@
 
 use std::sync::Arc;
 
-use kurator_meta::{Placement, allocate, registry, report};
-use kurator_net::{Replica, Store};
-use kurator_raft::{Membership, NodeId, Peer, Role};
+use kurator_meta::{Meta, Placement};
+use kurator_net::{Quic, Replica, Store};
+use kurator_raft::{Membership, NodeId, Peer};
 use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
 
 use crate::args::{addr, key, node_id};
+use crate::report;
 
 /// One console command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,8 +103,8 @@ impl Command {
     }
 }
 
-/// Runs one line against `store`.
-pub async fn execute(store: &Store, line: &str) -> Reply {
+/// Runs one line against `store`, asking other nodes through `ask`.
+pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
     let Some(command) = Command::parse(line) else {
         return Reply::Show(HELP.to_owned());
     };
@@ -123,8 +124,8 @@ pub async fn execute(store: &Store, line: &str) -> Reply {
             Some(replica) => get(&replica, &key).await,
             None => unheld(),
         },
-        Command::Split(at) => split(store, &at).await,
-        Command::Shards => shards(store).await,
+        Command::Split(at) => split(store, ask, &at).await,
+        Command::Shards => shards(store, ask).await,
         Command::Status => by_shard(store, |replica| format!(": {:?}", replica.status())),
         Command::Members => by_shard(store, |replica| members(&replica.membership())),
         Command::Add(id, peer) => {
@@ -174,7 +175,7 @@ fn holder(store: &Store, key: &str) -> Option<Arc<Replica>> {
 
 /// This node's replica of the meta shard.
 fn meta(store: &Store) -> Option<Arc<Replica>> {
-    held(store).find(|replica| replica.shard_id() == ShardId::META)
+    store.inbox().replica(ShardId::META)
 }
 
 fn no_meta() -> String {
@@ -202,14 +203,15 @@ async fn get(replica: &Replica, key: &str) -> String {
 
 /// Splits the shard that holds `at` under an id the meta shard allocates,
 /// and reports both halves to it.
-async fn split(store: &Store, at: &str) -> String {
+async fn split(store: &Store, ask: &Quic, at: &str) -> String {
     let Some(replica) = holder(store, at) else {
         return unheld();
     };
     let Some(meta) = meta(store) else {
         return no_meta();
     };
-    let right = match allocate(&meta).await {
+    let meta = Meta::new(&meta, ask);
+    let right = match meta.allocate().await {
         Ok(right) => right,
         Err(error) => return format!("error: {error}"),
     };
@@ -222,7 +224,7 @@ async fn split(store: &Store, at: &str) -> String {
             Ok(Some(half)) => Placement::of(&half),
             Ok(None) | Err(_) => continue,
         };
-        if let Err(error) = report(&meta, &placement).await {
+        if let Err(error) = meta.report(&placement).await {
             return format!("error: split, but not recorded: {error}");
         }
     }
@@ -231,19 +233,14 @@ async fn split(store: &Store, at: &str) -> String {
 
 /// Reports every shard this node leads to the meta shard, then lists what
 /// the meta shard records, one shard a line.
-async fn shards(store: &Store) -> String {
+async fn shards(store: &Store, ask: &Quic) -> String {
     let Some(meta) = meta(store) else {
         return no_meta();
     };
-    let leading = held(store).filter(|replica| {
-        replica.shard_id() != ShardId::META && replica.status().role() == Role::Leader
-    });
-    for replica in leading {
-        if let Err(error) = report(&meta, &Placement::of(&replica)).await {
-            return format!("error: {error}");
-        }
+    if let Err(error) = report::heartbeat(store, ask).await {
+        return format!("error: {error}");
     }
-    match registry(&meta).await {
+    match Meta::new(&meta, ask).registry().await {
         Ok(registry) => {
             let lines: Vec<String> = registry.placements().map(ToString::to_string).collect();
             lines.join("\n")

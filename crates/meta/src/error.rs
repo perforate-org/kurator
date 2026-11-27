@@ -22,6 +22,24 @@ pub enum MetaError {
     /// Other transactions kept changing the records this one read.
     #[error("the meta shard stayed too busy to commit")]
     Contended,
+    /// No node the call reached knew a leader of the meta shard.
+    #[error("the meta shard has no leader this node knows of")]
+    NoLeader,
+    /// A node could not be asked.
+    #[error("cannot ask {node}: {source}")]
+    Unreachable {
+        /// The node.
+        node: kurator_raft::NodeId,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The leader failed to run the call, for this reason.
+    #[error("the meta shard's leader failed: {0}")]
+    Remote(String),
+    /// The leader answered another call than the one asked.
+    #[error("the meta shard's leader answered another call")]
+    Mismatch,
 }
 
 /// The result of a meta operation.

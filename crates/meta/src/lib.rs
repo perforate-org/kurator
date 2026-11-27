@@ -29,8 +29,10 @@ mod client;
 mod error;
 mod placement;
 mod registry;
+mod remote;
 
 pub use client::{allocate, registry, report};
 pub use error::{MetaError, Result};
 pub use placement::{Placement, Reported};
 pub use registry::Registry;
+pub use remote::{Answer, Ask, Call, Meta, answer};

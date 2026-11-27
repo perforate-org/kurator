@@ -2,7 +2,8 @@
 //! bidirectional stream per request.
 //!
 //! A request is written whole and the stream finished; the answer is read
-//! to the end of the stream. QUIC multiplexes the streams, so a large
+//! to the end of the stream. Its first byte says what it is: a Raft
+//! message for a replica, or a call on the meta shard. QUIC multiplexes the streams, so a large
 //! snapshot does not hold up heartbeats, and one connection carries every
 //! request to a peer for as long as it stays up. A broken connection is
 //! dropped and the next request opens a new one.
@@ -12,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_meta::{Answer, Ask, Call};
 use kurator_raft::{Connection, Failure, Message, NodeId, Peer, Response, Transport};
 use quinn::crypto::rustls::QuicClientConfig;
 
@@ -20,6 +22,42 @@ use crate::tls::Identity;
 
 /// The largest message either side reads, a whole snapshot included.
 pub(crate) const MAX_MESSAGE: usize = 1 << 30;
+
+/// What a stream carries, as its first byte says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Channel {
+    /// A [`Message`] for a replica, answered by a [`Response`].
+    Raft,
+    /// A [`Call`] on the meta shard, answered by an [`Answer`].
+    Meta,
+}
+
+impl Channel {
+    const RAFT: u8 = 1;
+    const META: u8 = 2;
+
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Raft => Self::RAFT,
+            Self::Meta => Self::META,
+        }
+    }
+
+    /// The channel a stream's `bytes` are on, and the rest of them.
+    pub(crate) fn split(bytes: &[u8]) -> Option<(Self, &[u8])> {
+        let (tag, rest) = bytes.split_first()?;
+        let channel = match *tag {
+            Self::RAFT => Self::Raft,
+            Self::META => Self::Meta,
+            _ => return None,
+        };
+        Some((channel, rest))
+    }
+}
+
+/// How long a call on the meta shard may take, the leader's commit
+/// included.
+const ASK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The server name sent in the handshake. Peers are known by key, not
 /// name, so it is the same for all.
@@ -103,10 +141,13 @@ impl QuicLink {
         Ok(connection)
     }
 
-    /// Sends `request` on a new stream and reads the answer.
-    async fn exchange(&mut self, request: &[u8]) -> io::Result<Vec<u8>> {
+    /// Sends `request` on `channel` on a new stream and reads the answer.
+    async fn exchange(&mut self, channel: Channel, request: &[u8]) -> io::Result<Vec<u8>> {
         let connection = self.connection().await?;
         let (mut send, mut recv) = connection.open_bi().await.map_err(io::Error::other)?;
+        send.write_all(&[channel.tag()])
+            .await
+            .map_err(io::Error::other)?;
         send.write_all(request).await.map_err(io::Error::other)?;
         send.finish().map_err(io::Error::other)?;
         recv.read_to_end(MAX_MESSAGE)
@@ -122,7 +163,8 @@ impl Connection<Tokio> for QuicLink {
         deadline: Duration,
     ) -> Result<Response<Tokio>, Failure> {
         let bytes = message.encode().map_err(Failure::Unreachable)?;
-        let reply = match tokio::time::timeout(deadline, self.exchange(&bytes)).await {
+        let reply = match tokio::time::timeout(deadline, self.exchange(Channel::Raft, &bytes)).await
+        {
             Ok(Ok(reply)) => reply,
             Ok(Err(error)) => {
                 self.connection = None;
@@ -134,5 +176,18 @@ impl Connection<Tokio> for QuicLink {
             Err(_) => return Err(Failure::Timeout),
         };
         Response::decode(&reply).map_err(|error| Failure::Unreachable(io::Error::other(error)))
+    }
+}
+
+impl Ask for Quic {
+    /// Opens a connection of its own for the call: calls on the meta shard
+    /// are rare next to Raft's traffic.
+    async fn ask(&self, node: NodeId, peer: &Peer, call: &Call) -> io::Result<Answer> {
+        let request = call.encode()?;
+        let mut link = self.connect(node, peer);
+        let reply = tokio::time::timeout(ASK_TIMEOUT, link.exchange(Channel::Meta, &request))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        Answer::decode(&reply).map_err(io::Error::other)
     }
 }

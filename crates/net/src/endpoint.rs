@@ -6,14 +6,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_meta::{Answer, Call};
 use kurator_raft::{Message, NodeId, NodeSecret, Refusal, Response};
+use kurator_shard::ShardId;
 use kurator_wal::VerifyingKey;
 use quinn::crypto::rustls::QuicServerConfig;
 
-use crate::Inbox;
-use crate::connection::{MAX_MESSAGE, Quic};
+use crate::connection::{Channel, MAX_MESSAGE, Quic};
 use crate::roster::Roster;
 use crate::tls::{Identity, presented_key};
+use crate::{Inbox, Tokio};
 
 /// Why an endpoint could not start.
 #[derive(Debug, thiserror::Error)]
@@ -179,12 +181,34 @@ async fn stream(
     let Ok(bytes) = recv.read_to_end(MAX_MESSAGE).await else {
         return;
     };
-    let response = match Message::decode(&bytes) {
+    let answer = match Channel::split(&bytes) {
+        Some((Channel::Raft, message)) => raft(sender, message, &inbox).await,
+        Some((Channel::Meta, call)) => meta(call, &inbox).await,
+        None => Response::<Tokio>::Refused(Refusal::Malformed).encode(),
+    };
+    if send.write_all(&answer).await.is_ok() {
+        drop(send.finish());
+    }
+}
+
+/// Delivers the Raft message `bytes` from `sender` to its replica, and
+/// encodes the response.
+async fn raft(sender: NodeId, bytes: &[u8], inbox: &Inbox) -> Vec<u8> {
+    let response = match Message::decode(bytes) {
         Ok(message) if message.sender() == sender => inbox.handle(message).await,
         Ok(_) => Response::Refused(Refusal::Forged),
         Err(_) => Response::Refused(Refusal::Malformed),
     };
-    if send.write_all(&response.encode()).await.is_ok() {
-        drop(send.finish());
-    }
+    response.encode()
+}
+
+/// Runs the call on the meta shard `bytes` on this node's replica of it,
+/// and encodes the answer. An answer too long to encode is none.
+async fn meta(bytes: &[u8], inbox: &Inbox) -> Vec<u8> {
+    let answer = match (Call::decode(bytes), inbox.replica(ShardId::META)) {
+        (Ok(call), Some(replica)) => kurator_meta::answer(&replica, &call).await,
+        (Ok(_), None) => Answer::Failed("no replica of the meta shard here".to_owned()),
+        (Err(error), _) => Answer::Failed(format!("the call does not decode: {error}")),
+    };
+    answer.encode().unwrap_or_default()
 }
