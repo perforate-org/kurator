@@ -10,6 +10,7 @@
 
 pub mod args;
 pub mod console;
+pub mod metrics;
 pub mod report;
 pub mod secret;
 pub mod session;
@@ -74,8 +75,13 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
     let (secret, _) = secret::load_or_create(settings.dir())?;
     let (store, quic, _server) = open(&settings, secret).await?;
     let mut out = tokio::io::stdout();
+    let scrapes = metrics::Endpoint::bind(settings.metrics()).await?;
     out.write_all(b"ready; type a command, or anything else for help\n")
         .await?;
+    if let Some(addr) = scrapes.local_addr()? {
+        out.write_all(format!("metrics at http://{addr}/metrics\n").as_bytes())
+            .await?;
+    }
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut beats = tokio::time::interval(report::EVERY);
     let mut sweeps = tokio::time::interval(sweep::EVERY);
@@ -91,6 +97,13 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
             _ = sweeps.tick() => {
                 // A sweep that did not finish is made again on the next one.
                 let _swept: Option<kurator_client::Collected> = sweep::sweep(&store, &quic).await;
+                continue;
+            }
+            connection = scrapes.accept() => {
+                // A scraper that failed asks again on its next scrape.
+                if let Ok(stream) = connection {
+                    drop(metrics::answer(&store, stream).await);
+                }
                 continue;
             }
             _ = checks.tick() => {

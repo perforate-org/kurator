@@ -437,3 +437,61 @@ fn a_backup_restores_as_a_new_cluster() {
     );
     assert!(again.quit().is_empty(), "nothing more");
 }
+
+/// Asks the node at `addr` for `path` over HTTP; the whole response.
+fn http_get(addr: &str, path: &str) -> String {
+    use std::io::Read as _;
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nhost: kurator\r\n\r\n").unwrap();
+    let mut response = String::new();
+    let _read = stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn a_node_serves_its_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut console = Console::start(
+        &[
+            "--id",
+            "1",
+            "--listen",
+            "127.0.0.1:0",
+            "--metrics",
+            "127.0.0.1:0",
+            "--found",
+        ],
+        dir.path(),
+    );
+    let announced = console.read(1);
+    let addr = announced
+        .strip_prefix("metrics at http://")
+        .and_then(|rest| rest.strip_suffix("/metrics"))
+        .unwrap_or_else(|| panic!("an address: {announced}"))
+        .to_owned();
+    drop(ask_until(&mut console, "put apple red", 1, "ok at"));
+    let page = http_get(&addr, "/metrics");
+    assert!(page.starts_with("HTTP/1.1 200 OK\r\n"), "{page}");
+    for expected in [
+        "content-type: text/plain; version=0.0.4\r\n",
+        "# TYPE kurator_shard_leader gauge\n",
+        "kurator_shard_leader{shard=\"1\"} 1\n",
+        "kurator_shard_keys{shard=\"1\"} 1\n",
+        "# TYPE kurator_wal_sync_seconds histogram\n",
+    ] {
+        assert!(page.contains(expected), "{expected:?} in {page}");
+    }
+    for family in ["kurator_wal_sync_seconds", "kurator_commit_seconds"] {
+        let prefix = format!("{family}_count{{shard=\"1\"}} ");
+        let count = page
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .and_then(|count| count.parse::<u64>().ok());
+        assert!(count.is_some_and(|count| count > 0), "{family}: {page}");
+    }
+    assert!(
+        http_get(&addr, "/").starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "elsewhere"
+    );
+    assert!(console.quit().is_empty(), "nothing more");
+}

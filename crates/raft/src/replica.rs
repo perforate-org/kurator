@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::time::Instant;
 
 use kurator_consensus::{Members, Replicated, Role, Transaction};
+use kurator_metrics::{Exposition, Histogram, Histograms, Label, Values};
 use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
 use kurator_storage::{
     Abort, Collect, Command, Decide, Decided, Draft, KeyValue, KvState, Outcome, Prepare, Version,
@@ -75,6 +77,11 @@ pub struct Replica<C: Config> {
     shard: ShardId,
     raft: Raft<C, StateMachine>,
     state: StateMachine,
+    /// How long each `fdatasync` of the log took.
+    syncs: Arc<Histogram>,
+    /// How long each proposal took from this replica, as the leader, to
+    /// being committed and applied. Proposals that failed are not counted.
+    commits: Histogram,
 }
 
 /// Where a replica stands, from its own point of view.
@@ -152,6 +159,7 @@ impl<C: Config> Replica<C> {
             &home.log(),
             member.secret.signing_key(KeyPurpose::WalSigning),
         )?;
+        let syncs = log.syncs();
         let state = StateMachine::open(home, shard)?;
         let raft = Raft::new(member.id, config, network, log, state.clone())
             .await
@@ -161,6 +169,8 @@ impl<C: Config> Replica<C> {
             shard,
             raft,
             state,
+            syncs,
+            commits: Histogram::default(),
         })
     }
 
@@ -194,7 +204,7 @@ impl<C: Config> Replica<C> {
     /// meanwhile. Nothing is written.
     pub async fn write(&self, batch: WriteBatch) -> Result<LogId> {
         let proposal = Proposal::new(Command::Kv(batch))?;
-        let response = written(self.raft.client_write(proposal).await)?;
+        let response = self.replicate(proposal).await?;
         let _version: Version = version(response.data)?;
         Ok(response.log_id)
     }
@@ -214,7 +224,7 @@ impl<C: Config> Replica<C> {
     pub(crate) async fn split(&self, at: &[u8], right: ShardId) -> Result<Halves> {
         let epoch = self.shard().epoch();
         let proposal = Proposal::split(Split::new(at, right, epoch))?;
-        let response = written(self.raft.client_write(proposal).await)?;
+        let response = self.replicate(proposal).await?;
         match response.data {
             Applied::Split(halves) => Ok(halves),
             Applied::Misrouted(shard) => Err(misrouted(shard)),
@@ -251,7 +261,7 @@ impl<C: Config> Replica<C> {
     /// decided already. Otherwise as [`Replica::write`].
     pub async fn prepare(&self, prepare: Prepare) -> Result<Version> {
         let proposal = Proposal::new(Command::Prepare(prepare))?;
-        let response = written(self.raft.client_write(proposal).await)?;
+        let response = self.replicate(proposal).await?;
         version(response.data)
     }
 
@@ -268,7 +278,7 @@ impl<C: Config> Replica<C> {
     /// it: how it was decided may be forgotten.
     pub async fn decide(&self, decide: Decide) -> Result<Decided> {
         let proposal = Proposal::new(Command::Decide(decide))?;
-        let response = written(self.raft.client_write(proposal).await)?;
+        let response = self.replicate(proposal).await?;
         let rolled_back = matches!(
             response.data,
             Applied::Data(Outcome::Aborted(Abort::RolledBack(_)))
@@ -289,7 +299,7 @@ impl<C: Config> Replica<C> {
     /// before it. Otherwise as [`Replica::write`].
     pub async fn collect(&self, step: Collect) -> Result<Version> {
         let proposal = Proposal::new(Command::Collect(step))?;
-        let response = written(self.raft.client_write(proposal).await)?;
+        let response = self.replicate(proposal).await?;
         version(response.data)
     }
 
@@ -402,6 +412,40 @@ impl<C: Config> Replica<C> {
     /// which may lag the cluster.
     pub fn read_local<R>(&self, read: impl FnOnce(&ShardState) -> R) -> R {
         self.state.read(read)
+    }
+
+    /// Replicates `proposal` through Raft and waits until it applied here,
+    /// counting how long it took in [`Replica::commits`].
+    async fn replicate(&self, proposal: Proposal) -> Result<ClientWriteResponse<C>> {
+        let started = Instant::now();
+        let response = written(self.raft.client_write(proposal).await)?;
+        self.commits.record(started.elapsed());
+        Ok(response)
+    }
+
+    /// Adds what this replica is doing to `out`, labelled by its shard:
+    /// whether it leads, its term, its log positions, the shard's size,
+    /// which walks its keys, and how long syncs of its log and its commits
+    /// took.
+    pub(crate) fn expose(&self, out: &mut Exposition) {
+        let shard = [Label::new("shard", &self.shard.get())];
+        let status = self.status();
+        out.value(&LEADER, &shard, u64::from(status.role == Role::Leader));
+        out.value(&TERM, &shard, status.term);
+        out.value(&LAST_LOG, &shard, status.last_log.unwrap_or_default());
+        out.value(
+            &APPLIED,
+            &shard,
+            status.applied.map_or(0, |log_id| log_id.index),
+        );
+        let (footprint, keys) = self.state.read(|state| {
+            let kv = state.kv();
+            (kv.footprint().bytes(), kv.keys().count())
+        });
+        out.value(&FOOTPRINT, &shard, footprint);
+        out.value(&KEYS, &shard, u64::try_from(keys).unwrap_or(u64::MAX));
+        out.histogram(&SYNCS, &shard, &self.syncs);
+        out.histogram(&COMMITS, &shard, &self.commits);
     }
 
     /// Where this replica stands.
@@ -612,7 +656,7 @@ impl<C: Config> Replicated for Replica<C> {
     }
 
     async fn propose(&self, command: Command) -> kurator_consensus::Result<Outcome> {
-        let response = written(self.raft.client_write(Proposal::new(command)?).await)?;
+        let response = self.replicate(Proposal::new(command)?).await?;
         match response.data {
             Applied::Data(outcome) => Ok(outcome),
             Applied::Misrouted(shard) => Err(misrouted(shard).into()),
@@ -687,7 +731,39 @@ impl<C: Config> Transaction for Txn<'_, C> {
             return Ok(read_at);
         };
         let proposal = Proposal::new(Command::Txn(transaction))?;
-        let response = written(self.replica.raft.client_write(proposal).await)?;
+        let response = self.replica.replicate(proposal).await?;
         Ok(version(response.data)?)
     }
 }
+const LEADER: Values = Values::gauge(
+    "kurator_shard_leader",
+    "1 while this node's replica of the shard leads it, 0 otherwise.",
+);
+const TERM: Values = Values::gauge(
+    "kurator_raft_term",
+    "The Raft term the replica is in; it grows by one an election.",
+);
+const LAST_LOG: Values = Values::gauge(
+    "kurator_raft_last_log_index",
+    "The index of the last entry in the replica's log.",
+);
+const APPLIED: Values = Values::gauge(
+    "kurator_raft_applied_index",
+    "The index of the last entry the replica applied.",
+);
+const FOOTPRINT: Values = Values::gauge(
+    "kurator_shard_footprint_bytes",
+    "The bytes the shard's keys take with every version they keep: about its snapshot's size.",
+);
+const KEYS: Values = Values::gauge(
+    "kurator_shard_keys",
+    "The keys the shard keeps versions of, removed ones included.",
+);
+const SYNCS: Histograms = Histograms::new(
+    "kurator_wal_sync_seconds",
+    "How long each fdatasync of the replica's log took.",
+);
+const COMMITS: Histograms = Histograms::new(
+    "kurator_commit_seconds",
+    "How long each proposal this replica made as the leader took to commit and apply.",
+);
