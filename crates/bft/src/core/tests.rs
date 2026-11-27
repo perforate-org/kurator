@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use kurator_consensus::NodeId;
+use kurator_wal::Options;
 
 use super::{Config, Core, Event};
 use crate::block::{Block, Proposal};
 use crate::fixture::{DOMAIN, committee, key};
+use crate::journal::{Journal, Recovered};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::step::{Effects, Safety, To};
@@ -26,8 +28,12 @@ fn follower(views: &[u64]) -> NodeId {
         .unwrap()
 }
 
+fn config(node: NodeId) -> Config {
+    Config::new(node, key(node.get()), committee(), DOMAIN)
+}
+
 fn core(node: NodeId) -> Core {
-    Core::new(Config::new(node, key(node.get()), committee(), DOMAIN))
+    Core::new(config(node))
 }
 
 fn started(node: NodeId) -> Core {
@@ -616,5 +622,37 @@ fn a_leader_of_two_views_in_a_row_counts_its_own_vote() {
         next.map(|next| next.block().view()),
         Some(View::new(view.saturating_add(1))),
         "two more votes make a quorum"
+    );
+}
+
+#[test]
+fn a_replica_remembers_its_votes_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = leader(1);
+    let (mut journal, fresh) = Journal::open(dir.path(), Options::default()).unwrap();
+    assert_eq!(fresh, Recovered::default(), "nothing yet");
+    let mut replica = Core::recover(config(node), fresh);
+    let first = journal.persist(replica.handle(Event::Start)).unwrap();
+    let proposed = proposal_in(&first).unwrap();
+    drop(journal);
+
+    let (_journal, recovered) = Journal::open(dir.path(), Options::default()).unwrap();
+    let mut restarted = Core::recover(config(node), recovered);
+    let again = restarted.handle(Event::Start).persisted();
+    assert_eq!(restarted.view(), View::new(1), "back in its view");
+    assert!(proposal_in(&again).is_none(), "proposes once a view");
+    let twin = Proposal::sign(
+        &key(node.get()),
+        DOMAIN,
+        node,
+        Block::new(View::new(1), Justify::Genesis, vec![b"twin".to_vec()]),
+        None,
+    );
+    assert_ne!(twin.block().id(), proposed.block().id(), "another block");
+    let effects = receive(&mut restarted, Message::Proposal(twin));
+    assert_eq!(
+        effects.rejected(),
+        Some(Rejection::Voted(View::new(1))),
+        "votes once a view"
     );
 }

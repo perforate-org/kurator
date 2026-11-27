@@ -19,6 +19,7 @@ use kurator_crypto::{Algorithm, SigningKey};
 use crate::block::{Block, Proposal};
 use crate::committee::{Committee, Domain};
 use crate::core::{Config, Core, Event};
+use crate::journal::Recovered;
 use crate::message::Message;
 use crate::step::{Effects, Outgoing, To};
 use crate::view::View;
@@ -67,6 +68,16 @@ enum Behavior {
     /// Follows the protocol, and also sends votes in others' names,
     /// proposals in the leader's name and certificates of its own making.
     Forge,
+    /// Follows the protocol, but now and then crashes before the step in
+    /// hand is durable and restarts from what it wrote down. It counts as
+    /// honest: it must never vote or propose twice in a view.
+    Crash,
+}
+
+impl Behavior {
+    const fn is_honest(self) -> bool {
+        matches!(self, Self::Honest | Self::Crash)
+    }
 }
 
 #[derive(Debug)]
@@ -97,6 +108,20 @@ struct Replica {
     /// The clients' commands among them.
     commands: BTreeSet<Vec<u8>>,
     timer: Option<(View, u64)>,
+    /// What it wrote down, to restart from.
+    durable: Recovered,
+    /// The commands clients gave it, which they give again after a crash.
+    submitted: BTreeSet<Vec<u8>>,
+    /// The block it voted for, and the block it proposed, in each view.
+    signed: BTreeMap<(View, Signed), BlockId>,
+    config: (NodeId, Committee, Domain),
+}
+
+/// What an honest replica signs at most once in a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Signed {
+    Vote,
+    Proposal,
 }
 
 #[derive(Debug)]
@@ -152,6 +177,10 @@ impl Sim {
                 decided: 0,
                 commands: BTreeSet::new(),
                 timer: None,
+                durable: Recovered::default(),
+                submitted: BTreeSet::new(),
+                signed: BTreeMap::new(),
+                config: (id(i), committee.clone(), domain),
             })
             .collect();
         Self {
@@ -179,7 +208,7 @@ impl Sim {
     fn honest(&self) -> impl Iterator<Item = &Replica> {
         self.replicas
             .iter()
-            .filter(|replica| replica.behavior == Behavior::Honest)
+            .filter(|replica| replica.behavior.is_honest())
     }
 
     fn send(&mut self, from: usize, to: usize, message: &Message) {
@@ -209,9 +238,24 @@ impl Sim {
     }
 
     fn apply(&mut self, node: usize, event: Event) {
+        if let Event::Submitted(command) = &event {
+            let _new: bool = self.replicas[node].submitted.insert(command.clone());
+        }
         let step = self.replicas[node].core.handle(event);
-        let effects = step.persisted();
-        if self.replicas[node].behavior == Behavior::Honest {
+        if self.replicas[node].behavior == Behavior::Crash
+            && self.now < SETTLED
+            && self.rng.chance(4)
+        {
+            self.restart(node);
+            return;
+        }
+        let (records, effects) = step.into_parts();
+        let durable = &mut self.replicas[node].durable;
+        for record in records {
+            durable.note(record);
+        }
+        if self.replicas[node].behavior.is_honest() {
+            self.check_signed(node, &effects);
             self.record(node, effects.decided());
         }
         let replica = &mut self.replicas[node];
@@ -230,8 +274,53 @@ impl Sim {
         }
         match self.replicas[node].behavior {
             Behavior::Silent => {}
-            Behavior::Honest | Behavior::Forge => self.send_all(node, &effects),
+            Behavior::Honest | Behavior::Forge | Behavior::Crash => self.send_all(node, &effects),
             Behavior::Equivocate => self.equivocate(node, &effects),
+        }
+    }
+
+    /// Crashes `node` before the step in hand is durable, so that the
+    /// step is lost, and restarts it from what it wrote down. Its clients
+    /// submit again what it has not decided.
+    fn restart(&mut self, node: usize) {
+        let replica = &mut self.replicas[node];
+        let (me, committee, domain) = replica.config.clone();
+        let config = Config::new(me, replica.key.clone(), committee, domain);
+        replica.core = Core::recover(config, replica.durable.clone());
+        replica.timer = None;
+        let again: Vec<Vec<u8>> = replica
+            .submitted
+            .difference(&replica.commands)
+            .cloned()
+            .collect();
+        self.apply(node, Event::Start);
+        for command in again {
+            self.apply(node, Event::Submitted(command));
+        }
+    }
+
+    /// Checks that honest `node` signs one vote and one proposal in a view
+    /// at most, across its restarts.
+    fn check_signed(&mut self, node: usize, effects: &Effects) {
+        let replica = &mut self.replicas[node];
+        for outgoing in effects.messages() {
+            let (view, kind, block) = match outgoing.message() {
+                Message::Vote(vote) => (vote.view(), Signed::Vote, vote.block()),
+                Message::Proposal(proposal) => (
+                    proposal.block().view(),
+                    Signed::Proposal,
+                    proposal.block().id(),
+                ),
+                Message::Timeout(_)
+                | Message::Fetch(_)
+                | Message::Deliver(_)
+                | Message::Skip(_) => continue,
+            };
+            let first = *replica.signed.entry((view, kind)).or_insert(block);
+            if first != block {
+                let fork = format!("{} signed two {kind:?}s in {view}", replica.core.node());
+                self.fork = self.fork.take().or(Some(fork));
+            }
         }
     }
 
@@ -306,7 +395,7 @@ impl Sim {
                 self.send(node, index(next), &Message::Vote(vote));
             }
             Behavior::Forge => self.forge(node, &key, proposal),
-            Behavior::Honest | Behavior::Silent => {}
+            Behavior::Honest | Behavior::Silent | Behavior::Crash => {}
         }
     }
 
@@ -446,7 +535,7 @@ fn check(behaviors: &[Behavior]) {
 }
 
 mod tests {
-    use super::Behavior::{Equivocate, Forge, Honest, Silent};
+    use super::Behavior::{Crash, Equivocate, Forge, Honest, Silent};
     use super::check;
 
     #[test]
@@ -467,6 +556,12 @@ mod tests {
     #[test]
     fn forgeries_count_for_nothing() {
         check(&[Forge, Honest, Honest, Honest]);
+    }
+
+    #[test]
+    fn crashed_replicas_never_sign_twice_in_a_view() {
+        check(&[Crash, Crash, Crash, Crash]);
+        check(&[Crash, Honest, Equivocate, Crash]);
     }
 
     #[test]

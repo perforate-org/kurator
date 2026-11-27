@@ -742,7 +742,11 @@ dependencies = [
  "kurator-codec",
  "kurator-consensus",
  "kurator-crypto",
+ "kurator-shard",
+ "kurator-storage",
+ "kurator-wal",
  "proptest",
+ "tempfile",
  "thiserror",
 ]
 
