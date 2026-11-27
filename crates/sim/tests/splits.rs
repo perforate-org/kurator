@@ -8,6 +8,7 @@
 )]
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 
 use std::ops::Bound::Unbounded;
 
@@ -15,7 +16,7 @@ use kurator_client::Transacted;
 use kurator_consensus::Transaction as _;
 use kurator_raft::NodeId;
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_shard::ShardId;
+use kurator_shard::{Ceiling, ShardId};
 use kurator_sim::{Cluster, Faults, Holdings, Outcome};
 use kurator_storage::{Version, WriteBatch};
 use openraft_rt_sim::SimRuntime;
@@ -222,6 +223,64 @@ fn a_transaction_reads_only_the_keys_of_its_shard() {
                 Some(Err(kurator_consensus::Error::Misrouted { .. }))
             ),
             "a key of the other shard: {beyond:?}"
+        );
+        cluster.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn shards_split_at_their_middle_until_each_is_under_the_ceiling() {
+    SimRuntime::with_seed(17).block_on(async {
+        let mut cluster = Cluster::start(17, 3, Faults::default()).await.unwrap();
+        cluster.settle().await.unwrap();
+        let mut acked = BTreeSet::new();
+        for index in 0..64_u32 {
+            let key = format!("key-{index:03}").into_bytes();
+            let batch = WriteBatch::new().put(key.clone(), vec![7; 64]);
+            if cluster.write(batch).await == Outcome::Acked {
+                let _: bool = acked.insert(key);
+            }
+        }
+        cluster.settle().await.unwrap();
+        let whole = agreed(&cluster, &acked);
+        let total = whole.shard(ShardId::FIRST).expect("the first shard");
+        let footprint = total.kv().footprint().bytes();
+        // A quarter of the keys and then some: three rounds of halving.
+        let ceiling = Ceiling::new(
+            NonZeroU64::new(footprint.div_ceil(4).saturating_add(64)).expect("positive"),
+        );
+        let mut rounds = 0_u32;
+        loop {
+            let held = agreed(&cluster, &acked);
+            let points: Vec<Vec<u8>> = held
+                .shards()
+                .filter_map(|state| ceiling.split_point(state.kv()))
+                .collect();
+            if points.is_empty() {
+                break;
+            }
+            rounds = rounds.saturating_add(1);
+            assert!(rounds <= 3, "a shard keeps growing back");
+            for at in points {
+                assert_eq!(cluster.split(&at).await, Outcome::Acked, "split");
+            }
+            cluster.settle().await.unwrap();
+        }
+        let held = agreed(&cluster, &acked);
+        let sizes: Vec<u64> = held
+            .shards()
+            .map(|state| state.kv().footprint().bytes())
+            .collect();
+        assert_eq!(sizes.len(), 4, "halved twice: {sizes:?}");
+        assert!(
+            sizes.iter().all(|size| *size <= ceiling.bytes().get()),
+            "{sizes:?} under {ceiling}"
+        );
+        let registry = cluster.registry().await.expect("a registry");
+        assert_eq!(
+            registry.map().map(|map| map.iter().count()),
+            Some(4),
+            "the registry tiles the keys with them"
         );
         cluster.shutdown().await.unwrap();
     });

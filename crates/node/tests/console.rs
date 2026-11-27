@@ -297,3 +297,48 @@ fn a_trusted_client_runs_a_transaction_across_shards() {
     assert_eq!(said, "kurator: no node answered", "and is told so");
     assert!(console.quit().is_empty(), "nothing more");
 }
+
+#[test]
+fn a_node_splits_a_shard_that_outgrows_its_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut console = Console::start(
+        &[
+            "--id",
+            "1",
+            "--listen",
+            "127.0.0.1:0",
+            "--split-above",
+            "512",
+            "--found",
+        ],
+        dir.path(),
+    );
+    let started = Instant::now();
+    let value = "v".repeat(100);
+    for key in ["a", "b", "c", "d", "e", "f"] {
+        let mut answer = console.ask(&format!("put {key} {value}"), 1);
+        while !answer.starts_with("ok at") {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "no leader: {answer}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            answer = console.ask(&format!("put {key} {value}"), 1);
+        }
+    }
+    // Six keys of about 120 bytes: the node splits at the middle, d, on its
+    // next check, and the halves are under the ceiling.
+    loop {
+        let shards = console.ask("shards", 1);
+        if shards.starts_with("s1 [, d) at e1") {
+            assert_eq!(console.read(1), "s2 [d, ..) at e1 on n1", "{shards}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(40),
+            "never split: {shards}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(console.quit().is_empty(), "nothing more");
+}

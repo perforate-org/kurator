@@ -18,8 +18,10 @@ use crate::two_phase::{Collect, Decide, Decided, Decision, Prepare};
 use crate::txn::{ReadSet, Transaction};
 use crate::version::{Retention, Version};
 
+pub use self::footprint::Footprint;
 use self::locks::Locks;
 
+mod footprint;
 mod locks;
 
 /// The key-value state, versioned: each key keeps the values it had at
@@ -345,6 +347,41 @@ impl KvState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.iter().next().is_none()
+    }
+
+    /// The bytes the keys take, every kept version included. It walks
+    /// every key.
+    #[must_use]
+    pub fn footprint(&self) -> Footprint {
+        self.keys
+            .iter()
+            .map(|(key, history)| Footprint::of(key, history))
+            .fold(Footprint::ZERO, Footprint::saturating_add)
+    }
+
+    /// The key to split the state at so that its footprint is cut in two
+    /// halves as nearly even as whole keys allow.
+    ///
+    /// It is the first key past the first whose keys before it take at
+    /// least half, or the last key when the last key alone takes more
+    /// than half. `None` when the state keeps fewer than two keys, so that
+    /// no split leaves both sides with a key. It walks every key twice.
+    #[must_use]
+    pub fn middle(&self) -> Option<&[u8]> {
+        // Half rounded up, so an even cut is taken at once.
+        let half = self.footprint().bytes().div_ceil(2);
+        let mut keys = self.keys.iter();
+        let (first, kept) = keys.next()?;
+        let mut before = Footprint::of(first, kept).bytes();
+        let mut last = None;
+        for (key, history) in keys {
+            if before >= half {
+                return Some(key);
+            }
+            last = Some(key.as_slice());
+            before = before.saturating_add(Footprint::of(key, history).bytes());
+        }
+        last
     }
 
     /// The keys between `start` and `end` with their histories. An empty or
