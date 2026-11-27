@@ -120,8 +120,10 @@ fn every_replica_takes_writes_and_reads_what_it_decided() {
     let Outcome::Committed(version) = outcome else {
         panic!("{outcome:?}");
     };
-    // Every replica decides the block in the end.
+    // Every replica decides the block in the end, and then the committee
+    // goes quiet: there is nothing more to decide.
     cluster.pump(2000);
+    assert!(cluster.wire.lock().is_empty(), "quiet");
     for replica in cluster.replicas.values() {
         let value = cluster.run(replica.read(|kv| kv.get(b"a").map(<[u8]>::to_vec)));
         assert_eq!(value.unwrap(), Some(b"1".to_vec()), "{}", replica.node());

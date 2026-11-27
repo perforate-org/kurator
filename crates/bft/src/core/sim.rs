@@ -314,7 +314,8 @@ impl Sim {
                 Message::Timeout(_)
                 | Message::Fetch(_)
                 | Message::Deliver(_)
-                | Message::Skip(_) => continue,
+                | Message::Skip(_)
+                | Message::Forward(_) => continue,
             };
             let first = *replica.signed.entry((view, kind)).or_insert(block);
             if first != block {

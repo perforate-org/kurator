@@ -1,14 +1,20 @@
 //! The command line.
 //!
 //! ```text
-//! kurator key <dir>
-//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
+//! kurator key <dir> [--consensus]
+//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--bft <charter>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
 //! kurator client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
 //! touch. A node splits a shard it leads once the shard's state takes more
 //! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
+//!
+//! `kurator key` prints the node's transport key, or with `--consensus`
+//! the key it signs BFT votes with.
+//!
+//! `--bft` runs the node's replica of the BFT shard a
+//! [charter](crate::charter) names.
 //!
 //! `--metrics` serves the node's metrics over HTTP, at `/metrics`.
 //!
@@ -19,7 +25,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use kurator_crypto::VerifyingKey;
+use kurator_crypto::{KeyPurpose, VerifyingKey};
 use kurator_raft::{NodeId, Peer};
 use kurator_shard::Ceiling;
 
@@ -28,8 +34,8 @@ use kurator_shard::Ceiling;
 #[non_exhaustive]
 pub enum Invocation {
     /// Create the node secret in a directory, if there is none, and print
-    /// the transport key.
-    Key(PathBuf),
+    /// the public key of one purpose: the transport's or consensus's.
+    Key(PathBuf, KeyPurpose),
     /// Run a replica.
     Run(Settings),
     /// Run operations on a cluster as a client.
@@ -85,6 +91,7 @@ pub struct Settings {
     listen: SocketAddr,
     peers: Vec<(NodeId, Peer)>,
     clients: Vec<VerifyingKey>,
+    charters: Vec<PathBuf>,
     ceiling: Ceiling,
     metrics: Option<SocketAddr>,
     start: Start,
@@ -135,6 +142,12 @@ impl Settings {
         &self.clients
     }
 
+    /// The charters of the BFT shards it holds a replica of.
+    #[must_use]
+    pub fn charters(&self) -> &[PathBuf] {
+        &self.charters
+    }
+
     /// How large a shard it leads grows before it splits it.
     #[must_use]
     pub const fn ceiling(&self) -> Ceiling {
@@ -160,7 +173,7 @@ impl Settings {
 pub enum UsageError {
     /// No command, or one this build does not know.
     #[error(
-        "expected `key <dir>`, `run --id <n> --dir <dir> --listen <addr> ...` or `client --dir <dir> --peer ... <op>...`"
+        "expected `key <dir> [--consensus]`, `run --id <n> --dir <dir> --listen <addr> ...` or `client --dir <dir> --peer ... <op>...`"
     )]
     Command,
     /// A client with nothing to do.
@@ -192,8 +205,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Usage
     match args.next().as_deref() {
         Some("key") => {
             let dir = args.next().ok_or(UsageError::Missing("key"))?;
+            let purpose = match args.next().as_deref() {
+                None => KeyPurpose::Transport,
+                Some("--consensus") => KeyPurpose::Consensus,
+                Some(other) => return Err(UsageError::Option(other.to_owned())),
+            };
             args.next().map_or_else(
-                || Ok(Invocation::Key(dir.into())),
+                || Ok(Invocation::Key(dir.into(), purpose)),
                 |extra| Err(UsageError::Option(extra)),
             )
         }
@@ -209,6 +227,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
     let mut listen = None;
     let mut peers = Vec::new();
     let mut clients = Vec::new();
+    let mut charters = Vec::new();
     let mut ceiling = Ceiling::DEFAULT;
     let mut metrics = None;
     let mut start = Start::Wait;
@@ -220,6 +239,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
             "--listen" => listen = Some(read("--listen", &value("--listen")?, addr)?),
             "--peer" => peers.push(read("--peer", &value("--peer")?, peer)?),
             "--client" => clients.push(read("--client", &value("--client")?, key)?),
+            "--bft" => charters.push(PathBuf::from(value("--bft")?)),
             "--split-above" => {
                 ceiling = read("--split-above", &value("--split-above")?, bytes)?;
             }
@@ -235,6 +255,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
         listen: listen.ok_or(UsageError::Missing("--listen"))?,
         peers,
         clients,
+        charters,
         ceiling,
         metrics,
         start,
@@ -304,7 +325,7 @@ fn peer(text: &str) -> Option<(NodeId, Peer)> {
     Some((node_id(id)?, Peer::new(addr(addr_text)?, key(key_text)?)))
 }
 
-/// A transport key as `kurator key` prints it: `ed25519:` and 64 hex
+/// A key as `kurator key` prints it: `ed25519:` and 64 hex
 /// digits.
 pub(crate) fn key(text: &str) -> Option<VerifyingKey> {
     text.parse().ok()
@@ -312,6 +333,8 @@ pub(crate) fn key(text: &str) -> Option<VerifyingKey> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use kurator_crypto::{KeyPurpose, NodeSecret};
     use kurator_raft::NodeId;
 
@@ -344,7 +367,7 @@ mod tests {
         let peer_key = NodeSecret::from_seed([2; 32]).public_key(KeyPurpose::Transport);
         let client_key = NodeSecret::from_seed([5; 32]).public_key(KeyPurpose::Transport);
         let line = format!(
-            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --split-above 4096 --metrics 127.0.0.1:9100 --found"
+            "run --id 1 --dir n1 --listen 127.0.0.1:7001 --peer 2=127.0.0.1:7002,{peer_key} --client {client_key} --bft s40 --bft s41 --split-above 4096 --metrics 127.0.0.1:9100 --found"
         );
         let Ok(Invocation::Run(settings)) = parse(args(&line)) else {
             panic!("parses");
@@ -360,6 +383,11 @@ mod tests {
         assert_eq!(peer.addr().port(), 7002, "peer addr");
         assert_eq!(peer.key(), &peer_key, "peer key");
         assert_eq!(settings.clients(), [client_key], "client");
+        assert_eq!(
+            settings.charters(),
+            [PathBuf::from("s40"), PathBuf::from("s41")],
+            "charters"
+        );
         assert_eq!(settings.ceiling().bytes().get(), 4096, "ceiling");
         assert_eq!(
             settings.metrics().map(|addr| addr.port()),
@@ -383,6 +411,7 @@ mod tests {
         );
         assert!(waiting.peers().is_empty(), "no peers");
         assert!(waiting.clients().is_empty(), "no clients");
+        assert!(waiting.charters().is_empty(), "no BFT shards");
         assert_eq!(waiting.ceiling(), Ceiling::DEFAULT, "the default ceiling");
         assert_eq!(waiting.metrics(), None, "no metrics");
     }
@@ -486,8 +515,23 @@ mod tests {
         }
         assert_eq!(
             parse(args("key n1")),
-            Ok(Invocation::Key("n1".into())),
+            Ok(Invocation::Key("n1".into(), KeyPurpose::Transport)),
             "key"
+        );
+        assert_eq!(
+            parse(args("key n1 --consensus")),
+            Ok(Invocation::Key("n1".into(), KeyPurpose::Consensus)),
+            "consensus key"
+        );
+        assert_eq!(
+            parse(args("key n1 --wal")),
+            Err(UsageError::Option("--wal".to_owned())),
+            "no other key"
+        );
+        assert_eq!(
+            parse(args("key n1 --consensus more")),
+            Err(UsageError::Option("more".to_owned())),
+            "nothing after"
         );
     }
 }

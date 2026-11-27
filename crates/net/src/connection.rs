@@ -33,18 +33,23 @@ pub(crate) enum Channel {
     Meta,
     /// A client's [`Request`], answered by a [`Reply`].
     Client,
+    /// A message of a shard's BFT consensus, framed with the shard's id,
+    /// answered by nothing once the replica took it in.
+    Bft,
 }
 
 impl Channel {
     const RAFT: u8 = 1;
     const META: u8 = 2;
     const CLIENT: u8 = 3;
+    const BFT: u8 = 4;
 
     const fn tag(self) -> u8 {
         match self {
             Self::Raft => Self::RAFT,
             Self::Meta => Self::META,
             Self::Client => Self::CLIENT,
+            Self::Bft => Self::BFT,
         }
     }
 
@@ -55,6 +60,7 @@ impl Channel {
             Self::RAFT => Self::Raft,
             Self::META => Self::Meta,
             Self::CLIENT => Self::Client,
+            Self::BFT => Self::Bft,
             _ => return None,
         };
         Some((channel, rest))
@@ -160,6 +166,28 @@ impl QuicLink {
             .await
             .map_err(io::Error::other)
     }
+
+    /// Sends `request` on `channel` and reads the answer within
+    /// `deadline`. A connection that failed is dropped, so the next
+    /// request opens a new one.
+    pub(crate) async fn call_on(
+        &mut self,
+        channel: Channel,
+        request: &[u8],
+        deadline: Duration,
+    ) -> Result<Vec<u8>, Failure> {
+        match tokio::time::timeout(deadline, self.exchange(channel, request)).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(error)) => {
+                self.connection = None;
+                Err(Failure::Unreachable(io::Error::other(format!(
+                    "{} at {}: {error}",
+                    self.target, self.addr
+                ))))
+            }
+            Err(_) => Err(Failure::Timeout),
+        }
+    }
 }
 
 impl Connection<Tokio> for QuicLink {
@@ -169,18 +197,7 @@ impl Connection<Tokio> for QuicLink {
         deadline: Duration,
     ) -> Result<Response<Tokio>, Failure> {
         let bytes = message.encode().map_err(Failure::Unreachable)?;
-        let reply = match tokio::time::timeout(deadline, self.exchange(Channel::Raft, &bytes)).await
-        {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(error)) => {
-                self.connection = None;
-                return Err(Failure::Unreachable(io::Error::other(format!(
-                    "{} at {}: {error}",
-                    self.target, self.addr
-                ))));
-            }
-            Err(_) => return Err(Failure::Timeout),
-        };
+        let reply = self.call_on(Channel::Raft, &bytes, deadline).await?;
         Response::decode(&reply).map_err(|error| Failure::Unreachable(io::Error::other(error)))
     }
 }

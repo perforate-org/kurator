@@ -6,9 +6,11 @@
 //! <dir>/shards/<id>/log/         the signed Raft log of each shard's replica
 //! <dir>/shards/<id>/snapshot/    its latest snapshot
 //! <dir>/seeds/<id>/              a shard a split or a restore made, until it is planted
+//! <dir>/bft/<id>/                the journal of each BFT shard's replica
 //! ```
 
 pub mod args;
+pub mod charter;
 pub mod console;
 pub mod metrics;
 pub mod report;
@@ -19,15 +21,17 @@ pub mod sweep;
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
-use kurator_net::{Endpoint, NetError, Quic, Server, Store};
+use kurator_net::{BftReplica, Endpoint, NetError, Quic, Server, Store};
 use kurator_raft::{Backup, Member, NodeId, Peer};
+use kurator_shard::ShardId;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::args::{Settings, Start};
+use crate::charter::{Charter, CharterError};
 use crate::console::{Reply, execute};
 
 /// Why a node stopped.
@@ -52,17 +56,28 @@ pub enum NodeError {
     /// A client's operation failed.
     #[error(transparent)]
     Client(#[from] kurator_client::Error),
+    /// A BFT shard's charter is wrong.
+    #[error("{}: {error}", path.display())]
+    Charter {
+        /// The charter's file.
+        path: PathBuf,
+        /// What is wrong with it.
+        error: CharterError,
+    },
+    /// A BFT replica's journal failed.
+    #[error(transparent)]
+    Journal(#[from] kurator_wal::Error),
 }
 
-/// The transport key of the node whose secret is in `dir`, creating the
-/// secret when there is none.
+/// The public key for `purpose` of the node whose secret is in `dir`,
+/// creating the secret when there is none.
 ///
 /// # Errors
 ///
 /// When the secret cannot be read or written.
-pub fn key(dir: &Path) -> io::Result<VerifyingKey> {
+pub fn key(dir: &Path, purpose: KeyPurpose) -> io::Result<VerifyingKey> {
     let (secret, _) = secret::load_or_create(dir)?;
-    Ok(secret.public_key(KeyPurpose::Transport))
+    Ok(secret.public_key(purpose))
 }
 
 /// Runs the node `settings` describe until the console says `quit` or
@@ -136,6 +151,12 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         .collect();
     let endpoint = Endpoint::bind(settings.listen(), member.secret(), bootstrap)?
         .with_clients(settings.clients().to_vec());
+    let bft = settings
+        .charters()
+        .iter()
+        .map(|path| bft(path, settings, member.secret(), endpoint.transport()))
+        .collect::<Result<_, _>>()?;
+    let endpoint = endpoint.with_bft(bft);
     let me = member.peer(endpoint.local_addr()?);
     let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
     if let Start::Restore(from) = settings.start() {
@@ -160,6 +181,26 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         Start::Wait | Start::Restore(_) => {}
     }
     Ok((store, quic, server))
+}
+
+/// Starts this node's replica of the BFT shard the charter at `path`
+/// names, reaching the committee through `quic`.
+fn bft(
+    path: &Path,
+    settings: &Settings,
+    secret: &NodeSecret,
+    quic: Quic,
+) -> Result<(ShardId, Arc<BftReplica>), NodeError> {
+    let charter = |error| NodeError::Charter {
+        path: path.to_owned(),
+        error,
+    };
+    let text = std::fs::read_to_string(path)?;
+    let parsed = Charter::parse(&text).map_err(charter)?;
+    let shard = parsed.shard();
+    let dir = settings.dir().join("bft").join(shard.get().to_string());
+    let seat = parsed.seat(settings.id(), secret).map_err(charter)?;
+    Ok((shard, seat.start(&dir, quic)?))
 }
 
 /// Plants the backup in `from` in the node directory `dir`, with `node`,

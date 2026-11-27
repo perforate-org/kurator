@@ -17,14 +17,16 @@ path = "src/main.rs"
 
 [dependencies]
 getrandom = "0.4.3"
+kurator-bft.workspace = true
 kurator-client.workspace = true
 kurator-meta.workspace = true
 kurator-consensus.workspace = true
 kurator-crypto.workspace = true
-kurator-net.workspace = true
+kurator-net = { workspace = true, features = ["bft"] }
 kurator-raft.workspace = true
 kurator-shard.workspace = true
 kurator-storage.workspace = true
+kurator-wal.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util"] }
 

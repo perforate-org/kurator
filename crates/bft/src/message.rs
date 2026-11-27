@@ -7,6 +7,7 @@ use kurator_codec::{DecodeError, Format, Reader};
 use crate::block::{Block, Proposal};
 use crate::timeout::{Timeout, TimeoutCertificate};
 use crate::vote::{BlockId, Vote};
+use crate::wire::{put_commands, read_commands};
 
 /// Every message: magic `KBFT`, version 1, a tag, the body, a CRC-32C.
 const FORMAT: Format = Format::new(*b"KBFT", 1);
@@ -17,6 +18,7 @@ const TIMEOUT: u8 = 3;
 const FETCH: u8 = 4;
 const DELIVER: u8 = 5;
 const SKIP: u8 = 6;
+const FORWARD: u8 = 7;
 
 /// A message between the replicas of a shard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,9 @@ pub enum Message {
     /// The certificate that ended a view in a timeout, for replicas that
     /// missed the timeouts it is made of.
     Skip(TimeoutCertificate),
+    /// Commands submitted to a replica, for the leader of its view to
+    /// propose.
+    Forward(Vec<Vec<u8>>),
 }
 
 impl Message {
@@ -69,6 +74,10 @@ impl Message {
                 out.write_all(&[SKIP])?;
                 certificate.encode(out)
             }
+            Self::Forward(commands) => {
+                out.write_all(&[FORWARD])?;
+                put_commands(out, commands)
+            }
         })
     }
 
@@ -93,6 +102,7 @@ impl Message {
             FETCH => Ok(Self::Fetch(BlockId::decode(reader)?)),
             DELIVER => Ok(Self::Deliver(Block::decode(reader)?)),
             SKIP => Ok(Self::Skip(TimeoutCertificate::decode(reader)?)),
+            FORWARD => Ok(Self::Forward(read_commands(reader)?)),
             other => Err(DecodeError::Tag(other)),
         }
     }
@@ -208,6 +218,8 @@ mod tests {
             any::<[u8; 32]>().prop_map(|id| Message::Fetch(BlockId::new(id))),
             block().prop_map(Message::Deliver),
             certificate().prop_map(Message::Skip),
+            proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..12), 0..4)
+                .prop_map(Message::Forward),
         ]
     }
 

@@ -53,6 +53,24 @@ pub(crate) fn read_count(reader: &mut Reader<'_>) -> Result<u32, DecodeError> {
     reader.read()
 }
 
+/// Appends `commands`: their count, then each with its length.
+pub(crate) fn put_commands(out: &mut dyn Write, commands: &[Vec<u8>]) -> io::Result<()> {
+    put_count(out, commands.len())?;
+    commands
+        .iter()
+        .try_for_each(|command| put_bytes(out, command))
+}
+
+/// Reads commands written by [`put_commands`].
+pub(crate) fn read_commands(reader: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, DecodeError> {
+    let count = read_count(reader)?;
+    let mut commands = Vec::new();
+    for _ in 0..count {
+        commands.push(reader.bytes()?.to_vec());
+    }
+    Ok(commands)
+}
+
 /// A list too long for its `u32` count.
 #[derive(Debug, thiserror::Error)]
 #[error("{0} items are too many to encode")]

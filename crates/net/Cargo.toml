@@ -10,7 +10,13 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# BFT replicas on the same transport. Off by default: a Raft-only build
+# does not depend on the BFT crate.
+bft = ["dep:kurator-bft", "dep:parking_lot"]
+
 [dependencies]
+kurator-bft = { workspace = true, optional = true }
 kurator-client.workspace = true
 kurator-meta.workspace = true
 kurator-consensus.workspace = true
@@ -19,15 +25,21 @@ kurator-raft.workspace = true
 kurator-shard.workspace = true
 kurator-storage.workspace = true
 openraft-rt-tokio.workspace = true
+parking_lot = { workspace = true, optional = true }
 quinn.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+kurator-wal.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[[test]]
+name = "bft"
+required-features = ["bft"]
 
 [lints]
 workspace = true
