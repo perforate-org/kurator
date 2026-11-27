@@ -688,12 +688,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kurator-consensus"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "kurator-shard",
+ "kurator-storage",
+ "kurator-wal",
+ "thiserror",
+]
+
+[[package]]
 name = "kurator-meta"
 version = "0.0.1"
 dependencies = [
  "futures-util",
  "kurator-codec",
- "kurator-raft",
+ "kurator-consensus",
  "kurator-shard",
  "kurator-storage",
  "proptest",
@@ -704,6 +715,7 @@ dependencies = [
 name = "kurator-net"
 version = "0.0.1"
 dependencies = [
+ "kurator-consensus",
  "kurator-meta",
  "kurator-raft",
  "kurator-shard",
@@ -723,6 +735,7 @@ name = "kurator-node"
 version = "0.0.1"
 dependencies = [
  "getrandom 0.4.3",
+ "kurator-consensus",
  "kurator-meta",
  "kurator-net",
  "kurator-raft",
@@ -741,6 +754,7 @@ dependencies = [
  "blake3",
  "futures-util",
  "kurator-codec",
+ "kurator-consensus",
  "kurator-shard",
  "kurator-storage",
  "kurator-wal",
@@ -768,6 +782,7 @@ version = "0.0.1"
 dependencies = [
  "futures-util",
  "kurator-codec",
+ "kurator-consensus",
  "kurator-meta",
  "kurator-raft",
  "kurator-shard",

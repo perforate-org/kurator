@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_consensus::{Replicated as _, Transaction as _};
 use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
 use kurator_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
 use kurator_raft::{
@@ -124,9 +125,15 @@ impl Redirect for Error {
     }
 }
 
+impl Redirect for kurator_consensus::Error {
+    fn leader(&self) -> Option<NodeId> {
+        self.redirect().flatten()
+    }
+}
+
 impl Redirect for MetaError {
     fn leader(&self) -> Option<NodeId> {
-        let Self::Raft(error) = self else {
+        let Self::Consensus(error) = self else {
             return None;
         };
         error.leader()
@@ -491,7 +498,7 @@ impl Cluster {
     /// nothing.
     pub async fn transact<F>(&self, body: F) -> Transacted
     where
-        F: FnOnce(&mut Txn<'_, Sim>) -> Result<(), Error> + Send,
+        F: FnOnce(&mut Txn<'_, Sim>) -> kurator_consensus::Result<()> + Send,
     {
         let Some(replica) = self.leader_replica(ShardId::FIRST) else {
             return Transacted::Rejected;
@@ -503,11 +510,11 @@ impl Cluster {
         };
         match SimRuntime::timeout(CLIENT_TIMEOUT, attempt).await {
             Ok(Ok(version)) => Transacted::Committed(version),
-            Ok(Err(Error::Storage(kurator_storage::Error::Aborted(abort)))) => {
+            Ok(Err(kurator_consensus::Error::Storage(kurator_storage::Error::Aborted(abort)))) => {
                 let _resolved: bool = self.resolve_expired(ShardId::FIRST, &abort).await;
                 Transacted::Aborted
             }
-            Ok(Err(Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
+            Ok(Err(kurator_consensus::Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
             Ok(Err(_)) => Transacted::Rejected,
         }
     }

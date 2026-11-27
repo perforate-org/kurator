@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kurator_consensus::Replicated as _;
 use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Reported};
 use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio};
 use kurator_raft::openraft::raft::VoteRequest;

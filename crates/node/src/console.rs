@@ -21,9 +21,9 @@
 
 use std::sync::Arc;
 
+use kurator_consensus::{Members, NodeId, Peer, Replicated as _};
 use kurator_meta::{Meta, Placement};
 use kurator_net::{Quic, Replica, Store};
-use kurator_raft::{Membership, NodeId, Peer};
 use kurator_shard::ShardId;
 use kurator_storage::WriteBatch;
 
@@ -127,7 +127,7 @@ pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
         Command::Split(at) => split(store, ask, &at).await,
         Command::Shards => shards(store, ask).await,
         Command::Status => by_shard(store, |replica| format!(": {:?}", replica.status())),
-        Command::Members => by_shard(store, |replica| members(&replica.membership())),
+        Command::Members => by_shard(store, |replica| members(&replica.members())),
         Command::Add(id, peer) => {
             let mut outcomes = Vec::new();
             for replica in held(store) {
@@ -278,12 +278,11 @@ fn logged<T: std::fmt::Display>(result: kurator_raft::Result<T>) -> String {
 
 /// One line per node, each after a line break: `voter` or `learner`, its
 /// id and its peer.
-fn members(membership: &Membership) -> String {
-    let voters: Vec<NodeId> = membership.voter_ids().collect();
-    let lines: Vec<String> = membership
-        .nodes()
+fn members(members: &Members) -> String {
+    let lines: Vec<String> = members
+        .peers()
         .map(|(id, peer)| {
-            let role = if voters.contains(id) {
+            let role = if members.votes(id) {
                 "voter"
             } else {
                 "learner"
@@ -298,7 +297,8 @@ fn members(membership: &Membership) -> String {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use kurator_raft::{KeyPurpose, Membership, NodeId, NodeSecret, Peer};
+    use kurator_consensus::{Members, NodeId, Peer};
+    use kurator_raft::{KeyPurpose, NodeSecret};
 
     use super::{Command, members};
 
@@ -343,11 +343,11 @@ mod tests {
 
     #[test]
     fn members_show_roles_and_peers() {
-        let membership = Membership::new(
-            vec![BTreeSet::from([NodeId::new(1)])],
+        let membership = Members::new(
+            BTreeSet::from([NodeId::new(1)]),
             BTreeMap::from([(NodeId::new(1), peer(1)), (NodeId::new(2), peer(2))]),
-        )
-        .unwrap();
+            0,
+        );
         assert_eq!(
             members(&membership),
             format!("\nvoter 1 {}\nlearner 2 {}", peer(1), peer(2)),

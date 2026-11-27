@@ -20,7 +20,7 @@
 //!   snapshot and replays the log after it; a follower that fell behind
 //!   the purged log receives the leader's snapshot instead.
 //!
-//! - **Transactions.** [`Replica::begin`] starts a [`Txn`] that reads one
+//! - **Transactions.** [`Replicated::begin`](kurator_consensus::Replicated::begin) starts a [`Txn`] that reads one
 //!   version of the state and commits its writes as one log entry. Each
 //!   replica checks, as it applies that entry, whether a write after the
 //!   read version touched what the transaction read, so every replica
@@ -58,12 +58,13 @@ mod types;
 pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
 pub use identity::{KeyPurpose, NodeSecret};
+pub use kurator_consensus::Role;
 pub use kurator_shard::Applied;
 pub use log_store::LogStore;
 pub use network::{Connection, Failure, Link, Transport};
 pub use openraft;
 pub use proposal::Proposal;
-pub use replica::{Member, Replica, Role, Status, Txn};
+pub use replica::{Member, Replica, Status, Txn};
 pub use rpc::{Message, Refusal, Request, Response};
 pub use snapshot::{Snapshot, SnapshotBytes};
 pub use state_machine::StateMachine;

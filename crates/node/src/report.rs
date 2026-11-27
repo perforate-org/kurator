@@ -7,9 +7,9 @@
 
 use std::time::Duration;
 
+use kurator_consensus::{Replicated as _, Role};
 use kurator_meta::{Meta, MetaError, Placement};
 use kurator_net::{Quic, Store};
-use kurator_raft::Role;
 use kurator_shard::ShardId;
 
 /// How often a node reports the shards it leads.
@@ -29,9 +29,10 @@ pub async fn heartbeat(store: &Store, ask: &Quic) -> Result<(), Unreported> {
         .ok_or(Unreported::NoMeta)?;
     let meta = Meta::new(&meta, ask);
     // A replica that holds no state yet has no membership to lead.
-    let leading = store.replicas().into_iter().filter(|replica| {
-        replica.shard_id() != ShardId::META && replica.status().role() == Role::Leader
-    });
+    let leading = store
+        .replicas()
+        .into_iter()
+        .filter(|replica| replica.shard_id() != ShardId::META && replica.role() == Role::Leader);
     for replica in leading {
         let _reported = meta.report(&Placement::of(&replica)).await?;
     }

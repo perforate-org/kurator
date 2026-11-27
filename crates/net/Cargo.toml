@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 kurator-meta.workspace = true
+kurator-consensus.workspace = true
 kurator-raft.workspace = true
 kurator-shard.workspace = true
 kurator-wal.workspace = true

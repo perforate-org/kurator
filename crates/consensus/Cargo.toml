@@ -1,0 +1,23 @@
+[package]
+name = "kurator-consensus"
+description = "The boundary between Kurator's replicated shards and the consensus that replicates them: what a replica offers, whatever protocol runs it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kurator-shard.workspace = true
+kurator-storage.workspace = true
+kurator-wal.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+
+[lints]
+workspace = true

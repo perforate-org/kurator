@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 
 use std::ops::Bound::Unbounded;
 
+use kurator_consensus::Transaction as _;
+use kurator_raft::NodeId;
 use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_raft::{Error, NodeId};
 use kurator_shard::ShardId;
 use kurator_sim::{Cluster, Faults, Holdings, Outcome, Transacted};
 use kurator_storage::{Version, WriteBatch};
@@ -215,7 +216,10 @@ fn a_transaction_reads_only_the_keys_of_its_shard() {
         expected.sort();
         assert_eq!(keys, expected, "the first shard's keys and its own write");
         assert!(
-            matches!(beyond, Some(Err(Error::Misrouted { .. }))),
+            matches!(
+                beyond,
+                Some(Err(kurator_consensus::Error::Misrouted { .. }))
+            ),
             "a key of the other shard: {beyond:?}"
         );
         cluster.shutdown().await.unwrap();

@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use futures_util::future::join;
+use kurator_consensus::Transaction as _;
 use kurator_raft::openraft::AsyncRuntime as _;
 use kurator_raft::{Error, Txn};
 use kurator_sim::{
@@ -55,7 +56,7 @@ fn amount(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes.try_into().expect("an amount"))
 }
 
-fn balance(txn: &mut Txn<'_, Sim>, index: u64) -> Result<u64, Error> {
+fn balance(txn: &mut Txn<'_, Sim>, index: u64) -> kurator_consensus::Result<u64> {
     Ok(txn.get(&account(index))?.map_or(0, |bytes| amount(&bytes)))
 }
 

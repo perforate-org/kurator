@@ -69,7 +69,8 @@
 | `crates/wal` | 追記型 WAL。チェックサム版と署名版 |
 | `crates/storage` | 版付きの状態、トランザクション(二相コミットの準備と決定を含む)、キー範囲 `Span`、group commit、スナップショット、`Db` |
 | `crates/shard` | シャード記述子(ID・範囲・エポック)、分割、`ShardMap`、シャードの状態 |
-| `crates/meta` | メタシャード: シャード ID の割り当て、配置の登録簿 `Registry`、配置の報告 |
+| `crates/consensus` | 合意層の境界: `Replicated`・`Transaction`(上位層が見るレプリカ)、`NodeId`・`Peer`・`Role`・`Members`。今は Raft が実装し、将来は BFT に差し替える |
+| `crates/meta` | メタシャード: シャード ID の割り当て、配置の登録簿 `Registry`、配置の報告。合意層には `Replicated` 越しにだけ触れる |
 | `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica`、シャードごとのレプリカを束ねる `Store` |
 | `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱、分割、レプリカ移動、シャード横断トランザクションの調整役) |
 | `crates/net` | QUIC トランスポート(quinn、Ed25519 Raw Public Key の相互認証) |

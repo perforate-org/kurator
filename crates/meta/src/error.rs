@@ -9,7 +9,7 @@ pub enum MetaError {
     /// The meta shard's replica failed or refused: it is not the leader,
     /// say.
     #[error(transparent)]
-    Raft(#[from] kurator_raft::Error),
+    Consensus(#[from] kurator_consensus::Error),
     /// A record does not decode.
     #[error("a meta record does not decode: {0}")]
     Record(#[from] DecodeError),
@@ -29,7 +29,7 @@ pub enum MetaError {
     #[error("cannot ask {node}: {source}")]
     Unreachable {
         /// The node.
-        node: kurator_raft::NodeId,
+        node: kurator_consensus::NodeId,
         /// Why.
         #[source]
         source: std::io::Error,

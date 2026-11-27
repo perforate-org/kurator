@@ -35,7 +35,7 @@ exclude_re = [
     "replace Cluster::remove_strays with \\(\\)",
     # A leader named by an error only spares the client a lookup: without
     # it, the client tries the leader it finds itself, which is the same.
-    "replace <impl Redirect for (Error|MetaError)>::leader -> Option<NodeId> with None",
+    "replace <impl Redirect for (Error|MetaError|kurator_consensus::Error)>::leader -> Option<NodeId> with None",
 ]
 timeout_multiplier = 3.0
 # The replica code is exercised mostly by kurator-sim's cluster tests, so

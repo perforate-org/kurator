@@ -125,3 +125,26 @@ impl Error {
         }
     }
 }
+
+/// A Raft error, as the layers above consensus tell the cases apart.
+impl From<Error> for kurator_consensus::Error {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::NotLeader { leader } => Self::NotLeader { leader },
+            Error::Discarded { leader } => Self::Discarded { leader },
+            Error::Storage(error) => Self::Storage(error),
+            Error::Misrouted { shard } => Self::Misrouted { shard },
+            other @ (Error::Io(_)
+            | Error::Wal(_)
+            | Error::Record { .. }
+            | Error::Snapshot { .. }
+            | Error::ProposalTooLarge { .. }
+            | Error::NotCaughtUp { .. }
+            | Error::Locked
+            | Error::NoReplica { .. }
+            | Error::Initialized
+            | Error::Raft(_)
+            | Error::Stopped(_)) => Self::Failed(Box::new(other)),
+        }
+    }
+}

@@ -1,6 +1,6 @@
 //! The operations on the meta shard, each run on its leader.
 
-use kurator_raft::{Config, Replica};
+use kurator_consensus::{Replicated, Transaction as _};
 use kurator_shard::ShardId;
 
 use crate::error::{MetaError, Result};
@@ -16,20 +16,20 @@ const ATTEMPTS: usize = 8;
 ///
 /// # Errors
 ///
-/// [`MetaError::Raft`] when `meta` is not the leader or the commit fails,
+/// [`MetaError::Consensus`] when `meta` is not the leader or the commit fails,
 /// [`MetaError::Exhausted`] when every id is taken, and
 /// [`MetaError::Contended`] when other transactions kept overtaking it.
-pub async fn allocate<C: Config>(meta: &Replica<C>) -> Result<ShardId> {
+pub async fn allocate(meta: &impl Replicated) -> Result<ShardId> {
     for _ in 0..ATTEMPTS {
         match try_allocate(meta).await {
-            Err(MetaError::Raft(error)) if aborted(&error) => {}
+            Err(MetaError::Consensus(error)) if error.is_aborted() => {}
             outcome => return outcome,
         }
     }
     Err(MetaError::Contended)
 }
 
-async fn try_allocate<C: Config>(meta: &Replica<C>) -> Result<ShardId> {
+async fn try_allocate(meta: &impl Replicated) -> Result<ShardId> {
     let mut txn = meta.begin().await?;
     let next = next_id(txn.get(NEXT)?.as_deref())?;
     let after = next.get().checked_add(1).ok_or(MetaError::Exhausted)?;
@@ -43,20 +43,20 @@ async fn try_allocate<C: Config>(meta: &Replica<C>) -> Result<ShardId> {
 ///
 /// # Errors
 ///
-/// [`MetaError::Raft`] when `meta` is not the leader or the commit fails,
+/// [`MetaError::Consensus`] when `meta` is not the leader or the commit fails,
 /// [`MetaError::Record`] when the record there does not decode, and
 /// [`MetaError::Contended`] when other transactions kept overtaking it.
-pub async fn report<C: Config>(meta: &Replica<C>, placement: &Placement) -> Result<Reported> {
+pub async fn report(meta: &impl Replicated, placement: &Placement) -> Result<Reported> {
     for _ in 0..ATTEMPTS {
         match try_report(meta, placement).await {
-            Err(MetaError::Raft(error)) if aborted(&error) => {}
+            Err(MetaError::Consensus(error)) if error.is_aborted() => {}
             outcome => return outcome,
         }
     }
     Err(MetaError::Contended)
 }
 
-async fn try_report<C: Config>(meta: &Replica<C>, placement: &Placement) -> Result<Reported> {
+async fn try_report(meta: &impl Replicated, placement: &Placement) -> Result<Reported> {
     let key = shard_key(placement.id());
     let mut txn = meta.begin().await?;
     if let Some(bytes) = txn.get(&key)? {
@@ -77,17 +77,8 @@ async fn try_report<C: Config>(meta: &Replica<C>, placement: &Placement) -> Resu
 ///
 /// # Errors
 ///
-/// [`MetaError::Raft`] when `meta` is not the leader, and
+/// [`MetaError::Consensus`] when `meta` is not the leader, and
 /// [`MetaError::Record`] when a record does not decode.
-pub async fn registry<C: Config>(meta: &Replica<C>) -> Result<Registry> {
+pub async fn registry(meta: &impl Replicated) -> Result<Registry> {
     Ok(meta.read(Registry::read).await??)
-}
-
-/// Whether `error` says a transaction was overtaken, so that running it
-/// again may succeed.
-const fn aborted(error: &kurator_raft::Error) -> bool {
-    matches!(
-        error,
-        kurator_raft::Error::Storage(kurator_storage::Error::Aborted(_))
-    )
 }

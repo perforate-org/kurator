@@ -151,7 +151,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use kurator_codec::DecodeError;
-    use kurator_raft::NodeId;
+    use kurator_consensus::NodeId;
     use kurator_shard::{Epoch, Shard, ShardId, ShardMap, Split};
     use kurator_storage::{Command, KvState, Version, WriteBatch};
 
