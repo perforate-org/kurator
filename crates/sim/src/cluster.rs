@@ -524,7 +524,7 @@ impl Cluster {
             // A split whose outcome was unknown may apply only now.
             self.refresh().await;
             self.forget_outsiders().await?;
-            if self.converged() && self.registered().await {
+            if self.converged() {
                 return Ok(());
             }
             SimRuntime::sleep(Duration::from_millis(100)).await;
@@ -697,74 +697,52 @@ impl Cluster {
         })
     }
 
-    /// Learns where every shard is from the meta shard, after the leader
-    /// of every shard reported where it is, as a heartbeat would: the
-    /// registry keeps the newest placement of each. The map stays as it
-    /// was while the registry does not tile every key, or is behind a
-    /// split the client saw.
+    /// Learns where every shard is from the meta shard, after every
+    /// replica reported where its shard is, as a heartbeat would.
     async fn refresh(&self) {
         for store in self.up.values() {
             let _planted: Result<(), Error> = store.plant().await;
         }
-        let Some(recorded) = self.registry().await else {
-            return;
-        };
-        let mut changed = false;
         for placement in self.heartbeats() {
-            // The first shard's founding record is no report: one at its
-            // first membership replaces it.
-            let known = recorded.placement(placement.id());
-            if known.is_none_or(|known| known != &placement && !known.supersedes(&placement)) {
-                changed |= self.report(&placement).await;
-            }
+            self.report(&placement).await;
         }
-        let registry = if changed {
-            self.registry().await
-        } else {
-            Some(recorded)
-        };
-        let Some(map) = registry.and_then(|registry| registry.map()) else {
-            return;
-        };
-        let mut current = self.map.lock();
-        let behind = map.iter().any(|shard| {
-            current
-                .get(shard.id())
-                .is_some_and(|known| known.epoch() > shard.epoch())
-        });
-        if !behind {
-            *current = map;
+        self.adopt().await;
+    }
+
+    /// Routes by the registry from now on, once it tiles every key. The
+    /// client knows where shards are only from the registry.
+    async fn adopt(&self) {
+        if let Some(map) = self.registry().await.and_then(|registry| registry.map()) {
+            *self.map.lock() = map;
         }
     }
 
-    /// Where each shard is, as the replicas that lead it know it.
+    /// Where each shard is, as each replica of it knows from what it
+    /// applied. Only committed changes apply, so no replica knows of a
+    /// newer placement than the shard's leader, and the registry keeps the
+    /// newest report.
     fn heartbeats(&self) -> Vec<Placement> {
         self.up
             .values()
             .flat_map(SimStore::replicas)
-            .filter(|replica| {
-                replica.is_initialized()
-                    && replica.shard_id() != ShardId::META
-                    && replica.status().role() == Role::Leader
-            })
+            .filter(|replica| replica.is_initialized() && replica.shard_id() != ShardId::META)
             .map(|replica| Placement::of(&replica))
             .collect()
     }
 
-    /// Records `placement` in the meta shard: whether the registry took
-    /// it.
-    async fn report(&self, placement: &Placement) -> bool {
-        let reported = self
+    /// Reports `placement` to the meta shard, which keeps it if it is
+    /// newer than what it records.
+    async fn report(&self, placement: &Placement) {
+        let _reported: Option<Reported> = self
             .on_meta(|meta| async move { kurator_meta::report(&meta, placement).await })
             .await;
-        reported == Some(Reported::Recorded)
     }
 
     /// Reports both halves of a split that just applied on `store`.
     async fn report_split(&self, store: &SimStore, halves: &Halves) {
         for shard in [halves.left(), halves.right()] {
             if let Ok(Some(replica)) = store.replica(shard.id()).await {
-                let _recorded: bool = self.report(&Placement::of(&replica)).await;
+                self.report(&Placement::of(&replica)).await;
             }
         }
     }
@@ -774,20 +752,6 @@ impl Cluster {
     pub async fn registry(&self) -> Option<Registry> {
         self.on_meta(|meta| async move { kurator_meta::registry(&meta).await })
             .await
-    }
-
-    /// Whether the registry records every shard the client knows of as
-    /// its leader knows it, and tiles the keys as the client's map does.
-    async fn registered(&self) -> bool {
-        let Some(registry) = self.registry().await else {
-            return false;
-        };
-        let placed = self.shards().iter().all(|shard| {
-            self.leader_replica(shard.id()).is_some_and(|leader| {
-                registry.placement(shard.id()) == Some(&Placement::of(&leader))
-            })
-        });
-        placed && registry.map().as_ref() == Some(&*self.map.lock())
     }
 
     /// Runs `run` on the meta shard's leader, following leader hints and
@@ -876,11 +840,6 @@ impl Cluster {
         for (shard, id) in strays {
             let _outcome: Outcome = self.submit(Op::Remove(shard, id)).await;
         }
-    }
-
-    /// Records a split the client saw succeed.
-    fn learn(&self, halves: &Halves) {
-        let _stale = self.map.lock().split(halves);
     }
 
     /// Submits `op` to every shard in turn, the meta shard first: `Acked`
@@ -1000,8 +959,8 @@ impl Cluster {
             Op::Write(batch) => replica.write(batch).await.map(drop),
             Op::Split { at, right } => match store.split(shard, &at, right).await {
                 Ok(halves) => {
-                    self.learn(&halves);
                     self.report_split(store, &halves).await;
+                    self.adopt().await;
                     Ok(())
                 }
                 Err(error) => Err(error),

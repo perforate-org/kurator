@@ -92,6 +92,12 @@ fn a_replica_moves_and_the_registry_follows() {
         let first = ShardId::FIRST;
         let right = ShardId::new(2);
 
+        cluster.add_node(NodeId::new(5)).await.expect("a new node");
+        cluster.settle().await.expect("settle");
+        assert!(
+            !cluster.ids().contains(&NodeId::new(5)),
+            "a node no shard took is forgotten"
+        );
         cluster.add_node(NodeId::new(4)).await.expect("a new node");
         let held = cluster
             .move_replica(first, NodeId::new(1), NodeId::new(2))

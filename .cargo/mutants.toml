@@ -26,9 +26,10 @@ exclude_re = [
     # makes such a mutant fail in seconds instead of minutes.
     "replace Network::garbled -> Option<Garbled> with None",
     # Settling waits for each shard's leader to commit in its own term;
-    # skipping that wait leaves the convergence check, which polls for
+    # skipping that wait, or ending it once any one leader did, leaves the convergence check, which polls for
     # longer, to catch up the same.
     "replace Cluster::confirm -> bool with false",
+    "replace &= with \\|= in Cluster::settle",
     # A forgotten node stays in a shard only when a leave races a split
     # that no replica up applied yet; no seed in the default set does.
     "replace Cluster::remove_strays with \\(\\)",
