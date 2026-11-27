@@ -703,6 +703,7 @@ dependencies = [
 name = "kurator-net"
 version = "0.0.1"
 dependencies = [
+ "kurator-meta",
  "kurator-raft",
  "kurator-shard",
  "kurator-storage",

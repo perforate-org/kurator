@@ -1,9 +1,10 @@
 //! The records of the meta shard, and the registry they make.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::ops::Bound;
 
-use kurator_codec::DecodeError;
+use kurator_codec::{DecodeError, Reader, put_bytes};
 use kurator_shard::{Shard, ShardId, ShardMap};
 use kurator_storage::KvState;
 
@@ -100,6 +101,48 @@ impl Registry {
     #[must_use]
     pub fn map(&self) -> Option<ShardMap> {
         ShardMap::from_shards(self.placements().map(|placement| placement.shard().clone()))
+    }
+
+    /// Writes the registry as `next u64 | count u32 | bytes(placement)*`,
+    /// by id, each placement as [`Placement::encode`] writes it.
+    ///
+    /// # Errors
+    ///
+    /// When `out` fails, or something is too long for its prefix.
+    pub fn encode(&self, out: &mut Vec<u8>) -> io::Result<()> {
+        out.extend_from_slice(&self.next.get().to_le_bytes());
+        let count = u32::try_from(self.placements.len()).map_err(io::Error::other)?;
+        out.extend_from_slice(&count.to_le_bytes());
+        for placement in self.placements.values() {
+            let mut encoded = Vec::new();
+            placement.encode(&mut encoded)?;
+            put_bytes(out, &encoded)?;
+        }
+        Ok(())
+    }
+
+    /// Reads a registry written by [`Registry::encode`] off the front of
+    /// `reader`.
+    ///
+    /// # Errors
+    ///
+    /// When it does not decode, or names a shard twice, out of order, or
+    /// the meta shard.
+    pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let next = ShardId::new(reader.read()?);
+        let mut placements = BTreeMap::new();
+        for _ in 0..reader.read::<u32>()? {
+            let placement = Placement::decode(reader.bytes()?)?;
+            let id = placement.id();
+            let ascending = placements
+                .last_key_value()
+                .is_none_or(|(last, _)| *last < id);
+            if !ascending || id == ShardId::META {
+                return Err(DecodeError::Invalid);
+            }
+            drop(placements.insert(id, placement));
+        }
+        Ok(Self { placements, next })
     }
 }
 

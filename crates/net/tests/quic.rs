@@ -11,7 +11,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_net::{Endpoint, Replica, Server, Store, Tokio};
+use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Reported};
+use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio};
 use kurator_raft::openraft::raft::VoteRequest;
 use kurator_raft::openraft::{self, SnapshotPolicy};
 use kurator_raft::{
@@ -27,6 +28,7 @@ const LOOPBACK: &str = "127.0.0.1:0";
 /// One node's store and its server.
 struct Node {
     store: Store,
+    quic: Quic,
     peer: Peer,
     server: Server,
     _dir: tempfile::TempDir,
@@ -64,6 +66,14 @@ impl Node {
     fn replica(&self) -> Arc<Replica> {
         self.first().unwrap()
     }
+
+    /// The node's replica of the meta shard, once it holds one.
+    fn meta(&self) -> Option<Arc<Replica>> {
+        self.store
+            .replicas()
+            .into_iter()
+            .find(|replica| replica.shard_id() == ShardId::META)
+    }
 }
 
 /// Starts node `id`, trusting `bootstrap` until it has a membership.
@@ -79,9 +89,11 @@ async fn start(id: u64, bootstrap: &[u64]) -> Node {
     let store = Store::open(member, dir.path(), config(), endpoint.transport())
         .await
         .unwrap();
+    let quic = endpoint.transport();
     let server = endpoint.serve(store.inbox()).unwrap();
     Node {
         store,
+        quic,
         peer,
         server,
         _dir: dir,
@@ -304,4 +316,63 @@ async fn authentication() {
     let gone = member.call(vote_from(2), deadline).await;
     assert!(gone.is_err(), "the server is gone: {gone:?}");
     store.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn any_node_runs_calls_on_the_meta_shards_leader() {
+    within(meta_calls()).await;
+}
+
+async fn meta_calls() {
+    let nodes = three_nodes().await;
+    let meta_leader = || {
+        nodes
+            .values()
+            .filter_map(Node::meta)
+            .find(|replica| replica.status().role() == Role::Leader)
+    };
+    eventually("a meta leader", || meta_leader().is_some()).await;
+    let leader = meta_leader().unwrap().id();
+    eventually("every node knows it", || {
+        nodes
+            .values()
+            .all(|node| node.meta().unwrap().status().leader() == Some(leader))
+    })
+    .await;
+    let mut taken = Vec::new();
+    let mut reported = Vec::new();
+    for node in nodes.values() {
+        let replica = node.meta().unwrap();
+        let meta = Meta::new(&replica, &node.quic);
+        taken.push(meta.allocate().await.unwrap().get());
+        let first = Placement::of(&node.replica());
+        reported.push(meta.report(&first).await.unwrap());
+        let registry = meta.registry().await.unwrap();
+        let recorded = registry.placement(ShardId::FIRST).unwrap();
+        assert_eq!(
+            recorded.replicas().len(),
+            3,
+            "recorded through {}",
+            node.peer
+        );
+    }
+    assert_eq!(taken, [2, 3, 4], "an id for each, wherever it was asked");
+    let once = [Reported::Recorded, Reported::Stale, Reported::Stale];
+    assert_eq!(reported, once, "recorded once");
+
+    let (follower, node) = nodes
+        .iter()
+        .find(|(id, _)| NodeId::new(**id) != leader)
+        .unwrap();
+    let asker = &nodes[if *follower == 1 { &2 } else { &1 }];
+    let answer = asker
+        .quic
+        .ask(NodeId::new(*follower), &node.peer, &Call::Registry)
+        .await
+        .unwrap();
+    assert_eq!(
+        answer,
+        Answer::NotLeader(Some(leader)),
+        "a follower names the leader"
+    );
 }

@@ -9,6 +9,11 @@
 //!   shard it is for. Entries travel in
 //!   the batches `OpenRaft` forms; a snapshot travels whole on its own
 //!   stream, beside the heartbeats.
+//! - **Meta calls on the same transport.** The first byte of a stream
+//!   names its channel: Raft messages, or calls on the meta shard
+//!   ([`kurator_meta::Call`]), which a node answers from its own meta
+//!   replica. [`Quic`] implements [`kurator_meta::Ask`], so any node can
+//!   reach the meta shard's leader.
 //! - **Mutual authentication by Ed25519 key.** TLS 1.3 with raw public
 //!   keys (RFC 7250), no certificates: each side proves it holds the
 //!   transport key derived from its [`NodeSecret`](kurator_raft::NodeSecret)

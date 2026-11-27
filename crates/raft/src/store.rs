@@ -305,6 +305,14 @@ impl<C: Config, T: Transport<C>> Inbox<C, T> {
         }
     }
 
+    /// The store's replica of `shard`, if it holds one that holds a
+    /// state: where a call from another node for that shard goes.
+    #[must_use]
+    pub fn replica(&self, shard: ShardId) -> Option<Arc<Replica<C>>> {
+        let held = self.shared.replicas.lock().get(&shard).cloned();
+        held.filter(|replica| replica.is_initialized())
+    }
+
     /// The memberships of the store's replicas, as they change.
     #[must_use]
     pub fn memberships(&self) -> Memberships<C> {

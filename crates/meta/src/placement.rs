@@ -133,7 +133,7 @@ impl fmt::Display for Placement {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use kurator_codec::DecodeError;
@@ -144,7 +144,7 @@ mod tests {
 
     use super::Placement;
 
-    fn placements() -> impl Strategy<Value = Placement> {
+    pub(crate) fn placements() -> impl Strategy<Value = Placement> {
         (
             any::<u64>(),
             any::<u64>(),

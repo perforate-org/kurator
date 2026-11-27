@@ -11,7 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+kurator-meta.workspace = true
 kurator-raft.workspace = true
+kurator-shard.workspace = true
 kurator-wal.workspace = true
 openraft-rt-tokio.workspace = true
 quinn.workspace = true
@@ -20,7 +22,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-kurator-shard.workspace = true
 kurator-storage.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
