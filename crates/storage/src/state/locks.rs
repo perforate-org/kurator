@@ -6,12 +6,12 @@ use std::io::{self, Write};
 
 use kurator_codec::{DecodeError, Reader, put_bytes};
 
+use crate::across::TxnId;
 use crate::batch::{KvOp, WriteBatch};
 use crate::outcome::{Abort, Outcome};
 use crate::span::Span;
 use crate::two_phase::{Decided, Prepare};
 use crate::txn::ReadSet;
-use crate::txn_id::TxnId;
 use crate::version::Version;
 
 /// The transactions across shards a state took part in.
@@ -69,6 +69,7 @@ impl Locks {
                 key: key.to_vec(),
                 by: prepared.id(),
                 primary: prepared.primary().to_vec(),
+                deadline: prepared.deadline(),
             })
         })
     }
@@ -101,12 +102,9 @@ impl Locks {
         !self.prepared.is_empty()
     }
 
-    /// The transactions prepared and not decided yet, with their primary
-    /// keys.
-    pub(super) fn pending(&self) -> impl Iterator<Item = (TxnId, &[u8])> {
-        self.prepared
-            .values()
-            .map(|prepared| (prepared.id(), prepared.primary()))
+    /// The transactions prepared and not decided yet.
+    pub(super) fn pending(&self) -> impl Iterator<Item = &Prepare> {
+        self.prepared.values()
     }
 
     /// Holds `prepare` until it is decided.
@@ -221,8 +219,9 @@ mod tests {
     use kurator_codec::{DecodeError, Reader, put_bytes};
 
     use super::{DECIDED_ABORTED, DECIDED_COMMITTED, Locks};
+    use crate::across::Deadline;
+    use crate::across::TxnId;
     use crate::draft::Draft;
-    use crate::txn_id::TxnId;
     use crate::version::Version;
 
     /// Locks with the transactions `prepared`, then `decided`, each
@@ -231,7 +230,11 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&u32::try_from(prepared.len()).unwrap().to_le_bytes());
         for id in prepared {
-            let prepare = Draft::new(Version::ZERO).into_prepare(TxnId::new(*id), b"p".to_vec());
+            let prepare = Draft::new(Version::ZERO).into_prepare(
+                TxnId::new(*id),
+                b"p".to_vec(),
+                Deadline::new(0),
+            );
             prepare.encode(&mut out).unwrap();
         }
         out.extend_from_slice(&u32::try_from(decided.len()).unwrap().to_le_bytes());

@@ -11,8 +11,8 @@ use std::ops::Bound::{Excluded, Included};
 use criterion as _;
 use kurator_codec::Reader;
 use kurator_storage::{
-    Abort, Command, Decide, Decided, Decision, Draft, KvState, Outcome, Prepare, TxnId, Version,
-    WriteBatch,
+    Abort, Command, Deadline, Decide, Decided, Decision, Draft, KvState, Outcome, Prepare, TxnId,
+    Version, WriteBatch,
 };
 use proptest as _;
 use tempfile as _;
@@ -25,13 +25,16 @@ fn state() -> KvState {
     state
 }
 
+/// When the coordinator of every transaction here means to decide it.
+const DEADLINE: Deadline = Deadline::new(1_000);
+
 /// The part of the transaction `id` that reads `a` and writes `b`, with
 /// `a` as its primary key.
 fn part(state: &KvState, id: u128) -> Prepare {
     let mut draft = Draft::new(state.version());
     let _a = draft.get(state, b"a").unwrap();
     draft.put("b", "3");
-    draft.into_prepare(TxnId::new(id), b"a".to_vec())
+    draft.into_prepare(TxnId::new(id), b"a".to_vec(), DEADLINE)
 }
 
 fn decide(id: u128, decision: Decision) -> Command {
@@ -43,6 +46,7 @@ fn locked(key: &str, id: u128) -> Outcome {
         key: key.as_bytes().to_vec(),
         by: TxnId::new(id),
         primary: b"a".to_vec(),
+        deadline: DEADLINE,
     })
 }
 
@@ -58,9 +62,19 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
     assert!(state.is_locked(), "locked");
     let pending: Vec<_> = state
         .pending()
-        .map(|(id, key)| (id, key.to_vec()))
+        .map(|prepared| {
+            (
+                prepared.id(),
+                prepared.primary().to_vec(),
+                prepared.deadline(),
+            )
+        })
         .collect();
-    assert_eq!(pending, [(TxnId::new(7), b"a".to_vec())], "pending");
+    assert_eq!(
+        pending,
+        [(TxnId::new(7), b"a".to_vec(), DEADLINE)],
+        "pending"
+    );
     assert_eq!(state.get(b"b"), Some(b"2".as_slice()), "held back");
 
     let write_read = Command::Kv(WriteBatch::new().put("a", "9"));
@@ -241,7 +255,11 @@ fn commands_of_both_phases_roundtrip() {
     let state = state();
     for command in [
         Command::Prepare(part(&state, u128::MAX)),
-        Command::Prepare(Draft::new(state.version()).into_prepare(TxnId::new(1), Vec::new())),
+        Command::Prepare(Draft::new(state.version()).into_prepare(
+            TxnId::new(1),
+            Vec::new(),
+            Deadline::new(u64::MAX),
+        )),
         decide(1, Decision::Commit),
         decide(2, Decision::Abort),
     ] {
@@ -249,6 +267,15 @@ fn commands_of_both_phases_roundtrip() {
         assert_eq!(Command::decode(encoded.payload()), Ok(command), "roundtrip");
     }
     assert_eq!(TxnId::new(255).to_string(), "tff", "display");
+}
+
+#[test]
+fn a_deadline_passes_after_its_moment() {
+    assert!(!DEADLINE.has_passed(Deadline::new(999)), "before");
+    assert!(!DEADLINE.has_passed(DEADLINE), "at");
+    assert!(DEADLINE.has_passed(Deadline::new(1_001)), "after");
+    assert_eq!(DEADLINE.millis(), 1_000, "millis");
+    assert_eq!(DEADLINE.to_string(), "1000ms", "display");
 }
 
 #[test]

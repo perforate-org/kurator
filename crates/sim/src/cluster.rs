@@ -10,14 +10,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
-use kurator_raft::openraft::{self, AsyncRuntime as _, SnapshotPolicy};
+use kurator_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
 use kurator_raft::{
     Error, Member, Membership, NodeId, NodeSecret, Peer, Progress, Replica, Role, Status, Store,
     Txn,
 };
 use kurator_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
-use kurator_storage::{Decide, Decided, Decision, KvOp, KvState, TxnId, Version, WriteBatch};
-use openraft_rt_sim::SimRuntime;
+use kurator_storage::{
+    Abort, Deadline, Decide, Decided, Decision, KvOp, KvState, TxnId, Version, WriteBatch,
+};
+use openraft_rt_sim::{SimInstant, SimRuntime};
 use parking_lot::Mutex;
 
 use crate::Sim;
@@ -158,6 +160,11 @@ const CATCH_UP_POLL: Duration = Duration::from_millis(100);
 
 /// How long a client waits for a request.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a coordinator means to take over a transaction across shards,
+/// from when it starts to prepare it: past that, whoever runs into its
+/// locks resolves it.
+const LOCK_TTL: Duration = Duration::from_secs(5);
 
 /// How many replicas a client tries before it gives up on a request.
 /// With [`ROUTE_BACKOFF`] this spans a few elections and stays inside
@@ -494,7 +501,10 @@ impl Cluster {
         };
         match SimRuntime::timeout(CLIENT_TIMEOUT, attempt).await {
             Ok(Ok(version)) => Transacted::Committed(version),
-            Ok(Err(Error::Storage(kurator_storage::Error::Aborted(_)))) => Transacted::Aborted,
+            Ok(Err(Error::Storage(kurator_storage::Error::Aborted(abort)))) => {
+                let _resolved: bool = self.resolve_expired(ShardId::FIRST, &abort).await;
+                Transacted::Aborted
+            }
             Ok(Err(Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
             Ok(Err(_)) => Transacted::Rejected,
         }
@@ -631,11 +641,11 @@ impl Cluster {
         })
     }
 
-    /// Decides every transaction across shards that a shard's leader holds
-    /// prepared: as the primary decided it, or, when the primary never
-    /// did, aborted there first. Only safe once no coordinator is at work.
+    /// Resolves every transaction across shards that a shard's leader
+    /// holds prepared past its deadline.
     async fn resolve(&self) {
-        let pending: Vec<(ShardId, TxnId, Vec<u8>)> = self
+        let now = now();
+        let expired: Vec<(ShardId, TxnId, Vec<u8>)> = self
             .shards()
             .iter()
             .filter_map(|shard| Some((shard.id(), self.leader_replica(shard.id())?)))
@@ -644,20 +654,48 @@ impl Cluster {
                     state
                         .kv()
                         .pending()
-                        .map(|(id, primary)| (shard, id, primary.to_vec()))
+                        .filter(|prepared| prepared.deadline().has_passed(now))
+                        .map(|prepared| (shard, prepared.id(), prepared.primary().to_vec()))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
-        for (shard, id, primary) in pending {
-            let primary_shard = self.locate(&primary);
-            let abort = Decide::new(id, primary.clone(), Decision::Abort);
-            let Some(decided) = self.decide(primary_shard, abort).await else {
-                continue;
-            };
-            let outcome = Decide::new(id, primary, decision(decided));
-            let _decided: Option<Decided> = self.decide(shard, outcome).await;
+        for (shard, id, primary) in expired {
+            self.resolve_lock(shard, id, primary).await;
         }
+    }
+
+    /// Resolves the transaction whose lock `abort` ran into on `shard`,
+    /// when its deadline passed; whether it did.
+    pub(super) async fn resolve_expired(&self, shard: ShardId, abort: &Abort) -> bool {
+        let Abort::Locked {
+            by,
+            primary,
+            deadline,
+            ..
+        } = abort
+        else {
+            return false;
+        };
+        if !deadline.has_passed(now()) {
+            return false;
+        }
+        self.resolve_lock(shard, *by, primary.clone()).await;
+        true
+    }
+
+    /// Decides the transaction `id`, prepared on `shard`, as its primary
+    /// decided it, or, when the primary never did, aborted there first.
+    /// The primary's log orders that abort and its coordinator's commit,
+    /// so whichever came first stands.
+    async fn resolve_lock(&self, shard: ShardId, id: TxnId, primary: Vec<u8>) {
+        let primary_shard = self.locate(&primary);
+        let abort = Decide::new(id, primary.clone(), Decision::Abort);
+        let Some(decided) = self.decide(primary_shard, abort).await else {
+            return;
+        };
+        let outcome = Decide::new(id, primary, decision(decided));
+        let _decided: Option<Decided> = self.decide(shard, outcome).await;
     }
 
     /// Whether every shard has a leader, and none holds a transaction
@@ -677,6 +715,12 @@ impl Cluster {
             async move { replica.decide(decide).await }
         })
         .await
+    }
+
+    /// When a coordinator that starts now means to have decided.
+    fn lock_deadline() -> Deadline {
+        let ttl = u64::try_from(LOCK_TTL.as_millis()).unwrap_or(u64::MAX);
+        Deadline::new(now().millis().saturating_add(ttl))
     }
 
     /// An id no other transaction of this cluster has.
@@ -1071,6 +1115,13 @@ impl Cluster {
                 ..
             }) => Ok(Outcome::Acked),
             Err(Error::Discarded { .. }) => Ok(Outcome::Unknown),
+            // A lock whose coordinator gave up is resolved, and the write
+            // tried again.
+            Err(Error::Storage(kurator_storage::Error::Aborted(abort)))
+                if self.resolve_expired(shard, &abort).await =>
+            {
+                Err(Retry::To(Some(id)))
+            }
             // A write that conflicts with a transaction across shards, or
             // a split while one holds locks, is refused, not lost.
             Err(Error::NotCaughtUp { .. } | Error::Storage(_) | Error::Locked) => {
@@ -1120,4 +1171,10 @@ const fn decision(decided: Decided) -> Decision {
         Decided::Committed(_) => Decision::Commit,
         Decided::Aborted | _ => Decision::Abort,
     }
+}
+
+/// Now on the clock the clients share: simulated time since the start.
+fn now() -> Deadline {
+    let elapsed = SimInstant::now().elapsed_since_start();
+    Deadline::new(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
 }

@@ -22,9 +22,10 @@
 //! is told once, a prepare that arrives after its transaction was decided
 //! locks nothing, and a commit can never be undone by a late abort: the
 //! abort answers that the transaction committed. Whoever finds a lock left
-//! behind, its coordinator gone, asks the primary how it was decided, and
-//! aborts it there when it was not: the primary's log orders that abort
-//! and the coordinator's commit, so they agree.
+//! behind past its [`Deadline`](crate::Deadline), its coordinator gone,
+//! asks the primary how it was decided, and aborts it there when it was
+//! not: the primary's log orders that abort and the coordinator's commit,
+//! so they agree.
 //!
 //! Every shard held all the locks of the transaction at its commit point,
 //! so its reads on every shard were still current then: committed
@@ -32,10 +33,10 @@
 
 use kurator_codec::{DecodeError, Reader, put_bytes};
 
+use crate::across::{Deadline, TxnId};
 use crate::error::{Error, Result};
 use crate::span::Span;
 use crate::txn::Transaction;
-use crate::txn_id::TxnId;
 use crate::version::Version;
 
 /// The first phase on one shard: its part of the transaction, to check and
@@ -44,17 +45,25 @@ use crate::version::Version;
 pub struct Prepare {
     id: TxnId,
     primary: Vec<u8>,
+    deadline: Deadline,
     transaction: Transaction,
 }
 
 impl Prepare {
     /// Prepares `transaction`, this shard's part of the transaction `id`,
-    /// which commits when the shard that holds `primary` commits it.
+    /// which commits when the shard that holds `primary` commits it. Its
+    /// coordinator means to decide it before `deadline`.
     #[must_use]
-    pub const fn new(id: TxnId, primary: Vec<u8>, transaction: Transaction) -> Self {
+    pub const fn new(
+        id: TxnId,
+        primary: Vec<u8>,
+        deadline: Deadline,
+        transaction: Transaction,
+    ) -> Self {
         Self {
             id,
             primary,
+            deadline,
             transaction,
         }
     }
@@ -69,6 +78,12 @@ impl Prepare {
     #[must_use]
     pub fn primary(&self) -> &[u8] {
         &self.primary
+    }
+
+    /// Until when its coordinator may still be at work on it.
+    #[must_use]
+    pub const fn deadline(&self) -> Deadline {
+        self.deadline
     }
 
     /// This shard's part.
@@ -88,12 +103,13 @@ impl Prepare {
         self.transaction.fits(span)
     }
 
-    /// Appends `id u128 | primary | transaction`, the primary length
-    /// prefixed and the transaction as [`Transaction`] encodes it, its
-    /// writes possibly none.
+    /// Appends `id u128 | primary | deadline u64 | transaction`, the
+    /// primary length prefixed and the transaction as [`Transaction`]
+    /// encodes it, its writes possibly none.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.id.encode(out);
         put_bytes(out, &self.primary).map_err(Error::too_large)?;
+        self.deadline.encode(out);
         self.transaction.encode(out)
     }
 
@@ -101,7 +117,13 @@ impl Prepare {
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let id = TxnId::decode(reader)?;
         let primary = reader.bytes()?.to_vec();
-        Ok(Self::new(id, primary, Transaction::decode(reader)?))
+        let deadline = Deadline::decode(reader)?;
+        Ok(Self::new(
+            id,
+            primary,
+            deadline,
+            Transaction::decode(reader)?,
+        ))
     }
 }
 

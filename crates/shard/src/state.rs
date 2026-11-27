@@ -148,7 +148,8 @@ impl ShardState {
 mod tests {
     use kurator_codec::{DecodeError, Reader};
     use kurator_storage::{
-        Command, Decide, Decision, Draft, End, KvState, Outcome, Span, TxnId, Version, WriteBatch,
+        Command, Deadline, Decide, Decision, Draft, End, KvState, Outcome, Span, TxnId, Version,
+        WriteBatch,
     };
 
     use super::{Applied, ShardState, Unsplit};
@@ -206,7 +207,11 @@ mod tests {
         let mut state = ShardState::default();
         let mut draft = Draft::new(state.kv().version());
         draft.put("zucchini", "v");
-        let prepare = Command::Prepare(draft.into_prepare(TxnId::new(1), b"zucchini".to_vec()));
+        let prepare = Command::Prepare(draft.into_prepare(
+            TxnId::new(1),
+            b"zucchini".to_vec(),
+            Deadline::new(0),
+        ));
         let prepared = state.apply(Version::new(1), prepare);
         assert_eq!(
             prepared,

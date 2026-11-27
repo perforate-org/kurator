@@ -168,11 +168,11 @@ mod tests {
     use std::ops::Bound;
 
     use super::{Command, Encoded};
+    use crate::across::{Deadline, TxnId};
     use crate::batch::{KvOp, WriteBatch};
     use crate::error::Error;
     use crate::two_phase::{Decide, Decision, Prepare};
     use crate::txn::{KeyRange, ReadSet, Transaction};
-    use crate::txn_id::TxnId;
     use crate::version::Version;
     use kurator_codec::DecodeError;
 
@@ -341,11 +341,12 @@ mod tests {
             id in any::<u128>(),
             primary in bytes(),
             transaction in transaction(),
+            deadline in any::<u64>(),
             commits in any::<bool>(),
         ) {
             let decision = if commits { Decision::Commit } else { Decision::Abort };
             for command in [
-                Command::Prepare(Prepare::new(TxnId::new(id), primary.clone(), transaction)),
+                Command::Prepare(Prepare::new(TxnId::new(id), primary.clone(), Deadline::new(deadline), transaction)),
                 Command::Decide(Decide::new(TxnId::new(id), primary, decision)),
             ] {
                 let encoded = command.clone().encode().unwrap();

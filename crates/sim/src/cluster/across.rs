@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use kurator_raft::{Error, Replica};
 use kurator_shard::{Shard, ShardId};
-use kurator_storage::{Decide, Decided, Decision, Draft, Prepare, Version};
+use kurator_storage::{Abort, Decide, Decided, Decision, Draft, Prepare, Version};
 
 use super::{Cluster, Transacted};
 use crate::Sim;
@@ -37,12 +37,16 @@ struct Part {
 }
 
 /// How a shard answered a prepare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Prepared {
     /// It holds the part, locked.
     Locked,
     /// It refused; the part locked nothing.
     Refused,
+    /// It refused for this reason: a read changed, another transaction
+    /// holds a lock in the way, or the transaction was decided already.
+    /// The part locked nothing.
+    Aborted(Abort),
     /// No answer: the part may be locked.
     Unknown,
 }
@@ -150,10 +154,11 @@ impl<'cluster> Coordinator<'cluster> {
         };
         let id = self.cluster.next_txn();
         let (primary_shard, primary_key) = primary;
+        let deadline = Cluster::lock_deadline();
         let mut proposed = Decision::Commit;
         let mut told = Vec::new();
         for (shard, _, draft) in parts {
-            let prepare = draft.into_prepare(id, primary_key.clone());
+            let prepare = draft.into_prepare(id, primary_key.clone(), deadline);
             let prepared = self.prepare(shard, prepare).await;
             if prepared != Prepared::Refused {
                 told.push(shard);
@@ -177,23 +182,36 @@ impl<'cluster> Coordinator<'cluster> {
         }
     }
 
-    /// Prepares `prepare` on `shard`'s leader.
+    /// Prepares `prepare` on `shard`'s leader. A lock in the way whose
+    /// deadline passed is resolved, for a later transaction to pass.
     async fn prepare(self, shard: ShardId, prepare: Prepare) -> Prepared {
         let answer = self
             .cluster
             .on_leader(shard, |replica| {
                 let prepare = prepare.clone();
-                async move {
-                    match replica.prepare(prepare).await {
-                        Ok(_) => Ok(Prepared::Locked),
-                        Err(Error::Storage(_) | Error::Misrouted { .. }) => Ok(Prepared::Refused),
-                        Err(Error::Discarded { .. }) => Ok(Prepared::Unknown),
-                        Err(error) => Err(error),
-                    }
-                }
+                async move { prepared(replica.prepare(prepare).await) }
             })
             .await;
-        answer.unwrap_or(Prepared::Unknown)
+        match answer {
+            Some(Prepared::Aborted(abort)) => {
+                let _resolved: bool = self.cluster.resolve_expired(shard, &abort).await;
+                Prepared::Refused
+            }
+            Some(answer) => answer,
+            None => Prepared::Unknown,
+        }
+    }
+}
+
+/// How a shard answered a prepare that applied as `result`; an error to
+/// try another node for.
+fn prepared(result: Result<Version, Error>) -> Result<Prepared, Error> {
+    match result {
+        Ok(_) => Ok(Prepared::Locked),
+        Err(Error::Storage(kurator_storage::Error::Aborted(abort))) => Ok(Prepared::Aborted(abort)),
+        Err(Error::Storage(_) | Error::Misrouted { .. }) => Ok(Prepared::Refused),
+        Err(Error::Discarded { .. }) => Ok(Prepared::Unknown),
+        Err(error) => Err(error),
     }
 }
 

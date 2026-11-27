@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
+use crate::across::{Deadline, TxnId};
 use crate::batch::WriteBatch;
 use crate::outcome::Unreadable;
 use crate::state::KvState;
 use crate::two_phase::Prepare;
 use crate::txn::{KeyRange, ReadSet, Transaction};
-use crate::txn_id::TxnId;
 use crate::version::Version;
 
 /// A key and its value, as a transaction reads them.
@@ -119,17 +119,19 @@ impl Draft {
     }
 
     /// This shard's part of the transaction across shards `id`, whose
-    /// primary key is `primary`, to prepare: what it read and writes here,
-    /// which may be nothing written. Its reads must be checked even then,
-    /// since the other shards read at other versions.
+    /// primary key is `primary` and whose coordinator means to decide it
+    /// before `deadline`, to prepare: what it read and writes here, which
+    /// may be nothing written. Its reads must be checked even then, since
+    /// the other shards read at other versions.
     #[must_use]
-    pub fn into_prepare(self, id: TxnId, primary: Vec<u8>) -> Prepare {
+    pub fn into_prepare(self, id: TxnId, primary: Vec<u8>, deadline: Deadline) -> Prepare {
         let Self {
             read_at,
             reads,
             writes,
         } = self;
-        Prepare::new(id, primary, Transaction::new(read_at, reads, batch(writes)))
+        let transaction = Transaction::new(read_at, reads, batch(writes));
+        Prepare::new(id, primary, deadline, transaction)
     }
 
     /// The transaction to commit, or `None` when it writes nothing: its

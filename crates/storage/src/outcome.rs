@@ -1,6 +1,6 @@
 //! What applying a command did, and why a version cannot be read.
 
-use crate::txn_id::TxnId;
+use crate::across::{Deadline, TxnId};
 use crate::version::Version;
 
 /// What applying a command did.
@@ -56,6 +56,9 @@ pub enum Abort {
         by: TxnId,
         /// Its primary key, where it is decided.
         primary: Vec<u8>,
+        /// Until when its coordinator may still be at work on it; past
+        /// it, the transaction may be resolved at its primary.
+        deadline: Deadline,
     },
     /// The transaction across shards was aborted: by its coordinator, or by
     /// whoever found it undecided.
