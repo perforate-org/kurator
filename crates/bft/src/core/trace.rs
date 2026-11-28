@@ -27,7 +27,8 @@ use serde_json::Value;
 
 use super::{Config, Core, Event};
 use crate::block::{Block as RealBlock, Order, Proposal as RealProposal};
-use crate::fixture::{DOMAIN, change_to, committee, key};
+use crate::checkpoint::{Checkpoint, Height, StateRoot, Succession};
+use crate::fixture::{DOMAIN, certify, change_to, committee, key};
 use crate::message::Message;
 use crate::step::{Recovered, To};
 use crate::timeout::{Timeout as RealTimeout, TimeoutCertificate};
@@ -116,6 +117,11 @@ struct Node {
     durable: Recovered,
     /// Every block it decided, crashes or not.
     decided: BTreeSet<BlockId>,
+    /// How the epoch ended, if another replica showed it: the code then
+    /// takes the state there, and its journal starts the next epoch,
+    /// which the model leaves out, so the replay shows it again after a
+    /// crash.
+    followed: Option<Succession>,
 }
 
 /// What a replica sent in one step of the model.
@@ -332,18 +338,22 @@ impl Replay {
     }
 
     fn start(&mut self, name: &str, durable: Recovered, sent: &mut Sent) {
-        let core = Core::recover(config(name), durable.clone());
-        let decided = self
+        let mut core = Core::recover(config(name), durable.clone());
+        let (decided, followed) = self
             .nodes
             .remove(name)
-            .map(|node| node.decided)
+            .map(|node| (node.decided, node.followed))
             .unwrap_or_default();
+        if let Some(succession) = &followed {
+            let _again = core.follow(std::slice::from_ref(succession));
+        }
         drop(self.nodes.insert(
             name.to_owned(),
             Node {
                 core,
                 durable,
                 decided,
+                followed,
             },
         ));
         self.feed(name, sent);
@@ -364,7 +374,7 @@ impl Replay {
         }
         match after.action.as_str() {
             "receiveProposal" | "observeQC" | "timeout" | "collectTimeouts" | "receiveSkip"
-            | "crash" => {
+            | "crash" | "handOff" => {
                 let name = after.replica();
                 let mut out = sent.remove(&name).unwrap_or_default();
                 self.correct(before, after, &name, &mut out);
@@ -402,11 +412,45 @@ impl Replay {
                 let certificate = self.certificate(before, after.tc());
                 self.deliver(name, other(name), Message::Skip(certificate), sent);
             }
+            "handOff" => self.hand_off(name, after),
             _crash => {
                 let durable = self.node(name).durable.clone();
                 self.start(name, durable, sent);
             }
         }
+    }
+
+    /// Shows `name` how the epoch ended, as a member of the next would:
+    /// the change, and the committee's certificate of the state at the
+    /// block that holds it. It must follow, and takes that state: the
+    /// blocks the model says.
+    fn hand_off(&mut self, name: &str, after: &State) {
+        let decided = &after.replicas[name].decided;
+        let end = CHANGES
+            .iter()
+            .find(|change| decided.contains(change))
+            .map(|change| &self.blocks[change])
+            .unwrap_or_else(|| panic!("{}: no end to hand on", self.at("handOff")));
+        let change = change_to(1, &[1, 2, 3]);
+        let checkpoint = Checkpoint::new(
+            Height::new(1),
+            end.id(),
+            end.view(),
+            StateRoot::new([0; 32]),
+        )
+        .ending(DOMAIN.next(&change));
+        let succession = Succession::new(change, certify(checkpoint)).unwrap();
+        let ids: BTreeSet<BlockId> = decided.iter().map(|block| self.id(*block)).collect();
+        let at = self.at("handOff");
+        let node = self.nodes.get_mut(name).unwrap();
+        let followed = node.core.follow(std::slice::from_ref(&succession));
+        assert_eq!(
+            followed,
+            Ok(Some(succession.end().clone())),
+            "{at}: follows on"
+        );
+        node.decided = ids;
+        node.followed = Some(succession);
     }
 
     /// Teaches `name` the certificate `qc`: by its votes when it leads the
