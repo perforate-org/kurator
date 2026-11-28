@@ -6,6 +6,7 @@ use oleaph_consensus::{NodeId, Replicated, Transaction as _};
 use oleaph_shard::{NamespaceId, Shard, ShardId};
 
 use crate::error::{MetaError, Result};
+use crate::mix::Mix;
 use crate::namespace::{Assurance, Namespace, NamespaceName};
 use crate::placement::{Placement, Reported};
 use crate::registry::{
@@ -98,20 +99,16 @@ async fn try_create(
     replicas: &BTreeSet<NodeId>,
     membership: u64,
 ) -> Result<Created> {
-    if *name == NamespaceName::default_name() {
-        return Ok(Created::Taken(Namespace::founding()));
-    }
-    let key = namespace_key(name);
     let mut txn = meta.begin().await?;
-    if let Some(bytes) = txn.get(&key)? {
-        return Ok(Created::Taken(Namespace::decode(&bytes)?));
+    if let Some(recorded) = recorded(&mut txn, name)? {
+        return Ok(Created::Taken(recorded));
     }
     let id = next_namespace(txn.get(NEXT_NAMESPACE)?.as_deref())?;
     let after = id.get().checked_add(1).ok_or(MetaError::Exhausted)?;
     txn.put(NEXT_NAMESPACE, after.to_le_bytes());
     let mut record = Vec::new();
     Namespace::new(id, Assurance::Cft).encode(&mut record)?;
-    txn.put(key, record);
+    txn.put(namespace_key(name), record);
     let shard = Shard::whole(id, take_id(&mut txn)?);
     let mut placement = Vec::new();
     Placement::new(shard.clone(), replicas.clone(), membership).encode(&mut placement)?;
@@ -157,15 +154,10 @@ async fn try_charter(
     shard: ShardId,
     members: &BTreeSet<NodeId>,
 ) -> Result<Created> {
-    if *name == NamespaceName::default_name() {
-        return Ok(Created::Taken(Namespace::founding()));
-    }
     let chartered = Namespace::new(namespace, Assurance::Bft);
     let whole = Shard::whole(namespace, shard);
-    let key = namespace_key(name);
     let mut txn = meta.begin().await?;
-    if let Some(bytes) = txn.get(&key)? {
-        let recorded = Namespace::decode(&bytes)?;
+    if let Some(recorded) = recorded(&mut txn, name)? {
         return Ok(if recorded == chartered {
             Created::Founded(whole)
         } else {
@@ -183,12 +175,79 @@ async fn try_charter(
     txn.put(NEXT, after_shard.to_le_bytes());
     let mut record = Vec::new();
     chartered.encode(&mut record)?;
-    txn.put(key, record);
+    txn.put(namespace_key(name), record);
     let mut placement = Vec::new();
     Placement::new(whole.clone(), members.clone(), 0).encode(&mut placement)?;
     txn.put(shard_key(shard), placement);
     let _version = txn.commit().await?;
     Ok(Created::Founded(whole))
+}
+
+/// What [`mix`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Mixing {
+    /// One transaction may span the two namespaces from now on.
+    Allowed(Mix),
+    /// They are one namespace, or alike in assurance: a transaction may
+    /// span them without leave. Nothing changed.
+    Alike,
+    /// There is no namespace of this name. Nothing changed.
+    Unknown(NamespaceName),
+}
+
+/// Gives one transaction leave to span the namespaces called `one` and
+/// `other`, of different assurances, through `meta`, the meta shard's
+/// leader. Giving it twice changes nothing.
+///
+/// # Errors
+///
+/// As [`create`].
+pub async fn mix(
+    meta: &impl Replicated,
+    one: &NamespaceName,
+    other: &NamespaceName,
+) -> Result<Mixing> {
+    for _ in 0..ATTEMPTS {
+        match try_mix(meta, one, other).await {
+            Err(MetaError::Consensus(error)) if error.is_aborted() => {}
+            outcome => return outcome,
+        }
+    }
+    Err(MetaError::Contended)
+}
+
+async fn try_mix(
+    meta: &impl Replicated,
+    one: &NamespaceName,
+    other: &NamespaceName,
+) -> Result<Mixing> {
+    let mut txn = meta.begin().await?;
+    let Some(first) = recorded(&mut txn, one)? else {
+        return Ok(Mixing::Unknown(one.clone()));
+    };
+    let Some(second) = recorded(&mut txn, other)? else {
+        return Ok(Mixing::Unknown(other.clone()));
+    };
+    let mix = Mix::new(first.id(), second.id());
+    let Some(mix) = mix.filter(|_| first.assurance() != second.assurance()) else {
+        return Ok(Mixing::Alike);
+    };
+    txn.put(mix.key(), Vec::new());
+    let _version = txn.commit().await?;
+    Ok(Mixing::Allowed(mix))
+}
+
+/// The namespace called `name`, as `txn` reads its record.
+fn recorded(
+    txn: &mut impl oleaph_consensus::Transaction,
+    name: &NamespaceName,
+) -> Result<Option<Namespace>> {
+    if *name == NamespaceName::default_name() {
+        return Ok(Some(Namespace::founding()));
+    }
+    let record = txn.get(&namespace_key(name))?;
+    Ok(record.map(|bytes| Namespace::decode(&bytes)).transpose()?)
 }
 
 /// Records `placement` through `meta`, the meta shard's leader, unless the

@@ -148,8 +148,8 @@ impl ShardState {
 mod tests {
     use oleaph_codec::{DecodeError, Reader};
     use oleaph_storage::{
-        Command, Deadline, Decide, Decision, Draft, End, KvState, Outcome, Span, TxnId, Version,
-        WriteBatch,
+        Command, Deadline, Decide, Decision, Draft, End, KvState, Outcome, Primary, Span, TxnId,
+        Version, WriteBatch,
     };
 
     use super::{Applied, ShardState, Unsplit};
@@ -209,7 +209,7 @@ mod tests {
         draft.put("zucchini", "v");
         let prepare = Command::Prepare(draft.into_prepare(
             TxnId::new(1),
-            b"zucchini".to_vec(),
+            Primary::new(NamespaceId::DEFAULT, "zucchini"),
             Deadline::new(0),
         ));
         let prepared = state.apply(Version::new(1), prepare);
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(state.shard(), &Shard::first(), "unchanged");
         let decide = Command::Decide(Decide::new(
             TxnId::new(1),
-            b"zucchini".to_vec(),
+            Primary::new(NamespaceId::DEFAULT, "zucchini"),
             Deadline::new(0),
             Decision::Commit,
         ));

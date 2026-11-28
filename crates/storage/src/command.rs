@@ -177,9 +177,10 @@ mod tests {
     use std::ops::Bound;
 
     use super::{Command, Encoded};
-    use crate::across::{Deadline, TxnId};
+    use crate::across::{Deadline, Primary, TxnId};
     use crate::batch::{KvOp, WriteBatch};
     use crate::error::Error;
+    use crate::span::NamespaceId;
     use crate::two_phase::{Collect, Decide, Decision, Prepare};
     use crate::txn::{KeyRange, ReadSet, Transaction};
     use crate::version::Version;
@@ -348,12 +349,14 @@ mod tests {
         #[test]
         fn both_phases_roundtrip(
             id in any::<u128>(),
-            primary in bytes(),
+            namespace in any::<u32>(),
+            key in bytes(),
             transaction in transaction(),
             deadline in any::<u64>(),
             commits in any::<bool>(),
         ) {
             let decision = if commits { Decision::Commit } else { Decision::Abort };
+            let primary = Primary::new(NamespaceId::new(namespace), key);
             for command in [
                 Command::Prepare(Prepare::new(TxnId::new(id), primary.clone(), Deadline::new(deadline), transaction)),
                 Command::Decide(Decide::new(TxnId::new(id), primary, Deadline::new(deadline), decision)),

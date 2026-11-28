@@ -1,6 +1,6 @@
 //! The records of the meta shard, and the registry they make.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::ops::Bound;
 
@@ -8,6 +8,7 @@ use oleaph_codec::{DecodeError, Reader, put_bytes};
 use oleaph_shard::{NamespaceId, Shard, ShardId, ShardMap};
 use oleaph_storage::KvState;
 
+use crate::mix::{MIXES, MIXES_END, Mix};
 use crate::namespace::{Namespace, NamespaceName};
 use crate::placement::Placement;
 
@@ -57,6 +58,25 @@ impl Namespaces {
         }
         let _new: Option<Namespace> = self.0.insert(name, namespace);
         Ok(())
+    }
+
+    /// `mix`, when both its namespaces are here.
+    ///
+    /// # Errors
+    ///
+    /// [`DecodeError::Invalid`] when one is not.
+    fn mix(&self, mix: Mix) -> Result<Mix, DecodeError> {
+        let (low, high) = mix.namespaces();
+        let has = |id| {
+            self.0
+                .values()
+                .any(|namespace: &Namespace| namespace.id() == id)
+        };
+        if has(low) && has(high) {
+            Ok(mix)
+        } else {
+            Err(DecodeError::Invalid)
+        }
     }
 
     /// Every namespace a cluster makes, which every registry does not
@@ -110,6 +130,7 @@ const fn first_free() -> ShardId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registry {
     namespaces: Namespaces,
+    mixes: BTreeSet<Mix>,
     placements: BTreeMap<ShardId, Placement>,
     next: ShardId,
 }
@@ -124,13 +145,18 @@ impl Registry {
     ///
     /// When a record does not decode, is stored under another shard's
     /// key, or a namespace's key names no namespace, or the default, or
-    /// two namespaces share an id.
+    /// two namespaces share an id, or a leave to mix names a namespace
+    /// there is not.
     pub fn read(kv: &KvState) -> Result<Self, DecodeError> {
         let mut namespaces = Namespaces::founding();
         for (key, value) in kv.range(Bound::Included(NAMESPACES), Bound::Excluded(NAMESPACES_END)) {
             let name = key.strip_prefix(NAMESPACES).ok_or(DecodeError::Invalid)?;
             let name = NamespaceName::from_bytes(name)?;
             namespaces.add(name, Namespace::decode(value)?)?;
+        }
+        let mut mixes = BTreeSet::new();
+        for (key, _) in kv.range(Bound::Included(MIXES), Bound::Excluded(MIXES_END)) {
+            let _new: bool = mixes.insert(namespaces.mix(Mix::from_key(key)?)?);
         }
         let (start, end) = shard_keys();
         let mut placements = BTreeMap::new();
@@ -142,14 +168,27 @@ impl Registry {
             }
             drop(placements.insert(id, placement));
         }
-        let _founding: &mut Placement = placements.entry(ShardId::FIRST).or_insert_with(|| {
-            Placement::new(Shard::first(), std::collections::BTreeSet::new(), 0)
-        });
+        let _founding: &mut Placement = placements
+            .entry(ShardId::FIRST)
+            .or_insert_with(|| Placement::new(Shard::first(), BTreeSet::new(), 0));
         Ok(Self {
             namespaces,
+            mixes,
             placements,
             next: next_id(kv.get(NEXT))?,
         })
+    }
+
+    /// Whether one transaction may span `one` and `other`, namespaces of
+    /// different assurances: whether the operator gave the pair leave.
+    #[must_use]
+    pub fn mixes(&self, one: NamespaceId, other: NamespaceId) -> bool {
+        Mix::new(one, other).is_some_and(|mix| self.mixes.contains(&mix))
+    }
+
+    /// Every pair given leave to mix.
+    pub fn mixed(&self) -> impl Iterator<Item = &Mix> {
+        self.mixes.iter()
     }
 
     /// The namespace called `name`, if there is one.
@@ -190,8 +229,9 @@ impl Registry {
     }
 
     /// Writes the registry as `next u64 | count u32 | bytes(placement)*
-    /// | count u32 (bytes(name) bytes(namespace))*`, placements by id and
-    /// namespaces by name, each as [`Placement::encode`] and
+    /// | count u32 (bytes(name) bytes(namespace))* | count u32 (low u32
+    /// high u32)*`, placements by id, namespaces by name and pairs given
+    /// leave to mix in order, each as [`Placement::encode`] and
     /// [`Namespace::encode`] write it. The default namespace is left out,
     /// since every registry holds it.
     ///
@@ -215,6 +255,11 @@ impl Registry {
             namespace.encode(&mut encoded)?;
             put_bytes(out, &encoded)?;
         }
+        let mix_count = u32::try_from(self.mixes.len()).map_err(io::Error::other)?;
+        out.extend_from_slice(&mix_count.to_le_bytes());
+        for mix in &self.mixes {
+            mix.encode(out);
+        }
         Ok(())
     }
 
@@ -223,9 +268,9 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// When it does not decode, or names a shard or a namespace twice or
-    /// out of order, or names the meta shard, or the default namespace or
-    /// its id.
+    /// When it does not decode, or names a shard, a namespace or a pair
+    /// twice or out of order, or names the meta shard, or the default
+    /// namespace or its id, or pairs a namespace there is not.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let next = ShardId::new(reader.read()?);
         let mut placements = BTreeMap::new();
@@ -253,8 +298,18 @@ impl Registry {
             }
             namespaces.add(name, Namespace::decode(reader.bytes()?)?)?;
         }
+        let mut mixes = BTreeSet::new();
+        for _ in 0..reader.read::<u32>()? {
+            let mix = namespaces.mix(Mix::decode(reader)?)?;
+            // Above the last, so in order and once.
+            if mixes.last().is_some_and(|last| *last >= mix) {
+                return Err(DecodeError::Invalid);
+            }
+            let _new: bool = mixes.insert(mix);
+        }
         Ok(Self {
             namespaces,
+            mixes,
             placements,
             next,
         })
@@ -273,6 +328,7 @@ mod tests {
     use oleaph_codec::{Reader, put_bytes};
 
     use super::{NEXT, Registry, namespace_key, next_namespace, shard_key};
+    use crate::mix::Mix;
     use crate::namespace::{Assurance, Namespace, NamespaceName};
     use crate::placement::Placement;
 
@@ -369,6 +425,52 @@ mod tests {
         assert!(reader.finish().is_ok(), "nothing left");
     }
 
+    #[test]
+    fn pairs_given_leave_mix_and_name_namespaces_there_are() {
+        let name: NamespaceName = "ledger".parse().unwrap();
+        let ledger = NamespaceId::new(3);
+        let mut bytes = Vec::new();
+        Namespace::new(ledger, Assurance::Bft)
+            .encode(&mut bytes)
+            .unwrap();
+        let mut state = KvState::default();
+        record(&mut state, 1, namespace_key(&name), bytes);
+        let mix = Mix::new(ledger, NamespaceId::DEFAULT).unwrap();
+        record(&mut state, 2, mix.key(), Vec::new());
+        let registry = Registry::read(&state).unwrap();
+        assert!(registry.mixes(NamespaceId::DEFAULT, ledger), "given leave");
+        assert!(registry.mixes(ledger, NamespaceId::DEFAULT), "either way");
+        assert!(!registry.mixes(ledger, ledger), "not with itself");
+        assert!(
+            !registry.mixes(ledger, NamespaceId::new(4)),
+            "not with another"
+        );
+        assert_eq!(registry.mixed().collect::<Vec<_>>(), [&mix], "listed");
+        let mut out = Vec::new();
+        registry.encode(&mut out).unwrap();
+        let mut reader = Reader::new(&out);
+        assert_eq!(Registry::decode(&mut reader), Ok(registry), "roundtrip");
+        let stranger = Mix::new(ledger, NamespaceId::new(4)).unwrap();
+        record(&mut state, 3, stranger.key(), Vec::new());
+        assert_eq!(
+            Registry::read(&state),
+            Err(DecodeError::Invalid),
+            "a namespace there is not"
+        );
+        let mut twice = wire(&[("ledger", 3)]);
+        let at = twice.len().saturating_sub(4);
+        twice.truncate(at);
+        twice.extend_from_slice(&2_u32.to_le_bytes());
+        for _ in 0..2 {
+            mix.encode(&mut twice);
+        }
+        assert_eq!(
+            Registry::decode(&mut Reader::new(&twice)),
+            Err(DecodeError::Invalid),
+            "a pair twice"
+        );
+    }
+
     /// A namespace's record.
     fn namespace(id: u32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -388,6 +490,8 @@ mod tests {
             put_bytes(&mut out, name.as_bytes()).unwrap();
             put_bytes(&mut out, &namespace(*id)).unwrap();
         }
+        // No pairs mix.
+        out.extend_from_slice(&0_u32.to_le_bytes());
         out
     }
 

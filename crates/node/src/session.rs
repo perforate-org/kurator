@@ -1,12 +1,14 @@
 //! A client's session: one transaction across every shard its operations
 //! touch, run from the command line.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use oleaph_client::{Across, Client, Coordinator, Transacted};
+use oleaph_meta::NamespaceName;
 use oleaph_net::{Endpoint, Quic, Wall};
+use oleaph_shard::NamespaceId;
 
 use crate::NodeError;
 use crate::args::{Op, Session};
@@ -28,11 +30,26 @@ pub async fn run(session: &Session) -> Result<String, NodeError> {
     if !client.learn().await {
         return Err(NodeError::Unreached);
     }
-    let namespace = client
-        .namespace(session.namespace())
-        .ok_or_else(|| NodeError::NoNamespace(session.namespace().clone()))?;
-    let mut txn = Coordinator::new(&client).begin(namespace);
-    let mut shown = apply(&mut txn, session.ops()).await?;
+    let id = |name: &NamespaceName| {
+        client
+            .namespace(name)
+            .ok_or_else(|| NodeError::NoNamespace(name.clone()))
+    };
+    let mut txn = Coordinator::new(&client).begin(id(session.namespace())?);
+    let mut steps = Vec::new();
+    for (namespace, op) in session.ops() {
+        steps.push((id(namespace)?, op));
+    }
+    // Leave the registry gives to mix the namespaces the steps name.
+    let named: BTreeSet<NamespaceId> = steps.iter().map(|(namespace, _)| *namespace).collect();
+    for one in &named {
+        for other in named.range(one..).skip(1) {
+            if let Some(mixed) = client.mixed(*one, *other) {
+                txn.admit(mixed);
+            }
+        }
+    }
+    let mut shown = apply(&mut txn, &steps).await?;
     let outcome = match txn.commit().await {
         Transacted::Committed(version) => format!("committed at {version}"),
         Transacted::Aborted => "aborted: try again".to_owned(),
@@ -43,21 +60,26 @@ pub async fn run(session: &Session) -> Result<String, NodeError> {
     Ok(shown)
 }
 
-/// Applies `ops` to `txn`, and shows each value read, one per line.
-async fn apply(txn: &mut Across<'_, Client<Quic, Wall>>, ops: &[Op]) -> Result<String, NodeError> {
+/// Applies `steps`, each an operation on a key of a namespace, to `txn`,
+/// and shows each value read, one per line.
+async fn apply(
+    txn: &mut Across<'_, Client<Quic, Wall>>,
+    steps: &[(NamespaceId, &Op)],
+) -> Result<String, NodeError> {
     let mut shown = String::new();
-    for op in ops {
+    for (namespace, op) in steps {
+        let namespace = *namespace;
         match op {
             Op::Get(key) => {
-                let value = txn.get(key).await?;
+                let value = txn.get_in(namespace, key).await?;
                 let value = value.map_or_else(
                     || "(none)".to_owned(),
                     |value| String::from_utf8_lossy(&value).into_owned(),
                 );
                 let _infallible = writeln!(shown, "{} = {value}", String::from_utf8_lossy(key));
             }
-            Op::Put(key, value) => txn.put(key, value.clone()).await?,
-            Op::Delete(key) => txn.delete(key).await?,
+            Op::Put(key, value) => txn.put_in(namespace, key, value.clone()).await?,
+            Op::Delete(key) => txn.delete_in(namespace, key).await?,
         }
     }
     Ok(shown)

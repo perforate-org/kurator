@@ -37,9 +37,9 @@
 //! so its reads on every shard were still current then: committed
 //! transactions are serializable, each at its commit point.
 
-use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader};
 
-use crate::across::{Deadline, TxnId};
+use crate::across::{Deadline, Primary, TxnId};
 use crate::error::{Error, Result};
 use crate::span::Span;
 use crate::txn::Transaction;
@@ -50,7 +50,7 @@ use crate::version::Version;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepare {
     id: TxnId,
-    primary: Vec<u8>,
+    primary: Primary,
     deadline: Deadline,
     transaction: Transaction,
 }
@@ -62,7 +62,7 @@ impl Prepare {
     #[must_use]
     pub const fn new(
         id: TxnId,
-        primary: Vec<u8>,
+        primary: Primary,
         deadline: Deadline,
         transaction: Transaction,
     ) -> Self {
@@ -80,9 +80,9 @@ impl Prepare {
         self.id
     }
 
-    /// The primary key.
+    /// Where it is decided.
     #[must_use]
-    pub fn primary(&self) -> &[u8] {
+    pub const fn primary(&self) -> &Primary {
         &self.primary
     }
 
@@ -110,11 +110,11 @@ impl Prepare {
     }
 
     /// Appends `id u128 | primary | deadline u64 | transaction`, the
-    /// primary length prefixed and the transaction as [`Transaction`]
+    /// primary as [`Primary`] and the transaction as [`Transaction`]
     /// encodes it, its writes possibly none.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.id.encode(out);
-        put_bytes(out, &self.primary).map_err(Error::too_large)?;
+        self.primary.encode(out).map_err(Error::too_large)?;
         self.deadline.encode(out);
         self.transaction.encode(out)
     }
@@ -122,7 +122,7 @@ impl Prepare {
     /// Reads a prepare written by [`Prepare::encode`].
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let id = TxnId::decode(reader)?;
-        let primary = reader.bytes()?.to_vec();
+        let primary = Primary::decode(reader)?;
         let deadline = Deadline::decode(reader)?;
         Ok(Self::new(
             id,
@@ -147,7 +147,7 @@ pub enum Decision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decide {
     id: TxnId,
-    primary: Vec<u8>,
+    primary: Primary,
     deadline: Deadline,
     decision: Decision,
 }
@@ -156,11 +156,11 @@ const DECISION_COMMIT: u8 = 1;
 const DECISION_ABORT: u8 = 2;
 
 impl Decide {
-    /// Tells a shard that the transaction `id`, whose primary key is
-    /// `primary` and whose prepares carry `deadline`, is decided as
+    /// Tells a shard that the transaction `id`, decided at `primary`,
+    /// whose prepares carry `deadline`, is decided as
     /// `decision`.
     #[must_use]
-    pub const fn new(id: TxnId, primary: Vec<u8>, deadline: Deadline, decision: Decision) -> Self {
+    pub const fn new(id: TxnId, primary: Primary, deadline: Deadline, decision: Decision) -> Self {
         Self {
             id,
             primary,
@@ -175,9 +175,9 @@ impl Decide {
         self.id
     }
 
-    /// Its primary key.
+    /// Where it is decided.
     #[must_use]
-    pub fn primary(&self) -> &[u8] {
+    pub const fn primary(&self) -> &Primary {
         &self.primary
     }
 
@@ -194,11 +194,12 @@ impl Decide {
         self.decision
     }
 
-    /// Appends `id u128 | primary | deadline u64 | decision u8`: commit 1,
+    /// Appends `id u128 | primary | deadline u64 | decision u8`, the
+    /// primary as [`Primary`]: commit 1,
     /// abort 2.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.id.encode(out);
-        put_bytes(out, &self.primary).map_err(Error::too_large)?;
+        self.primary.encode(out).map_err(Error::too_large)?;
         self.deadline.encode(out);
         out.push(match self.decision {
             Decision::Commit => DECISION_COMMIT,
@@ -210,7 +211,7 @@ impl Decide {
     /// Reads a decision written by [`Decide::encode`].
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let id = TxnId::decode(reader)?;
-        let primary = reader.bytes()?.to_vec();
+        let primary = Primary::decode(reader)?;
         let deadline = Deadline::decode(reader)?;
         let decision = match reader.read::<u8>()? {
             DECISION_COMMIT => Decision::Commit,

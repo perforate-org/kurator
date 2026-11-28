@@ -208,7 +208,7 @@ impl Backup {
                 .pending()
                 .filter_map(|prepared| {
                     let decision = known.get(&prepared.id())?;
-                    let primary = prepared.primary().to_vec();
+                    let primary = prepared.primary().clone();
                     Some(Decide::new(
                         prepared.id(),
                         primary,
@@ -239,8 +239,14 @@ mod tests {
 
     use oleaph_shard::{Epoch, ShardId, ShardState, Split};
     use oleaph_storage::{
-        Command, Deadline, Decide, Decided, Decision, Draft, TxnId, Version, WriteBatch,
+        Command, Deadline, Decide, Decided, Decision, Draft, NamespaceId, Primary, TxnId, Version,
+        WriteBatch,
     };
+
+    /// `a` of the default namespace, as a primary.
+    fn primary() -> Primary {
+        Primary::new(NamespaceId::DEFAULT, "a")
+    }
 
     use super::Backup;
     use crate::error::{Error, SnapshotDamage};
@@ -263,13 +269,13 @@ mod tests {
         let version = state.kv().version();
         let mut draft = Draft::new(version);
         draft.put(key, "t");
-        let prepare = draft.into_prepare(TxnId::new(id), b"a".to_vec(), Deadline::new(100));
+        let prepare = draft.into_prepare(TxnId::new(id), primary(), Deadline::new(100));
         let next = Version::new(version.get().checked_add(1).unwrap());
         let _applied = state.apply(next, Command::Prepare(prepare));
     }
 
     fn decide(state: &mut ShardState, id: u128, decision: Decision) {
-        let decide = Decide::new(TxnId::new(id), b"a".to_vec(), Deadline::new(100), decision);
+        let decide = Decide::new(TxnId::new(id), primary(), Deadline::new(100), decision);
         let next = Version::new(state.kv().version().get().checked_add(1).unwrap());
         let _applied = state.apply(next, Command::Decide(decide));
     }

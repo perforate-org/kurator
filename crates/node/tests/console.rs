@@ -649,5 +649,43 @@ fn a_charter_makes_a_bft_namespace_clients_are_routed_to() {
         "default ns0 cft\nledger ns7 bft",
         "listed"
     );
+
+    mixing_needs_leave(&mut console, client_dir, &peer);
     assert!(console.quit().is_empty(), "nothing more");
+}
+
+/// One transaction across the default namespace and the BFT `ledger`
+/// commits only once the console gives them leave to mix.
+fn mixing_needs_leave(console: &mut Console, client_dir: &str, peer: &str) {
+    let default = |args: &[&str]| {
+        let common = ["--dir", client_dir, "--peer", peer];
+        client(&[common.as_slice(), args].concat())
+    };
+    let both = ["put", "x", "1", "put", "y", "2", "in", "ledger"];
+    let (unmixed, refusal) = default(&both);
+    assert!(!unmixed, "refused");
+    assert!(
+        refusal.contains("not given leave to mix"),
+        "says why: {refusal}"
+    );
+    assert_eq!(
+        console.ask("mix default ledger", 1),
+        "ok: default and ledger may share a transaction, as ns0+ns7",
+        "leave"
+    );
+    let (mixed, said) = default(&both);
+    assert!(mixed && said.starts_with("committed at"), "commits: {said}");
+    let (read, shown) = default(&["get", "x", "get", "y", "in", "ledger"]);
+    assert!(read, "reads: {shown}");
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines.get(..2),
+        Some(["x = 1", "y = 2"].as_slice()),
+        "{shown}"
+    );
+    assert_eq!(
+        console.ask("namespaces", 3),
+        "default ns0 cft\nledger ns7 bft\nmix ns0+ns7",
+        "and the pair"
+    );
 }

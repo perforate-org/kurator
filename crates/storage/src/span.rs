@@ -1,10 +1,41 @@
-//! Spans: the half-open ranges of keys a shard holds.
+//! Where a key is: the namespace it is a key of, and the spans, the
+//! half-open ranges of keys, that shards hold.
 
 use std::fmt;
 use std::io::{self, Write};
 use std::ops::Bound;
 
 use oleaph_codec::{DecodeError, Reader, put_bytes};
+
+/// Names a namespace: a key space of its own, split into shards of its
+/// own, whose consensus is chosen when it is made. The same key in two
+/// namespaces is two keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NamespaceId(u32);
+
+impl NamespaceId {
+    /// The namespace a cluster is founded with: every key a client names
+    /// without a namespace.
+    pub const DEFAULT: Self = Self(0);
+
+    /// Wraps a raw id.
+    #[must_use]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// The raw id.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for NamespaceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ns{}", self.0)
+    }
+}
 
 const END_UNBOUNDED: u8 = 0;
 const END_BEFORE: u8 = 1;
@@ -196,7 +227,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{End, Span};
+    use super::{End, NamespaceId, Span};
     use crate::txn::KeyRange;
     use oleaph_codec::{DecodeError, Reader};
 
@@ -240,6 +271,13 @@ mod tests {
             keys.extend(longest.iter().cloned());
         }
         keys
+    }
+
+    #[test]
+    fn namespace_ids_show_and_wrap() {
+        assert_eq!(NamespaceId::new(4).to_string(), "ns4", "display");
+        assert_eq!(NamespaceId::DEFAULT.get(), 0, "the default namespace");
+        assert_eq!(NamespaceId::new(5).get(), 5, "raw");
     }
 
     #[test]
