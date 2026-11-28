@@ -138,4 +138,18 @@ mod tests {
             "too large"
         );
     }
+
+    #[test]
+    fn a_proposal_that_fills_one_record_exactly_fits() {
+        let split =
+            |len: usize| Proposal::split(Split::new(vec![0; len], ShardId::new(2), Epoch::ZERO));
+        let probe = 1 << 20;
+        let header = split(probe).unwrap().body().payload().len() - probe;
+        let fills = oleaph_wal::MAX_PAYLOAD_LEN - super::ENTRY_OVERHEAD - header;
+        assert!(split(fills).is_ok(), "exactly one record");
+        assert!(
+            matches!(split(fills + 1), Err(Error::ProposalTooLarge { .. })),
+            "one byte over"
+        );
+    }
 }
