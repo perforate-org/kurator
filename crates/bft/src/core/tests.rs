@@ -1077,7 +1077,8 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
             | Message::Certified(_)
             | Message::Want(..)
             | Message::Manifest(..)
-            | Message::Chunk(..) => false,
+            | Message::Chunk(..)
+            | Message::Handoff(_) => false,
         });
     assert!(handed_on, "the command it held goes on: {started:?}");
     let Some(Record::Epoch(succession)) = records.get(1) else {

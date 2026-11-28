@@ -312,7 +312,8 @@ impl Replay {
             | Message::Certified(_)
             | Message::Want(..)
             | Message::Manifest(..)
-            | Message::Chunk(..) => {}
+            | Message::Chunk(..)
+            | Message::Handoff(_) => {}
         }
         None
     }

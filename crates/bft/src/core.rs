@@ -140,6 +140,9 @@ pub struct Core {
     /// The change it decided, which ends the epoch at the last decided
     /// block.
     ending: Option<ChangeCertificate>,
+    /// Those it showed how its epochs succeeded, since it entered its
+    /// view: once a view each.
+    handed: BTreeSet<NodeId>,
     /// Blocks the event in hand taught it, to write down.
     learned: Vec<Block>,
     /// What the event in hand asks of the driver.
@@ -180,6 +183,7 @@ impl Core {
             tally: Tally::since(certified),
             shared: None,
             ending: None,
+            handed: BTreeSet::new(),
             learned: Vec::new(),
             effects: Effects::default(),
         };
@@ -265,7 +269,18 @@ impl Core {
             return None;
         }
         let succession = Succession::new(change, certificate.clone())?;
-        self.ending = None;
+        self.begin(succession);
+        // The checkpoint first: the state the new epoch starts from must
+        // be on record before the epoch is.
+        let mut records = vec![Record::Checkpoint(certificate.clone())];
+        records.extend(self.compact(certificate));
+        Some(records)
+    }
+
+    /// Starts the epoch `succession` starts: afresh, in the first view of
+    /// a committee of its own, with only the commands it holds kept.
+    fn begin(&mut self, succession: Succession) {
+        self.tally = Tally::since(Some(succession.end().clone()));
         self.adopt(succession);
         self.view = View::GENESIS;
         self.voted = View::GENESIS;
@@ -279,13 +294,58 @@ impl Core {
         self.certified.clear();
         self.votes.clear();
         self.timeouts.clear();
-        self.tally = Tally::since(Some(certificate.clone()));
         self.shared = None;
-        // The checkpoint first: the state the new epoch starts from must
-        // be on record before the epoch is.
-        let mut records = vec![Record::Checkpoint(certificate.clone())];
-        records.extend(self.compact(certificate));
-        Some(records)
+        self.ending = None;
+        self.handed.clear();
+    }
+
+    /// Follows `successions` past the epoch it decides in, as a member of
+    /// a later epoch sent them: it checks each against the committee
+    /// before it, starts every epoch but the last, and ends the one it is
+    /// then in at the last one's change, as if it had decided it. It
+    /// returns the checkpoint the last one starts from, whose state the
+    /// replica must take before it moves on, or nothing when none is new.
+    ///
+    /// # Errors
+    ///
+    /// When one does not follow from the committee before it.
+    pub(crate) fn follow(
+        &mut self,
+        successions: &[Succession],
+    ) -> Result<Option<CheckpointCertificate>, Rejection> {
+        let epoch = self.epoch();
+        let new: Vec<&Succession> = successions
+            .iter()
+            .filter(|succession| succession.epoch() > epoch)
+            .collect();
+        let Some((last, before)) = new.split_last() else {
+            return Ok(None);
+        };
+        // Every one checked before any is taken on.
+        let mut committee = self.config.committee.clone();
+        let mut domain = self.config.domain;
+        let mut at = epoch;
+        for succession in &new {
+            succession.verify(&committee, domain, at)?;
+            committee = succession.change().committee().clone();
+            domain = succession.domain();
+            at = succession.epoch();
+        }
+        for succession in before {
+            self.begin((*succession).clone());
+        }
+        self.ending = Some(last.change().clone());
+        Ok(Some(last.end().clone()))
+    }
+
+    /// Shows `to`, who sent what this epoch's committee cannot have
+    /// signed, how its epochs succeeded, once a view: `to` may have missed
+    /// the end of one.
+    fn hand_off(&mut self, to: NodeId) {
+        if !self.eras.is_empty() && self.handed.insert(to) {
+            self.effects
+                .send(To::One(to), Message::Handoff(self.eras.clone()));
+        }
     }
 
     /// What it must not forget across a crash.
@@ -363,6 +423,10 @@ impl Core {
     pub fn handle(&mut self, event: Event) -> Step {
         let before = (self.voted, self.proposed, self.lock.view());
         let committed = self.committed;
+        let sender = match &event {
+            Event::Received { from, .. } => Some(*from),
+            Event::Start | Event::Expired(_) | Event::Submitted(_) | Event::Reached(_) => None,
+        };
         let handled = match event {
             Event::Start => {
                 self.start();
@@ -394,6 +458,13 @@ impl Core {
             }
         };
         if let Err(rejection) = handled {
+            // Signed by its sender, but not in this epoch's domain.
+            if let (Some(from), Rejection::Forged(signer) | Rejection::Stranger(signer)) =
+                (sender, rejection)
+                && signer == from
+            {
+                self.hand_off(from);
+            }
             self.effects.reject(rejection);
         }
         // Ancestors first, so that any prefix of the records makes sense.
@@ -476,10 +547,12 @@ impl Core {
                 }
                 Ok(())
             }
-            // The state at a checkpoint is the replica's to send and take.
-            Message::Want(..) | Message::Manifest(..) | Message::Chunk(..) => {
-                Err(Rejection::Unwanted)
-            }
+            // The state at a checkpoint, and the epochs it follows, are the
+            // replica's to send and take.
+            Message::Want(..)
+            | Message::Manifest(..)
+            | Message::Chunk(..)
+            | Message::Handoff(_) => Err(Rejection::Unwanted),
             Message::Deliver(block) => {
                 if !self.wanted.remove(&block.id()) {
                     return Err(Rejection::Unwanted);
@@ -516,6 +589,7 @@ impl Core {
     fn enter(&mut self, view: View) {
         self.view = view;
         self.timeouts.clear();
+        self.handed.clear();
         // Votes of the view before can still certify it; older ones
         // cannot move anything on.
         let before = View::new(view.get().saturating_sub(1));
