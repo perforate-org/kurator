@@ -158,7 +158,10 @@ specs/check.sh
 `specs/check.sh` は CI(`quint` ジョブ)と同じものを走らせる: 型検査、シナリオ
 (`quint test`)、感度分析、ランダムシミュレーション(`quint run`)、トレースの再生
 (Rust のツールチェーンも要る)、Apalache による有界モデル検査(`quint verify`)。
-固定トレースを作り直すには、`specs/bft` で
-`quint run --backend typescript --main n4f1 --invariant safety --mbt --max-samples 1 --max-steps 40 --out-itf traces/n4f1-0.itf.json bft.qnt`
-(`n4f0` も同様)。回数は環境変数で変えられる
-(スクリプト冒頭を参照)。
+回数は環境変数で変えられる(スクリプト冒頭を参照)。固定トレースを作り直すには
+`specs/bft` で次を走らせる(`n4f0` も同様)。
+
+```sh
+quint run --backend typescript --main n4f1 --invariant safety --mbt \
+  --max-samples 1 --max-steps 40 --out-itf traces/n4f1-0.itf.json bft.qnt
+```
