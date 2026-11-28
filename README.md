@@ -85,6 +85,10 @@ OleaphDB はそのデータベース本体を指す。
 | `crates/net` | QUIC トランスポート(quinn、Raw Public Key の相互認証。署名方式は鍵のアルゴリズムに従う。鍵交換は耐量子のハイブリッド X25519MLKEM768 のみ、暗号は aws-lc-rs)。feature `bft` で BFT レプリカも同じ接続で運ぶ(既定はオフなので Raft だけなら BFT に依存しない) |
 | `crates/node` | `oleaph` バイナリ: ノード 1 つ(全シャードのレプリカ)をプロセスとして動かすコンソール |
 
+プロトコルの仕様は `specs/` に [Quint](https://quint-lang.org/) で書き、`specs/check.sh` で
+シミュレーションとモデル検査にかける(今は `bft/bft.qnt`: BFT 合意の安全性、ビュー切り替え、
+クラッシュ復旧。詳細は `specs/README.md`)。
+
 シミュレーションは既定で 12 シード。`OLEAPH_SIM_SEEDS=500 cargo test -p oleaph-sim --release`
 で増やし、失敗したシードは `OLEAPH_SIM_SEED=<seed>` で再現する。
 

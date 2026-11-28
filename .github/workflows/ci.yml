@@ -85,6 +85,33 @@ jobs:
         with:
           args: --workspace
 
+  quint:
+    name: quint specs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Apalache, which `quint verify` runs, needs Java 17 or later.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Install quint
+        run: npm install --global @informalsystems/quint@0.35.0
+      # `quint verify` downloads Apalache into ~/.quint on first use.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.quint
+          key: quint-0.35.0-apalache-0.62.4
+      - run: specs/check.sh
+        env:
+          QUINT_SAMPLES: 3000
+
   simulation:
     name: simulation, 500 seeds
     runs-on: ubuntu-latest
