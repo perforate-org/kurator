@@ -10,7 +10,7 @@ use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Order, Proposal, prune};
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
+use crate::checkpoint::{Boundary, Checkpoint, CheckpointCertificate, Share, Succession, Tally};
 use crate::committee::{ChangeCertificate, Committee, Domain};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -99,8 +99,9 @@ pub struct Core {
     /// Who it is, and the committee and domain of the epoch it decides
     /// in.
     config: Config,
-    /// The change that started that epoch, unless it is the charter's.
-    era: Option<ChangeCertificate>,
+    /// How each epoch since the charter's succeeded the one before,
+    /// oldest first: the last started the epoch it decides in.
+    eras: Vec<Succession>,
     /// The view this replica is in.
     view: View,
     /// The last view it voted or gave up in.
@@ -158,10 +159,10 @@ impl Core {
     /// proposed in.
     #[must_use]
     pub fn recover(config: Config, recovered: Recovered) -> Self {
-        let (safety, blocks, committed, certified, era) = recovered.into_parts();
+        let (safety, blocks, committed, certified, eras) = recovered.into_parts();
         let mut core = Self {
             config,
-            era: None,
+            eras: Vec::new(),
             view: View::GENESIS,
             voted: safety.voted(),
             lock: safety.lock().clone(),
@@ -182,8 +183,8 @@ impl Core {
             learned: Vec::new(),
             effects: Effects::default(),
         };
-        if let Some((change, domain)) = era {
-            core.adopt(change, domain);
+        for succession in eras {
+            core.adopt(succession);
         }
         // The decided chain stops at a change, so only the last decided
         // block can hold one.
@@ -194,11 +195,11 @@ impl Core {
         core
     }
 
-    /// Moves on to the epoch that `change` starts, in `domain`.
-    fn adopt(&mut self, change: ChangeCertificate, domain: Domain) {
-        self.config.committee = change.committee().clone();
-        self.config.domain = domain;
-        self.era = Some(change);
+    /// Moves on to the epoch that `succession` starts.
+    fn adopt(&mut self, succession: Succession) {
+        self.config.committee = succession.change().committee().clone();
+        self.config.domain = succession.domain();
+        self.eras.push(succession);
     }
 
     /// The first change in `block` that the committee can make, if any.
@@ -239,13 +240,9 @@ impl Core {
     pub(crate) fn compact(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
         prune(&mut self.blocks, certificate.block(), certificate.view());
         self.base = Some(certificate.clone());
-        // The epoch first, written again so that the journal can forget
-        // the record that started it.
-        let era = self.era.clone();
-        let mut records: Vec<Record> = era
-            .map(|change| Record::Epoch(change, self.config.domain))
-            .into_iter()
-            .collect();
+        // The epochs first, written again so that the journal can forget
+        // the records that started them.
+        let mut records: Vec<Record> = self.eras.iter().cloned().map(Record::Epoch).collect();
         records.extend(self.blocks.values().cloned().map(Record::Block));
         records.push(Record::Safety(self.safety()));
         records.push(Record::Committed(self.committed.0, self.committed.1));
@@ -263,9 +260,13 @@ impl Core {
         if certificate.block() != self.committed.0 {
             return None;
         }
-        let change = self.ending.take()?;
-        let domain = self.config.domain.next(&change);
-        self.adopt(change, domain);
+        let change = self.ending.clone()?;
+        if certificate.boundary() != Boundary::Ends(self.config.domain.next(&change)) {
+            return None;
+        }
+        let succession = Succession::new(change, certificate.clone())?;
+        self.ending = None;
+        self.adopt(succession);
         self.view = View::GENESIS;
         self.voted = View::GENESIS;
         self.lock = Justify::Genesis;
@@ -325,9 +326,7 @@ impl Core {
     /// The epoch it decides in.
     #[must_use]
     pub fn epoch(&self) -> Epoch {
-        self.era
-            .as_ref()
-            .map_or(Epoch::FIRST, ChangeCertificate::epoch)
+        self.eras.last().map_or(Epoch::FIRST, Succession::epoch)
     }
 
     /// The change it decided, which ends its epoch, if it did.

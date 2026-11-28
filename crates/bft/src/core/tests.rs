@@ -1015,24 +1015,25 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
     // epoch starts afresh.
     let at = |block| {
         let checkpoint =
-            Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]));
+            Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]))
+                .ending(DOMAIN.next(&ends));
         certified(checkpoint)
     };
 
     let core = cores.get_mut(&NodeId::new(3)).unwrap();
     // Its share of the state at the end says where the epoch ends, and
     // the domain of the next.
-    let shared = |core: &mut Core, block| {
+    let shared = |sharer: &mut Core, block| {
         let checkpoint =
             Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]));
-        let reached = core.handle(Event::Reached(checkpoint)).persisted();
-        reached
-            .messages()
-            .iter()
-            .find_map(|outgoing| match outgoing.message() {
-                Message::Checkpoint(share) => Some(share.checkpoint().boundary()),
-                _ => None,
-            })
+        let reached = sharer.handle(Event::Reached(checkpoint)).persisted();
+        reached.messages().iter().find_map(|outgoing| {
+            if let Message::Checkpoint(share) = outgoing.message() {
+                Some(share.checkpoint().boundary())
+            } else {
+                None
+            }
+        })
     };
     assert_eq!(
         shared(core, last.id()),
@@ -1051,7 +1052,7 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
     );
     let records = core.succeed(&at(last.id())).unwrap();
     assert!(
-        matches!(records.as_slice(), [Record::Checkpoint(_), Record::Epoch(change, _), ..] if *change == ends),
+        matches!(records.as_slice(), [Record::Checkpoint(_), Record::Epoch(succession), ..] if *succession.change() == ends),
         "the state first, then the epoch: {records:?}"
     );
     assert_eq!(core.epoch(), Epoch::new(1), "the next epoch");
@@ -1079,10 +1080,14 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
             | Message::Chunk(..) => false,
         });
     assert!(handed_on, "the command it held goes on: {started:?}");
-    let Some(Record::Epoch(_, domain)) = records.get(1) else {
+    let Some(Record::Epoch(succession)) = records.get(1) else {
         panic!("{records:?}");
     };
-    assert_eq!(*domain, DOMAIN.next(&ends), "a domain of its own");
+    assert_eq!(
+        succession.domain(),
+        DOMAIN.next(&ends),
+        "a domain of its own"
+    );
 }
 
 #[test]

@@ -31,9 +31,9 @@ use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
 use oleaph_shard::ShardState;
 
-use crate::committee::{Committee, Domain};
+use crate::committee::{ChangeCertificate, Committee, Domain};
 use crate::rejection::Rejection;
-use crate::view::View;
+use crate::view::{Epoch, View};
 use crate::vote::BlockId;
 use crate::wire::{
     put_count, put_node, put_signature, put_view, read_count, read_node, read_signature, read_view,
@@ -130,6 +130,7 @@ impl StateRoot {
 /// epoch's committee, where the epoch ended and which domain the next one
 /// decides in: what a replica that missed the end needs to follow on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Boundary {
     /// More blocks follow in the same epoch.
     Within,
@@ -425,6 +426,91 @@ impl CheckpointCertificate {
     }
 }
 
+/// How an epoch succeeded the one before.
+///
+/// It holds the change that epoch's committee made, and the checkpoint it
+/// certified at the block that holds the change, which ends it. The next
+/// epoch starts from that state, in the domain the checkpoint names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Succession {
+    change: ChangeCertificate,
+    end: CheckpointCertificate,
+    domain: Domain,
+}
+
+impl Succession {
+    /// The epoch `change` starts after `end`, unless `end` says no epoch
+    /// ends at its block.
+    #[must_use]
+    pub fn new(change: ChangeCertificate, end: CheckpointCertificate) -> Option<Self> {
+        match end.boundary() {
+            Boundary::Ends(domain) => Some(Self {
+                change,
+                end,
+                domain,
+            }),
+            Boundary::Within => None,
+        }
+    }
+
+    /// The epoch it starts.
+    #[must_use]
+    pub const fn epoch(&self) -> Epoch {
+        self.change.epoch()
+    }
+
+    /// The change.
+    #[must_use]
+    pub const fn change(&self) -> &ChangeCertificate {
+        &self.change
+    }
+
+    /// The state the epoch starts from.
+    #[must_use]
+    pub const fn end(&self) -> &CheckpointCertificate {
+        &self.end
+    }
+
+    /// The domain the epoch decides in.
+    #[must_use]
+    pub const fn domain(&self) -> Domain {
+        self.domain
+    }
+
+    /// Checks that the epoch before, `epoch` decided by `committee` in
+    /// `domain`, made the change and certified its end, and that the end
+    /// leads where the change does.
+    ///
+    /// # Errors
+    ///
+    /// When the change or the checkpoint is not that committee's, or the
+    /// checkpoint names another domain.
+    pub fn verify(
+        &self,
+        committee: &Committee,
+        domain: Domain,
+        epoch: Epoch,
+    ) -> Result<(), Rejection> {
+        self.change.verify(committee, domain, epoch)?;
+        self.end.verify(committee, domain)?;
+        if domain.next(&self.change) != self.domain {
+            return Err(Rejection::Unended(self.epoch()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
+        self.change.encode(out)?;
+        self.end.encode(out)
+    }
+
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let change = ChangeCertificate::decode(reader)?;
+        let end = CheckpointCertificate::decode(reader)?;
+        Self::new(change, end).ok_or(DecodeError::Invalid)
+    }
+}
+
 /// A replica's own checkpoints, until the committee certifies one at
 /// their height.
 #[derive(Debug, Clone, Default)]
@@ -680,13 +766,13 @@ mod tests {
 
     use super::{
         Boundary, CHUNK, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Own, Share,
-        StateRoot, Tally, Verdict, span,
+        StateRoot, Succession, Tally, Verdict, span,
     };
     use crate::committee::Domain;
-    use crate::fixture::{DOMAIN, certify, committee, key};
+    use crate::fixture::{DOMAIN, certify, change_to, committee, key};
     use crate::rejection::Rejection;
     use crate::step::Effects;
-    use crate::view::View;
+    use crate::view::{Epoch, View};
     use crate::vote::BlockId;
 
     fn checkpoint(height: u64, root: u8) -> Checkpoint {
@@ -756,6 +842,52 @@ mod tests {
         let certified = certify(ends);
         assert_eq!(certified.boundary(), Boundary::Ends(next), "certified");
         assert!(certified.certifies(&within), "the state the ledger reached");
+    }
+
+    #[test]
+    fn a_succession_is_the_committee_before_its_word() {
+        let change = change_to(1, &[1, 2, 3]);
+        let next = DOMAIN.next(&change);
+        let within = checkpoint(10, 1);
+        assert_eq!(
+            Succession::new(change.clone(), certify(within)),
+            None,
+            "a checkpoint within the epoch ends nothing"
+        );
+        let succession = Succession::new(change.clone(), certify(within.ending(next))).unwrap();
+        assert_eq!(succession.domain(), next, "where the change leads");
+        assert_eq!(succession.epoch(), Epoch::new(1), "the epoch it starts");
+        assert_eq!(
+            succession.verify(&committee(), DOMAIN, Epoch::FIRST),
+            Ok(()),
+            "the charter's committee made it"
+        );
+        assert_eq!(
+            succession.verify(&committee(), Domain::new([2; 32]), Epoch::FIRST),
+            Err(Rejection::Forged(NodeId::new(1))),
+            "another domain"
+        );
+        assert_eq!(
+            succession.verify(&committee(), DOMAIN, Epoch::new(1)),
+            Err(Rejection::OtherEpoch(Epoch::new(1), Epoch::new(1))),
+            "not the epoch after"
+        );
+        let elsewhere =
+            Succession::new(change, certify(within.ending(Domain::new([3; 32])))).unwrap();
+        assert_eq!(
+            elsewhere.verify(&committee(), DOMAIN, Epoch::FIRST),
+            Err(Rejection::Unended(Epoch::new(1))),
+            "an end that leads elsewhere"
+        );
+
+        let mut bytes = Vec::new();
+        succession.encode(&mut bytes).unwrap();
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(
+            Succession::decode(&mut reader).unwrap(),
+            succession,
+            "round trip"
+        );
     }
 
     #[test]

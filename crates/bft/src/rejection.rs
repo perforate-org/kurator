@@ -65,4 +65,8 @@ pub enum Rejection {
     /// more until the next committee starts.
     #[error("{0} has ended")]
     Ended(Epoch),
+    /// A succession whose checkpoint does not end the epoch where its
+    /// change leads: the epoch it would start.
+    #[error("a checkpoint that does not end the epoch before {0} where its change leads")]
+    Unended(Epoch),
 }

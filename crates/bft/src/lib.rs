@@ -62,6 +62,7 @@ mod wire;
 pub use block::{Block, Order, Proposal};
 pub use checkpoint::{
     Boundary, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Share, StateRoot,
+    Succession,
 };
 pub use committee::{Change, ChangeCertificate, Committee, Domain, Endorsement};
 pub use core::{Config, Core, Event};
@@ -80,9 +81,12 @@ mod fixture {
     use oleaph_consensus::NodeId;
     use oleaph_crypto::{Algorithm, SigningKey};
 
-    use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
+    use crate::checkpoint::{
+        Checkpoint, CheckpointCertificate, Height, Share, StateRoot, Succession, Tally,
+    };
     use crate::committee::{Change, ChangeCertificate, Committee, Domain, Endorsement};
-    use crate::view::Epoch;
+    use crate::view::{Epoch, View};
+    use crate::vote::BlockId;
 
     /// The domain every test signs in.
     pub(crate) const DOMAIN: Domain = Domain::new([1; 32]);
@@ -112,6 +116,15 @@ mod fixture {
             .map(|node| Endorsement::sign(&key(node), DOMAIN, NodeId::new(node), &change))
             .collect();
         ChangeCertificate::new(change, endorsements)
+    }
+
+    /// The epoch `change_to(epoch, members)` starts, after a checkpoint at
+    /// `block` that nodes 1 to 3 certify in [`DOMAIN`].
+    pub(crate) fn succession_to(epoch: u64, members: &[u64], block: BlockId) -> Succession {
+        let change = change_to(epoch, members);
+        let end = Checkpoint::new(Height::new(1), block, View::new(1), StateRoot::new([6; 32]))
+            .ending(DOMAIN.next(&change));
+        Succession::new(change, certify(end)).unwrap()
     }
 
     /// A certificate for `checkpoint`, signed by nodes 1 to 3.
