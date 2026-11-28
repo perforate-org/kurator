@@ -97,16 +97,18 @@ pub enum Assurance {
 const CFT: u8 = 1;
 
 impl Assurance {
-    /// The byte the assurance is written as.
-    pub(crate) const fn tag(self) -> u8 {
-        match self {
+    /// Writes the assurance as one byte, its tag.
+    pub(crate) fn encode(self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        let tag = match self {
             Self::Cft => CFT,
-        }
+        };
+        out.write_all(&[tag])
     }
 
-    /// The assurance written as `tag`.
-    pub(crate) const fn of_tag(tag: u8) -> Result<Self, DecodeError> {
-        match tag {
+    /// Reads an assurance written by [`Assurance::encode`] off the front
+    /// of `reader`.
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        match reader.read::<u8>()? {
             CFT => Ok(Self::Cft),
             other => Err(DecodeError::Tag(other)),
         }
@@ -179,7 +181,7 @@ impl Namespace {
     /// When `out` fails.
     pub fn encode(&self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
         out.write_all(&self.id.get().to_le_bytes())?;
-        out.write_all(&[self.assurance.tag()])
+        self.assurance.encode(out)
     }
 
     /// Decodes what [`Namespace::encode`] wrote, all of `bytes`.
@@ -190,7 +192,7 @@ impl Namespace {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let id = NamespaceId::new(reader.read()?);
-        let assurance = Assurance::of_tag(reader.read()?)?;
+        let assurance = Assurance::decode(&mut reader)?;
         reader.finish()?;
         Ok(Self::new(id, assurance))
     }

@@ -108,7 +108,7 @@ impl Creation {
     /// after its tag.
     fn encode(&self, out: &mut Vec<u8>) -> io::Result<()> {
         put_bytes(out, self.name.as_str().as_bytes())?;
-        out.push(self.assurance.tag());
+        self.assurance.encode(out)?;
         out.extend_from_slice(&self.membership.to_le_bytes());
         let count = u32::try_from(self.replicas.len()).map_err(io::Error::other)?;
         out.extend_from_slice(&count.to_le_bytes());
@@ -121,7 +121,7 @@ impl Creation {
     /// Reads what [`Creation::encode`] wrote off the front of `reader`.
     fn decode(reader: &mut Reader<'_>) -> std::result::Result<Self, DecodeError> {
         let name = NamespaceName::from_bytes(reader.bytes()?)?;
-        let assurance = Assurance::of_tag(reader.read()?)?;
+        let assurance = Assurance::decode(reader)?;
         let membership = reader.read()?;
         let mut replicas = BTreeSet::new();
         for _ in 0..reader.read::<u32>()? {
