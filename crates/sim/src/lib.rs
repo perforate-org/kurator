@@ -1,4 +1,4 @@
-//! Deterministic simulation of Kurator clusters, in the manner of
+//! Deterministic simulation of OleaphDB clusters, in the manner of
 //! `FoundationDB` and `TigerBeetle`.
 //!
 //! A whole cluster runs on one thread under [`openraft_rt_sim::SimRuntime`]:
@@ -14,9 +14,9 @@
 //! longer hold a key.
 //!
 //! ```
-//! use kurator_sim::{Cluster, Faults, Outcome};
-//! use kurator_raft::openraft::AsyncRuntime as _;
-//! use kurator_storage::WriteBatch;
+//! use oleaph_sim::{Cluster, Faults, Outcome};
+//! use oleaph_raft::openraft::AsyncRuntime as _;
+//! use oleaph_storage::WriteBatch;
 //! use openraft_rt_sim::SimRuntime;
 //!
 //! SimRuntime::with_seed(7).block_on(async {
@@ -30,7 +30,7 @@
 //!     assert_eq!(moved, Outcome::Acked);
 //!     cluster.shutdown().await
 //! })?;
-//! # Ok::<(), kurator_sim::SimError>(())
+//! # Ok::<(), oleaph_sim::SimError>(())
 //! ```
 
 mod cluster;
@@ -43,7 +43,7 @@ pub use holdings::Holdings;
 pub use network::{Endpoint, Faults, Garbled, Network, Wire};
 pub use rng::Rng;
 
-kurator_raft::declare_config!(
+oleaph_raft::declare_config!(
     /// Replicas on the deterministic simulator.
     pub Sim, openraft_rt_sim::SimRuntime
 );

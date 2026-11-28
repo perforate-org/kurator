@@ -1,5 +1,5 @@
 [package]
-name = "kurator-wal"
+name = "oleaph-wal"
 description = "Append-only write-ahead log with group commit and torn-tail recovery"
 version.workspace = true
 edition.workspace = true
@@ -13,8 +13,8 @@ categories.workspace = true
 [dependencies]
 blake3.workspace = true
 crc32c.workspace = true
-kurator-crypto.workspace = true
-kurator-metrics.workspace = true
+oleaph-crypto.workspace = true
+oleaph-metrics.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

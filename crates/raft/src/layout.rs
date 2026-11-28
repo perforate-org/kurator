@@ -19,8 +19,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kurator_shard::ShardId;
-use kurator_wal::sync_dir;
+use oleaph_shard::ShardId;
+use oleaph_wal::sync_dir;
 use parking_lot::Mutex;
 
 use crate::error::Result;
@@ -163,7 +163,7 @@ fn ids(dir: &Path) -> io::Result<BTreeSet<ShardId>> {
 
 #[cfg(test)]
 mod tests {
-    use kurator_shard::{ShardId, ShardState};
+    use oleaph_shard::{ShardId, ShardState};
 
     use super::Layout;
     use crate::snapshot::SnapshotBytes;

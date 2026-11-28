@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use kurator_shard::{ShardId, ShardState};
+use oleaph_shard::{ShardId, ShardState};
 
 /// The state of every shard one node replicates, as it applied them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,8 +47,8 @@ impl Holdings {
 
 #[cfg(test)]
 mod tests {
-    use kurator_shard::{Epoch, ShardId, ShardState, Split};
-    use kurator_storage::{Command, Version, WriteBatch};
+    use oleaph_shard::{Epoch, ShardId, ShardState, Split};
+    use oleaph_storage::{Command, Version, WriteBatch};
 
     use super::Holdings;
 

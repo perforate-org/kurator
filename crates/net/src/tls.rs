@@ -14,14 +14,14 @@
 //! The key exchange is post-quantum: X25519MLKEM768, which combines X25519
 //! with ML-KEM-768 (FIPS 203) so that the traffic stays secret unless both
 //! are broken. A replica offers and accepts nothing else, since every peer
-//! is a Kurator replica: no one can push a handshake down to a classical
+//! is an OleaphDB replica: no one can push a handshake down to a classical
 //! exchange, and traffic recorded today cannot be read once a quantum
 //! computer breaks X25519.
 
 use std::fmt;
 use std::sync::Arc;
 
-use kurator_crypto::{Algorithm, KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_crypto::{Algorithm, KeyPurpose, NodeSecret, VerifyingKey};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{AlwaysResolvesClientRawPublicKeys, ResolvesClientCert};
 use rustls::crypto::{CryptoProvider, verify_tls13_signature_with_raw_key};
@@ -40,7 +40,7 @@ use rustls::{
 use crate::roster::Roster;
 
 /// The ALPN protocol id: the version of the message encoding.
-pub(crate) const ALPN: &[u8] = b"kurator-raft/1";
+pub(crate) const ALPN: &[u8] = b"oleaph-raft/1";
 
 /// The TLS signature scheme of `algorithm`.
 fn scheme(algorithm: Algorithm) -> SignatureScheme {
@@ -261,7 +261,7 @@ impl ClientCertVerifier for Trusted {
 mod tests {
     use std::sync::Arc;
 
-    use kurator_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_crypto::{KeyPurpose, NodeSecret};
     use rustls::crypto::{CryptoProvider, SupportedKxGroup};
     use rustls::pki_types::ServerName;
     use rustls::server::AlwaysResolvesServerRawPublicKeys;
@@ -288,7 +288,7 @@ mod tests {
         client: rustls::ClientConfig,
         server: rustls::ServerConfig,
     ) -> Result<ClientConnection, Box<dyn std::error::Error>> {
-        let mut client = ClientConnection::new(Arc::new(client), ServerName::try_from("kurator")?)?;
+        let mut client = ClientConnection::new(Arc::new(client), ServerName::try_from("oleaph")?)?;
         let mut server = ServerConnection::new(Arc::new(server))?;
         while client.is_handshaking() || server.is_handshaking() {
             let mut bytes = Vec::new();

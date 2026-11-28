@@ -12,9 +12,9 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 
-use kurator_codec::Reader;
-use kurator_shard::ShardState;
-use kurator_wal::sync_dir;
+use oleaph_codec::Reader;
+use oleaph_shard::ShardState;
+use oleaph_wal::sync_dir;
 
 use super::manifest::Manifest;
 use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height};

@@ -6,8 +6,8 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_metrics::Exposition;
-use kurator_shard::{Halves, ShardId};
+use oleaph_metrics::Exposition;
+use oleaph_shard::{Halves, ShardId};
 use openraft::async_runtime::Mutex as _;
 use openraft::{AsyncRuntime, RaftTypeConfig};
 use parking_lot::Mutex;
@@ -393,8 +393,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use kurator_consensus::{Replicated as _, Route};
-    use kurator_shard::{Epoch, Shard, ShardId, ShardState, Split};
+    use oleaph_consensus::{Replicated as _, Route};
+    use oleaph_shard::{Epoch, Shard, ShardId, ShardState, Split};
     use openraft::AsyncRuntime as _;
     use openraft::raft::VoteRequest;
     use openraft_rt_sim::SimRuntime;
@@ -406,7 +406,7 @@ mod tests {
     use crate::snapshot::SnapshotBytes;
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, Peer, SnapshotMeta, StoredMembership, Vote};
-    use kurator_crypto::NodeSecret;
+    use oleaph_crypto::NodeSecret;
 
     crate::declare_config!(Test, SimRuntime);
 
@@ -532,8 +532,8 @@ mod tests {
 
             // A second seed for a shard that holds a state already is dropped.
             let other = ShardState::new(
-                Shard::new(shard, kurator_storage::Span::FULL, Epoch::ZERO),
-                kurator_storage::KvState::default(),
+                Shard::new(shard, oleaph_storage::Span::FULL, Epoch::ZERO),
+                oleaph_storage::KvState::default(),
             );
             let meta = SnapshotMeta::default();
             let stale = SnapshotBytes::encode(&meta, &other).unwrap();

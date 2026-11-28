@@ -7,9 +7,9 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_codec::DecodeError;
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_raft::{
+use oleaph_codec::DecodeError;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_raft::{
     Connection, Failure, Inbox, Message, NodeId, Peer, Refusal, Response, Transport,
 };
 use openraft_rt_sim::SimRuntime;

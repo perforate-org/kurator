@@ -1,4 +1,4 @@
-//! Append-only write-ahead log for Kurator.
+//! Append-only write-ahead log for OleaphDB.
 //!
 //! A log is a directory of segment files. Every record gets a [`Lsn`], one
 //! higher than the record before it, and [`Wal::append_batch`] makes a whole
@@ -16,7 +16,7 @@
 //! Segment file `<first lsn as 20 digits>.wal`:
 //!
 //! ```text
-//! header: magic "KRWL" | version u16 | flags u16 | first lsn u64
+//! header: magic "OLWL" | version u16 | flags u16 | first lsn u64
 //! frame:  payload len u32 | crc32c u32 | lsn u64 | payload
 //! ```
 //!
@@ -47,7 +47,7 @@
 //! ```
 //!
 //! The signature is as long as the signatures of the algorithm whose
-//! [`kurator_crypto::Algorithm::id`] follows it: 64 bytes for Ed25519.
+//! [`oleaph_crypto::Algorithm::id`] follows it: 64 bytes for Ed25519.
 
 mod bytes;
 mod checksum;

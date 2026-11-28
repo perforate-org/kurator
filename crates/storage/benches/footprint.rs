@@ -9,8 +9,8 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use kurator_crypto as _;
-use kurator_storage::{Command, KvState, Version, WriteBatch};
+use oleaph_crypto as _;
+use oleaph_storage::{Command, KvState, Version, WriteBatch};
 use proptest as _;
 use tempfile as _;
 

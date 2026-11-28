@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use kurator_consensus::NodeId;
-use kurator_crypto::VerifyingKey;
-use kurator_shard::ShardId;
+use oleaph_consensus::NodeId;
+use oleaph_crypto::VerifyingKey;
+use oleaph_shard::ShardId;
 
 use crate::view::View;
 
@@ -46,7 +46,7 @@ impl Domain {
 }
 
 /// The key derivation context of shard domains. Fixed forever.
-const DOMAIN_CONTEXT: &str = "kurator 2026-11 bft shard domain";
+const DOMAIN_CONTEXT: &str = "oleaph 2026-11 bft shard domain";
 
 /// The replicas that decide a shard, each with the public key it signs
 /// votes with.
@@ -114,7 +114,7 @@ impl Committee {
 }
 
 /// The key derivation context of the leader schedule. Fixed forever.
-const LEADER_CONTEXT: &str = "kurator 2026-11 bft leader schedule";
+const LEADER_CONTEXT: &str = "oleaph 2026-11 bft leader schedule";
 
 /// How many of `n` replicas may be faulty: the most `f` with `3f + 1 <= n`.
 const fn faults(n: usize) -> usize {
@@ -133,10 +133,10 @@ const fn quorum(n: usize) -> usize {
 mod tests {
     use std::collections::BTreeMap;
 
-    use kurator_consensus::NodeId;
-    use kurator_crypto::{Algorithm, SigningKey};
+    use oleaph_consensus::NodeId;
+    use oleaph_crypto::{Algorithm, SigningKey};
 
-    use kurator_shard::ShardId;
+    use oleaph_shard::ShardId;
 
     use super::{Committee, Domain, faults, quorum};
     use crate::view::View;
@@ -182,7 +182,7 @@ mod tests {
             .collect();
         assert_eq!(
             &leaders[..8],
-            [10, 30, 40, 30, 30, 40, 10, 20],
+            [40, 20, 40, 20, 40, 20, 20, 10],
             "fixed schedule"
         );
         for member in [10, 20, 30, 40] {

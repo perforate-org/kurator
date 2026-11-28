@@ -1,6 +1,6 @@
 [package]
-name = "kurator-metrics"
-description = "Counters and latency histograms, and the Prometheus text format Kurator exposes them in"
+name = "oleaph-metrics"
+description = "Counters and latency histograms, and the Prometheus text format OleaphDB exposes them in"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

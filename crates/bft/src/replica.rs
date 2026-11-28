@@ -16,11 +16,11 @@ use std::ops::Bound;
 use std::time::Duration;
 
 use futures_channel::oneshot;
-use kurator_consensus::{
+use oleaph_consensus::{
     Duty, Error, Members, NodeId, Peer, Reads, Replicated, Result, Route, Transaction,
 };
-use kurator_shard::{Applied, Shard};
-use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version};
+use oleaph_shard::{Applied, Shard};
+use oleaph_storage::{Command, Draft, KeyValue, KvState, Outcome, Version};
 use parking_lot::Mutex;
 
 use crate::block::Block;
@@ -375,7 +375,7 @@ impl<H: Host> Transaction for Txn<'_, H> {
             return Err(misrouted(self.shard.clone()));
         }
         let value = self.draft.get(self.replica.inner.lock().ledger.kv(), key);
-        Ok(value.map_err(kurator_storage::Error::from)?)
+        Ok(value.map_err(oleaph_storage::Error::from)?)
     }
 
     fn range(&mut self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<KeyValue>> {
@@ -383,7 +383,7 @@ impl<H: Host> Transaction for Txn<'_, H> {
         let entries = self
             .draft
             .range(self.replica.inner.lock().ledger.kv(), start, end);
-        Ok(entries.map_err(kurator_storage::Error::from)?)
+        Ok(entries.map_err(oleaph_storage::Error::from)?)
     }
 
     fn put(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
@@ -401,7 +401,7 @@ impl<H: Host> Transaction for Txn<'_, H> {
         };
         match self.replica.propose(Command::Txn(transaction)).await? {
             Outcome::Committed(version) | Outcome::Prepared(version) => Ok(version),
-            Outcome::Aborted(abort) => Err(kurator_storage::Error::from(abort).into()),
+            Outcome::Aborted(abort) => Err(oleaph_storage::Error::from(abort).into()),
             other => Err(Error::Failed(
                 format!("a transaction settled as {other:?}").into(),
             )),

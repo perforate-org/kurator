@@ -16,8 +16,8 @@
 
 use std::collections::BTreeMap;
 
-use kurator_crypto::VerifyingKey;
-use kurator_raft::{Memberships, NodeId};
+use oleaph_crypto::VerifyingKey;
+use oleaph_raft::{Memberships, NodeId};
 
 use crate::Tokio;
 

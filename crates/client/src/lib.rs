@@ -1,11 +1,11 @@
-//! Kurator's client.
+//! OleaphDB's client.
 //!
 //! A client is not a replica. It reads at a version it chose, so its reads
 //! need no lock, and it writes by handing the shard's leader a
-//! [`Command`](kurator_storage::Command): a write batch, a transaction
+//! [`Command`](oleaph_storage::Command): a write batch, a transaction
 //! that commits only if what it read did not change, or a step of a
 //! transaction across shards. The leader replicates the command and
-//! answers with its [`Outcome`](kurator_storage::Outcome). A node that
+//! answers with its [`Outcome`](oleaph_storage::Outcome). A node that
 //! does not lead names the leader it knows of.
 //!
 //! - [`Request`] and [`Reply`] are what a client and a node say, and

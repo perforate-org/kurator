@@ -735,212 +735,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kurator-bft"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "criterion",
- "futures-channel",
- "futures-util",
- "kurator-codec",
- "kurator-consensus",
- "kurator-crypto",
- "kurator-shard",
- "kurator-storage",
- "kurator-wal",
- "parking_lot",
- "proptest",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-client"
-version = "0.0.1"
-dependencies = [
- "futures-util",
- "kurator-codec",
- "kurator-consensus",
- "kurator-crypto",
- "kurator-meta",
- "kurator-shard",
- "kurator-storage",
- "parking_lot",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-codec"
-version = "0.0.1"
-dependencies = [
- "crc32c",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-consensus"
-version = "0.0.1"
-dependencies = [
- "futures-util",
- "kurator-codec",
- "kurator-crypto",
- "kurator-shard",
- "kurator-storage",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-crypto"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "ed25519-dalek",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-meta"
-version = "0.0.1"
-dependencies = [
- "futures-util",
- "kurator-codec",
- "kurator-consensus",
- "kurator-shard",
- "kurator-storage",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-metrics"
-version = "0.0.1"
-dependencies = [
- "proptest",
-]
-
-[[package]]
-name = "kurator-net"
-version = "0.0.1"
-dependencies = [
- "kurator-bft",
- "kurator-client",
- "kurator-consensus",
- "kurator-crypto",
- "kurator-meta",
- "kurator-raft",
- "kurator-shard",
- "kurator-storage",
- "kurator-wal",
- "openraft-rt-tokio",
- "parking_lot",
- "proptest",
- "quinn",
- "rustls",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "kurator-node"
-version = "0.0.1"
-dependencies = [
- "getrandom 0.4.3",
- "kurator-bft",
- "kurator-client",
- "kurator-consensus",
- "kurator-crypto",
- "kurator-meta",
- "kurator-net",
- "kurator-raft",
- "kurator-shard",
- "kurator-storage",
- "kurator-wal",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "kurator-raft"
-version = "0.0.1"
-dependencies = [
- "futures-util",
- "kurator-codec",
- "kurator-consensus",
- "kurator-crypto",
- "kurator-metrics",
- "kurator-shard",
- "kurator-storage",
- "kurator-wal",
- "openraft",
- "openraft-rt-sim",
- "parking_lot",
- "proptest",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-shard"
-version = "0.0.1"
-dependencies = [
- "kurator-codec",
- "kurator-storage",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-sim"
-version = "0.0.1"
-dependencies = [
- "futures-util",
- "kurator-client",
- "kurator-codec",
- "kurator-consensus",
- "kurator-crypto",
- "kurator-meta",
- "kurator-raft",
- "kurator-shard",
- "kurator-storage",
- "openraft-rt-sim",
- "parking_lot",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-storage"
-version = "0.0.1"
-dependencies = [
- "criterion",
- "kurator-codec",
- "kurator-crypto",
- "kurator-wal",
- "parking_lot",
- "proptest",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "kurator-wal"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "crc32c",
- "kurator-crypto",
- "kurator-metrics",
- "proptest",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -997,6 +791,212 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "oleaph-bft"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "criterion",
+ "futures-channel",
+ "futures-util",
+ "oleaph-codec",
+ "oleaph-consensus",
+ "oleaph-crypto",
+ "oleaph-shard",
+ "oleaph-storage",
+ "oleaph-wal",
+ "parking_lot",
+ "proptest",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-client"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "oleaph-codec",
+ "oleaph-consensus",
+ "oleaph-crypto",
+ "oleaph-meta",
+ "oleaph-shard",
+ "oleaph-storage",
+ "parking_lot",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-codec"
+version = "0.0.1"
+dependencies = [
+ "crc32c",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-consensus"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "oleaph-codec",
+ "oleaph-crypto",
+ "oleaph-shard",
+ "oleaph-storage",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-crypto"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-meta"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "oleaph-codec",
+ "oleaph-consensus",
+ "oleaph-shard",
+ "oleaph-storage",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-metrics"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "oleaph-net"
+version = "0.0.1"
+dependencies = [
+ "oleaph-bft",
+ "oleaph-client",
+ "oleaph-consensus",
+ "oleaph-crypto",
+ "oleaph-meta",
+ "oleaph-raft",
+ "oleaph-shard",
+ "oleaph-storage",
+ "oleaph-wal",
+ "openraft-rt-tokio",
+ "parking_lot",
+ "proptest",
+ "quinn",
+ "rustls",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "oleaph-node"
+version = "0.0.1"
+dependencies = [
+ "getrandom 0.4.3",
+ "oleaph-bft",
+ "oleaph-client",
+ "oleaph-consensus",
+ "oleaph-crypto",
+ "oleaph-meta",
+ "oleaph-net",
+ "oleaph-raft",
+ "oleaph-shard",
+ "oleaph-storage",
+ "oleaph-wal",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "oleaph-raft"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "oleaph-codec",
+ "oleaph-consensus",
+ "oleaph-crypto",
+ "oleaph-metrics",
+ "oleaph-shard",
+ "oleaph-storage",
+ "oleaph-wal",
+ "openraft",
+ "openraft-rt-sim",
+ "parking_lot",
+ "proptest",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-shard"
+version = "0.0.1"
+dependencies = [
+ "oleaph-codec",
+ "oleaph-storage",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-sim"
+version = "0.0.1"
+dependencies = [
+ "futures-util",
+ "oleaph-client",
+ "oleaph-codec",
+ "oleaph-consensus",
+ "oleaph-crypto",
+ "oleaph-meta",
+ "oleaph-raft",
+ "oleaph-shard",
+ "oleaph-storage",
+ "openraft-rt-sim",
+ "parking_lot",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-storage"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "oleaph-codec",
+ "oleaph-crypto",
+ "oleaph-wal",
+ "parking_lot",
+ "proptest",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "oleaph-wal"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "crc32c",
+ "oleaph-crypto",
+ "oleaph-metrics",
+ "proptest",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

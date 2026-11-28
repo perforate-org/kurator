@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use kurator_shard::ShardState;
+use oleaph_shard::ShardState;
 
 use crate::block::{Block, prune};
 use crate::checkpoint::{CheckpointCertificate, Height};
@@ -46,7 +46,7 @@ pub enum To {
     /// Every other member.
     Others,
     /// One other member.
-    One(kurator_consensus::NodeId),
+    One(oleaph_consensus::NodeId),
 }
 
 /// A message to send.

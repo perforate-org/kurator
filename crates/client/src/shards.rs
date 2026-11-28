@@ -3,8 +3,8 @@
 
 use std::future::Future;
 
-use kurator_shard::{Shard, ShardId};
-use kurator_storage::{Abort, Deadline, TxnId};
+use oleaph_shard::{Shard, ShardId};
+use oleaph_storage::{Abort, Deadline, TxnId};
 
 use crate::remote::{Call, Reply};
 

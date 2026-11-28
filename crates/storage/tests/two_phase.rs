@@ -9,8 +9,8 @@
 use std::ops::Bound::{Excluded, Included};
 
 use criterion as _;
-use kurator_codec::Reader;
-use kurator_storage::{
+use oleaph_codec::Reader;
+use oleaph_storage::{
     Abort, Collect, Command, Deadline, Decide, Decided, Decision, Draft, KvState, Outcome, Prepare,
     TxnId, Version, WriteBatch,
 };

@@ -1,6 +1,6 @@
 [package]
-name = "kurator-shard"
-description = "Shards for Kurator: key spans, shard maps for routing, and the state of one shard with its splits"
+name = "oleaph-shard"
+description = "Shards for OleaphDB: key spans, shard maps for routing, and the state of one shard with its splits"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,8 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-kurator-codec.workspace = true
-kurator-storage.workspace = true
+oleaph-codec.workspace = true
+oleaph-storage.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

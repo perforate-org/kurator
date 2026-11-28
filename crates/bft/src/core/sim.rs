@@ -7,14 +7,14 @@
 //! to `f + 1` replicas is decided by every honest one once the network
 //! settles.
 //!
-//! `KURATOR_SIM_SEEDS` sets how many seeds each test runs, and
-//! `KURATOR_SIM_SEED` runs one seed alone.
+//! `OLEAPH_SIM_SEEDS` sets how many seeds each test runs, and
+//! `OLEAPH_SIM_SEED` runs one seed alone.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
-use kurator_consensus::NodeId;
-use kurator_crypto::{Algorithm, SigningKey};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Algorithm, SigningKey};
 
 use crate::block::{Block, Proposal};
 use crate::committee::{Committee, Domain};
@@ -34,7 +34,7 @@ const BASE_TIMEOUT: u64 = 40;
 /// How many commands the clients submit.
 const COMMANDS: u64 = 12;
 
-/// `SplitMix64`, as `kurator-sim` uses.
+/// `SplitMix64`, as `oleaph-sim` uses.
 #[derive(Debug)]
 struct Rng(u64);
 
@@ -517,10 +517,10 @@ impl Sim {
 }
 
 fn seeds() -> Vec<u64> {
-    if let Ok(seed) = std::env::var("KURATOR_SIM_SEED") {
+    if let Ok(seed) = std::env::var("OLEAPH_SIM_SEED") {
         return vec![seed.parse().unwrap()];
     }
-    let count = std::env::var("KURATOR_SIM_SEEDS")
+    let count = std::env::var("OLEAPH_SIM_SEEDS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(12);

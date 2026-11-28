@@ -2,8 +2,8 @@
 
 use std::io;
 
-use kurator_shard::{Applied, Shard, ShardState};
-use kurator_storage::{Encoded, KvState, Version};
+use oleaph_shard::{Applied, Shard, ShardState};
+use oleaph_storage::{Encoded, KvState, Version};
 
 use super::states::Snapshot;
 use crate::block::Block;
@@ -31,7 +31,7 @@ pub enum Settled {
 ///
 /// Every honest replica decides the same blocks in the same order, so
 /// every one holds the same state at the same version. A command is a
-/// [`kurator_storage::Command`] as it encodes; splitting a shard that BFT
+/// [`oleaph_storage::Command`] as it encodes; splitting a shard that BFT
 /// replicates comes later.
 ///
 /// Every [`Interval`] of blocks, it names the state it holds by a
@@ -137,8 +137,8 @@ impl Ledger {
 
 #[cfg(test)]
 mod tests {
-    use kurator_shard::{Applied, ShardState};
-    use kurator_storage::{Command, Outcome, Version, WriteBatch};
+    use oleaph_shard::{Applied, ShardState};
+    use oleaph_storage::{Command, Outcome, Version, WriteBatch};
 
     use super::super::manifest::Manifest;
     use super::{Ledger, Settled};

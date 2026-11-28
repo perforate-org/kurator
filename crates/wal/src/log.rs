@@ -9,8 +9,8 @@ use std::time::Instant;
 use crate::error::{Corruption, Error, InvalidFrame, Result};
 use crate::frame::{self, Decoded};
 use crate::lsn::{Lsn, LsnRange};
-use kurator_crypto::{SigningKey, VerifyingKey};
-use kurator_metrics::Histogram;
+use oleaph_crypto::{SigningKey, VerifyingKey};
+use oleaph_metrics::Histogram;
 
 use crate::seal::{Digest, Head, Integrity, Opened, Seal, SealDamage};
 use crate::segment::{self, Format, Header, Segment, sync_dir};

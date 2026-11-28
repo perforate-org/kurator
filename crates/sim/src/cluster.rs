@@ -9,16 +9,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
-use kurator_consensus::{Duty, Replicated as _, Route, Transaction as _};
-use kurator_crypto::NodeSecret;
-use kurator_meta::{MetaError, Placement, Registry, Reported, allocate};
-use kurator_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
-use kurator_raft::{
+use oleaph_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
+use oleaph_consensus::{Duty, Replicated as _, Route, Transaction as _};
+use oleaph_crypto::NodeSecret;
+use oleaph_meta::{MetaError, Placement, Registry, Reported, allocate};
+use oleaph_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
+use oleaph_raft::{
     Error, Member, Membership, NodeId, Peer, Progress, Replica, Role, Status, Store, Txn,
 };
-use kurator_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
-use kurator_storage::{Deadline, KvOp, KvState, TxnId, WriteBatch};
+use oleaph_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
+use oleaph_storage::{Deadline, KvOp, KvState, TxnId, WriteBatch};
 use openraft_rt_sim::{SimInstant, SimRuntime};
 use parking_lot::Mutex;
 
@@ -101,7 +101,7 @@ impl Redirect for Error {
     }
 }
 
-impl Redirect for kurator_consensus::Error {
+impl Redirect for oleaph_consensus::Error {
     fn leader(&self) -> Option<NodeId> {
         self.redirect().flatten()
     }
@@ -478,7 +478,7 @@ impl Cluster {
     /// nothing.
     pub async fn transact<F>(&self, body: F) -> Transacted
     where
-        F: FnOnce(&mut Txn<'_, Sim>) -> kurator_consensus::Result<()> + Send,
+        F: FnOnce(&mut Txn<'_, Sim>) -> oleaph_consensus::Result<()> + Send,
     {
         let Some(replica) = self.leader_replica(ShardId::FIRST) else {
             return Transacted::Rejected;
@@ -490,11 +490,11 @@ impl Cluster {
         };
         match SimRuntime::timeout(CLIENT_TIMEOUT, attempt).await {
             Ok(Ok(version)) => Transacted::Committed(version),
-            Ok(Err(kurator_consensus::Error::Storage(kurator_storage::Error::Aborted(abort)))) => {
+            Ok(Err(oleaph_consensus::Error::Storage(oleaph_storage::Error::Aborted(abort)))) => {
                 let _resolved: bool = resolve_expired(self, ShardId::FIRST, &abort).await;
                 Transacted::Aborted
             }
-            Ok(Err(kurator_consensus::Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
+            Ok(Err(oleaph_consensus::Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
             Ok(Err(_)) => Transacted::Rejected,
         }
     }
@@ -807,7 +807,7 @@ impl Cluster {
     async fn report(&self, placement: &Placement) {
         let _reported: Option<Reported> = self
             .on_leader(ShardId::META, |meta| async move {
-                kurator_meta::report(&meta, placement).await
+                oleaph_meta::report(&meta, placement).await
             })
             .await;
     }
@@ -825,7 +825,7 @@ impl Cluster {
     /// in time.
     pub async fn registry(&self) -> Option<Registry> {
         self.on_leader(ShardId::META, |meta| async move {
-            kurator_meta::registry(&meta).await
+            oleaph_meta::registry(&meta).await
         })
         .await
     }
@@ -1056,7 +1056,7 @@ impl Cluster {
             Err(Error::Discarded { .. }) => Ok(Outcome::Unknown),
             // A lock whose coordinator gave up is resolved, and the write
             // tried again.
-            Err(Error::Storage(kurator_storage::Error::Aborted(abort)))
+            Err(Error::Storage(oleaph_storage::Error::Aborted(abort)))
                 if resolve_expired(self, shard, &abort).await =>
             {
                 Err(Retry::To(Some(id)))

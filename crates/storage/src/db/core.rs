@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_wal::{Lsn, LsnRange, RecoveryReport, Start, Wal};
+use oleaph_wal::{Lsn, LsnRange, RecoveryReport, Start, Wal};
 use parking_lot::{Mutex, RwLock};
 
 use super::snapshot::Snapshots;
@@ -27,7 +27,7 @@ pub(crate) struct Core {
 
 impl Core {
     /// Loads the latest snapshot from `dir` and replays the log after it.
-    pub(crate) fn recover(dir: &Path, wal: kurator_wal::Options) -> Result<(Self, RecoveryReport)> {
+    pub(crate) fn recover(dir: &Path, wal: oleaph_wal::Options) -> Result<(Self, RecoveryReport)> {
         let snapshots = Snapshots::open(dir.join("snapshots"))?;
         let mut state = snapshots.load_latest()?.unwrap_or_default();
         let (wal, report) = Wal::open(
@@ -56,7 +56,7 @@ impl Core {
     pub(crate) fn commit(
         &self,
         entries: Vec<Encoded>,
-    ) -> Result<Vec<Outcome>, Arc<kurator_wal::Error>> {
+    ) -> Result<Vec<Outcome>, Arc<oleaph_wal::Error>> {
         let range = self
             .wal
             .lock()

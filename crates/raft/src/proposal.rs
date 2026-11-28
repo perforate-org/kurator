@@ -2,9 +2,9 @@
 
 use std::fmt;
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_shard::Split;
-use kurator_storage::{Command, Encoded};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_shard::Split;
+use oleaph_storage::{Command, Encoded};
 
 use crate::error::{Error, Result};
 
@@ -56,7 +56,7 @@ impl Proposal {
 
     fn fitting(body: Body) -> Result<Self> {
         let len = body.payload().len();
-        if len.saturating_add(ENTRY_OVERHEAD) > kurator_wal::MAX_PAYLOAD_LEN {
+        if len.saturating_add(ENTRY_OVERHEAD) > oleaph_wal::MAX_PAYLOAD_LEN {
             return Err(Error::ProposalTooLarge { len });
         }
         Ok(Self(body))
@@ -108,8 +108,8 @@ impl fmt::Display for Proposal {
 
 #[cfg(test)]
 mod tests {
-    use kurator_shard::{Epoch, ShardId, Split};
-    use kurator_storage::{Command, WriteBatch};
+    use oleaph_shard::{Epoch, ShardId, Split};
+    use oleaph_storage::{Command, WriteBatch};
 
     use super::Proposal;
     use crate::error::Error;
@@ -129,13 +129,27 @@ mod tests {
 
     #[test]
     fn a_split_key_must_fit_one_record() {
-        let at = vec![0; kurator_wal::MAX_PAYLOAD_LEN];
+        let at = vec![0; oleaph_wal::MAX_PAYLOAD_LEN];
         assert!(
             matches!(
                 Proposal::split(Split::new(at, ShardId::new(2), Epoch::ZERO)),
                 Err(Error::ProposalTooLarge { .. })
             ),
             "too large"
+        );
+    }
+
+    #[test]
+    fn a_proposal_that_fills_one_record_exactly_fits() {
+        let split =
+            |len: usize| Proposal::split(Split::new(vec![0; len], ShardId::new(2), Epoch::ZERO));
+        let probe = 1 << 20;
+        let header = split(probe).unwrap().body().payload().len() - probe;
+        let fills = oleaph_wal::MAX_PAYLOAD_LEN - super::ENTRY_OVERHEAD - header;
+        assert!(split(fills).is_ok(), "exactly one record");
+        assert!(
+            matches!(split(fills + 1), Err(Error::ProposalTooLarge { .. })),
+            "one byte over"
         );
     }
 }

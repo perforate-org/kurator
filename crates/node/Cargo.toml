@@ -1,6 +1,6 @@
 [package]
-name = "kurator-node"
-description = "A Kurator replica as a process: the signed-WAL Raft replica on the QUIC transport, driven from a console"
+name = "oleaph-node"
+description = "An OleaphDB replica as a process: the signed-WAL Raft replica on the QUIC transport, driven from a console"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,21 +12,21 @@ categories.workspace = true
 publish = false
 
 [[bin]]
-name = "kurator"
+name = "oleaph"
 path = "src/main.rs"
 
 [dependencies]
 getrandom = "0.4.3"
-kurator-bft.workspace = true
-kurator-client.workspace = true
-kurator-meta.workspace = true
-kurator-consensus.workspace = true
-kurator-crypto.workspace = true
-kurator-net = { workspace = true, features = ["bft"] }
-kurator-raft.workspace = true
-kurator-shard.workspace = true
-kurator-storage.workspace = true
-kurator-wal.workspace = true
+oleaph-bft.workspace = true
+oleaph-client.workspace = true
+oleaph-meta.workspace = true
+oleaph-consensus.workspace = true
+oleaph-crypto.workspace = true
+oleaph-net = { workspace = true, features = ["bft"] }
+oleaph-raft.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
+oleaph-wal.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util"] }
 

@@ -9,13 +9,13 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use kurator_bft::Manifest;
-use kurator_shard::ShardState;
-use kurator_storage::{Command, Version, WriteBatch};
+use oleaph_bft::Manifest;
+use oleaph_shard::ShardState;
+use oleaph_storage::{Command, Version, WriteBatch};
 use {
-    blake3 as _, futures_channel as _, futures_util as _, kurator_codec as _,
-    kurator_consensus as _, kurator_crypto as _, kurator_wal as _, parking_lot as _, proptest as _,
-    tempfile as _, thiserror as _,
+    blake3 as _, futures_channel as _, futures_util as _, oleaph_codec as _, oleaph_consensus as _,
+    oleaph_crypto as _, oleaph_wal as _, parking_lot as _, proptest as _, tempfile as _,
+    thiserror as _,
 };
 
 /// A state of `keys` keys of 16 bytes, each with a value of 64 bytes.

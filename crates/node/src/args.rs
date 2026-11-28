@@ -1,16 +1,16 @@
 //! The command line.
 //!
 //! ```text
-//! kurator key <dir> [--consensus]
-//! kurator run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--bft <charter>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
-//! kurator client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
+//! oleaph key <dir> [--consensus]
+//! oleaph run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--bft <charter>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
+//! oleaph client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
 //! touch. A node splits a shard it leads once the shard's state takes more
 //! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
 //!
-//! `kurator key` prints the node's transport key, or with `--consensus`
+//! `oleaph key` prints the node's transport key, or with `--consensus`
 //! the key it signs BFT votes with.
 //!
 //! `--bft` runs the node's replica of the BFT shard a
@@ -25,9 +25,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use kurator_crypto::{KeyPurpose, VerifyingKey};
-use kurator_raft::{NodeId, Peer};
-use kurator_shard::Ceiling;
+use oleaph_crypto::{KeyPurpose, VerifyingKey};
+use oleaph_raft::{NodeId, Peer};
+use oleaph_shard::Ceiling;
 
 /// What the process was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,7 +325,7 @@ fn peer(text: &str) -> Option<(NodeId, Peer)> {
     Some((node_id(id)?, Peer::new(addr(addr_text)?, key(key_text)?)))
 }
 
-/// A key as `kurator key` prints it: `ed25519:` and 64 hex
+/// A key as `oleaph key` prints it: `ed25519:` and 64 hex
 /// digits.
 pub(crate) fn key(text: &str) -> Option<VerifyingKey> {
     text.parse().ok()
@@ -335,10 +335,10 @@ pub(crate) fn key(text: &str) -> Option<VerifyingKey> {
 mod tests {
     use std::path::PathBuf;
 
-    use kurator_crypto::{KeyPurpose, NodeSecret};
-    use kurator_raft::NodeId;
+    use oleaph_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_raft::NodeId;
 
-    use kurator_shard::Ceiling;
+    use oleaph_shard::Ceiling;
 
     use super::{Invocation, Op, Start, UsageError, key, parse};
 

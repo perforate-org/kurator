@@ -1,4 +1,4 @@
-//! Byzantine fault tolerant consensus for Kurator's shards.
+//! Byzantine fault tolerant consensus for OleaphDB's shards.
 //!
 //! A shard whose replicas are run by independent operators cannot trust
 //! any one of them, as Raft trusts its leader. Here, as on the Internet
@@ -30,7 +30,7 @@
 //!
 //! A [`Replica`] puts these together on a node: its [`Host`] carries the
 //! messages and timers, and it is the shard's
-//! [`Replicated`](kurator_consensus::Replicated) replica, so the layers
+//! [`Replicated`](oleaph_consensus::Replicated) replica, so the layers
 //! above see a BFT shard as they see a Raft one.
 //!
 //! Every [`Interval`] of decided blocks, each replica names its state by a
@@ -42,7 +42,7 @@
 //! agrees keeps that state and lets its [`Journal`] forget every record
 //! before it, so that it restarts from the certified state.
 //!
-//! Signatures are [`kurator_crypto`]'s, tagged with their algorithm, so a
+//! Signatures are [`oleaph_crypto`]'s, tagged with their algorithm, so a
 //! certificate is a set of signatures that can move to a post-quantum
 //! algorithm as a whole.
 
@@ -75,8 +75,8 @@ pub use vote::{BlockId, Certificate, Justify, Vote};
 /// domain.
 #[cfg(test)]
 mod fixture {
-    use kurator_consensus::NodeId;
-    use kurator_crypto::{Algorithm, SigningKey};
+    use oleaph_consensus::NodeId;
+    use oleaph_crypto::{Algorithm, SigningKey};
 
     use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
     use crate::committee::{Committee, Domain};

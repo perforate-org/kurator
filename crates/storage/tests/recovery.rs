@@ -12,8 +12,8 @@ use std::path::Path;
 use std::thread;
 
 use criterion as _;
-use kurator_storage::{Db, Error, Lsn, Options, Version, WriteBatch};
-use kurator_wal::{InvalidFrame, TailDamage};
+use oleaph_storage::{Db, Error, Lsn, Options, Version, WriteBatch};
+use oleaph_wal::{InvalidFrame, TailDamage};
 use proptest::prelude::*;
 use tempfile::TempDir;
 
@@ -130,7 +130,7 @@ fn checkpoints_bound_the_log_and_recover() {
     }
     let db = Db::open(dir.path(), options).unwrap();
     assert_eq!(
-        db.read(kurator_storage::KvState::len),
+        db.read(oleaph_storage::KvState::len),
         99,
         "snapshot plus log"
     );
@@ -156,7 +156,7 @@ fn concurrent_writers_share_commits() {
         }
     });
     assert_eq!(
-        db.read(kurator_storage::KvState::len),
+        db.read(oleaph_storage::KvState::len),
         400,
         "every write applied"
     );
@@ -164,7 +164,7 @@ fn concurrent_writers_share_commits() {
     drop(db);
     let db = Db::open(dir.path(), Options::default()).unwrap();
     assert_eq!(
-        db.read(kurator_storage::KvState::len),
+        db.read(oleaph_storage::KvState::len),
         400,
         "every write durable"
     );
@@ -195,7 +195,7 @@ fn invalid_batches_are_rejected() {
     );
     assert!(
         matches!(
-            db.put("k", vec![0; kurator_wal::MAX_PAYLOAD_LEN]),
+            db.put("k", vec![0; oleaph_wal::MAX_PAYLOAD_LEN]),
             Err(Error::BatchTooLarge)
         ),
         "too large"

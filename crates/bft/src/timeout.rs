@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_consensus::NodeId;
-use kurator_crypto::{Signature, SigningKey};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Signature, SigningKey};
 
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
@@ -16,7 +16,7 @@ use crate::wire::{
 };
 
 /// What a timeout's signature is over, after the domain.
-const TIMEOUT: &[u8] = b"kurator-bft timeout";
+const TIMEOUT: &[u8] = b"oleaph-bft timeout";
 
 /// The bytes a timeout in `view`, by a replica whose newest certificate is
 /// from `high`, signs.
@@ -207,7 +207,7 @@ mod tests {
     use crate::fixture::{DOMAIN, committee, key};
     use std::collections::BTreeMap;
 
-    use kurator_consensus::NodeId;
+    use oleaph_consensus::NodeId;
 
     use super::{Timeout, TimeoutCertificate};
     use crate::committee::Domain;

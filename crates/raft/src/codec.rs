@@ -14,12 +14,12 @@
 //! option(x) = 0 | 1 x
 //! flag      = 0 | 1
 //! payload   = 0 (blank) | 1 command | 2 membership | 3 split
-//! command   = the rest of the record, as `kurator_storage::Command::encode`
+//! command   = the rest of the record, as `oleaph_storage::Command::encode`
 //!             wrote it
-//! split     = the rest of the record, as `kurator_shard::Split::encode`
+//! split     = the rest of the record, as `oleaph_shard::Split::encode`
 //!             wrote it
 //! membership= configs u32 (voters u32 node u64*)* | nodes u32 (node u64 peer)*
-//! peer      = as `kurator_consensus::Peer::encode` writes it
+//! peer      = as `oleaph_consensus::Peer::encode` writes it
 //! meta      = option(log id) | option(log id) | membership
 //!             a snapshot's last entry, its membership's entry, and the
 //!             membership
@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kurator_codec::{DecodeError, Reader};
+use oleaph_codec::{DecodeError, Reader};
 use openraft::EntryPayload;
 
 use crate::config::Entry;
@@ -104,7 +104,7 @@ impl Record {
 }
 
 /// Encodes an entry. A command takes the rest of the output, so an entry
-/// is always last: messages wrap each entry in `kurator_codec::put_bytes`.
+/// is always last: messages wrap each entry in `oleaph_codec::put_bytes`.
 pub(crate) fn put_entry(out: &mut Vec<u8>, entry: &Entry) {
     put_log_id(out, &entry.log_id);
     put_payload(out, &entry.payload);
@@ -288,9 +288,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::{Ipv6Addr, SocketAddr};
 
-    use kurator_codec::{DecodeError, Reader};
-    use kurator_shard::{Epoch, ShardId, Split};
-    use kurator_storage::{Command, WriteBatch};
+    use oleaph_codec::{DecodeError, Reader};
+    use oleaph_shard::{Epoch, ShardId, Split};
+    use oleaph_storage::{Command, WriteBatch};
     use openraft::EntryPayload;
     use proptest::prelude::*;
 

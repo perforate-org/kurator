@@ -13,9 +13,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_client::{Reach, Reply, Request};
-use kurator_meta::{Answer, Ask, Call};
-use kurator_raft::{Connection, Failure, Message, NodeId, Peer, Response, Transport};
+use oleaph_client::{Reach, Reply, Request};
+use oleaph_meta::{Answer, Ask, Call};
+use oleaph_raft::{Connection, Failure, Message, NodeId, Peer, Response, Transport};
 use quinn::crypto::rustls::QuicClientConfig;
 
 use crate::Tokio;
@@ -73,7 +73,7 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The server name sent in the handshake. Peers are known by key, not
 /// name, so it is the same for all.
-const SERVER_NAME: &str = "kurator";
+const SERVER_NAME: &str = "oleaph";
 
 /// Opens [`QuicLink`]s from one endpoint.
 #[derive(Debug, Clone)]

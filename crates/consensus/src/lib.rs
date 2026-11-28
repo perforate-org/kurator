@@ -1,8 +1,8 @@
-//! The boundary between Kurator's replicated shards and the consensus
+//! The boundary between OleaphDB's replicated shards and the consensus
 //! protocol that replicates them.
 //!
 //! Each shard is replicated on a few nodes by a consensus protocol: Raft
-//! today ([`kurator_raft`](https://docs.rs/kurator-raft)), which tolerates
+//! today ([`oleaph_raft`](https://docs.rs/oleaph-raft)), which tolerates
 //! crashes but trusts its leader; a Byzantine fault tolerant protocol
 //! later, as ICP runs one per subnet, so that independent operators can
 //! hold the replicas. Whatever runs underneath, a layer above it, the meta

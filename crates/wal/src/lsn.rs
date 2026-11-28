@@ -45,7 +45,7 @@ impl fmt::Display for Lsn {
 /// so that names sort in log order.
 ///
 /// ```
-/// use kurator_wal::{Lsn, LsnFiles};
+/// use oleaph_wal::{Lsn, LsnFiles};
 ///
 /// const SNAPSHOTS: LsnFiles = LsnFiles::new(".snap");
 /// assert_eq!(SNAPSHOTS.name(Lsn::new(7)), "00000000000000000007.snap");

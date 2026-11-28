@@ -10,9 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use kurator_crypto::{Algorithm, SigningKey};
-use kurator_storage::{Db, Options, Version};
-use kurator_wal::{Integrity, Start, Wal};
+use oleaph_crypto::{Algorithm, SigningKey};
+use oleaph_storage::{Db, Options, Version};
+use oleaph_wal::{Integrity, Start, Wal};
 use proptest as _;
 use tempfile as _;
 
@@ -82,7 +82,7 @@ fn wal_append(c: &mut Criterion) {
 }
 
 fn empty_wal(dir: &std::path::Path, integrity: Integrity) -> Wal {
-    let mut options = kurator_wal::Options::default();
+    let mut options = oleaph_wal::Options::default();
     options.integrity = integrity;
     let ignore = |_, _: &[u8]| Ok::<(), std::convert::Infallible>(());
     Wal::open(dir, options, Start::Oldest, ignore).unwrap().0

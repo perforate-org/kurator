@@ -10,13 +10,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_bft::{Committee, Config, Core, Domain, Journal, Ledger};
-use kurator_client::{Call, Reach as _, Reply, Request};
-use kurator_consensus::{NodeId, Peer, Replicated as _};
-use kurator_crypto::{KeyPurpose, NodeSecret};
-use kurator_net::{BftReplica, Endpoint, Quic, Server, Store, Wiring};
-use kurator_shard::{Shard, ShardId, ShardState};
-use kurator_storage::{Command, KvState, Outcome, WriteBatch};
+use oleaph_bft::{Committee, Config, Core, Domain, Journal, Ledger};
+use oleaph_client::{Call, Reach as _, Reply, Request};
+use oleaph_consensus::{NodeId, Peer, Replicated as _};
+use oleaph_crypto::{KeyPurpose, NodeSecret};
+use oleaph_net::{BftReplica, Endpoint, Quic, Server, Store, Wiring};
+use oleaph_shard::{Shard, ShardId, ShardState};
+use oleaph_storage::{Command, KvState, Outcome, WriteBatch};
 use tempfile::TempDir;
 
 const LOOPBACK: &str = "127.0.0.1:0";
@@ -74,7 +74,7 @@ async fn committee(dir: &TempDir) -> BTreeMap<u64, Node> {
         let node = NodeId::new(id);
         let home = dir.path().join(id.to_string());
         let (journal, recovered) =
-            Journal::open(home.join("bft"), kurator_wal::Options::default()).unwrap();
+            Journal::open(home.join("bft"), oleaph_wal::Options::default()).unwrap();
         let state = ShardState::new(Shard::whole(SHARD), KvState::default());
         let ledger = Ledger::replay(state, &recovered);
         let key = secret(id).signing_key(KeyPurpose::Consensus);
@@ -86,12 +86,8 @@ async fn committee(dir: &TempDir) -> BTreeMap<u64, Node> {
             ledger,
             peers.clone(),
         );
-        let member = kurator_raft::Member::new(node, secret(id));
-        let raft = Arc::new(
-            kurator_raft::openraft::Config::default()
-                .validate()
-                .unwrap(),
-        );
+        let member = oleaph_raft::Member::new(node, secret(id));
+        let raft = Arc::new(oleaph_raft::openraft::Config::default().validate().unwrap());
         let store = Store::open(member, &home, raft, endpoint.transport())
             .await
             .unwrap();

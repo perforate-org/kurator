@@ -6,8 +6,8 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cmp, mem};
 
-use kurator_consensus::NodeId;
-use kurator_crypto::{Signature, SigningKey};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Proposal, prune};
 use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};

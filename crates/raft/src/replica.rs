@@ -6,10 +6,10 @@ use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Instant;
 
-use kurator_consensus::{Duty, Members, Reads, Replicated, Role, Route, Transaction};
-use kurator_metrics::{Exposition, Histogram, Histograms, Label, Values};
-use kurator_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
-use kurator_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
+use oleaph_consensus::{Duty, Members, Reads, Replicated, Role, Route, Transaction};
+use oleaph_metrics::{Exposition, Histogram, Histograms, Label, Values};
+use oleaph_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
+use oleaph_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
 use openraft::raft::ClientWriteResponse;
@@ -25,7 +25,7 @@ use crate::rpc::{Refusal, Request, Response};
 use crate::snapshot::SnapshotBytes;
 use crate::state_machine::StateMachine;
 use crate::types::{LogId, Membership, NodeId, Peer, Progress};
-use kurator_crypto::{KeyPurpose, NodeSecret};
+use oleaph_crypto::{KeyPurpose, NodeSecret};
 
 /// Who a replica is: its id in the cluster and the secret its keys come
 /// from.
@@ -475,7 +475,7 @@ impl<C: Config> Txn<'_, C> {
 fn version(applied: Applied) -> Result<Version> {
     match applied {
         Applied::Data(Outcome::Committed(version) | Outcome::Prepared(version)) => Ok(version),
-        Applied::Data(Outcome::Aborted(abort)) => Err(kurator_storage::Error::from(abort).into()),
+        Applied::Data(Outcome::Aborted(abort)) => Err(oleaph_storage::Error::from(abort).into()),
         Applied::Misrouted(shard) => Err(misrouted(shard)),
         Applied::Split(_) | Applied::Data(_) | _ => {
             Err(Error::Raft("a command applied as a split".into()))
@@ -573,7 +573,7 @@ impl<C: Config> Replicated for Replica<C> {
     /// # Errors
     ///
     /// [`Error::NotLeader`] when this replica is not the leader.
-    async fn begin(&self) -> kurator_consensus::Result<Self::Txn<'_>> {
+    async fn begin(&self) -> oleaph_consensus::Result<Self::Txn<'_>> {
         let read_at = self.read(KvState::version).await?;
         Ok(Txn {
             replica: self,
@@ -593,7 +593,7 @@ impl<C: Config> Replicated for Replica<C> {
     async fn read<R: Send>(
         &self,
         read: impl FnOnce(&KvState) -> R + Send,
-    ) -> kurator_consensus::Result<R> {
+    ) -> oleaph_consensus::Result<R> {
         let _read_from = self
             .raft
             .ensure_linearizable(ReadPolicy::ReadIndex)
@@ -610,7 +610,7 @@ impl<C: Config> Replicated for Replica<C> {
         Ok(self.state.read(|state| read(state.kv())))
     }
 
-    async fn propose(&self, command: Command) -> kurator_consensus::Result<Outcome> {
+    async fn propose(&self, command: Command) -> oleaph_consensus::Result<Outcome> {
         let response = self.replicate(Proposal::new(command)?).await?;
         match response.data {
             Applied::Data(outcome) => Ok(outcome),
@@ -628,7 +628,7 @@ impl<C: Config> Transaction for Txn<'_, C> {
     /// [`Error::Misrouted`] when `key` is not in the shard, and
     /// [`Error::Storage`] when so many writes committed since the
     /// transaction began that its version is forgotten.
-    fn get(&mut self, key: &[u8]) -> kurator_consensus::Result<Option<Vec<u8>>> {
+    fn get(&mut self, key: &[u8]) -> oleaph_consensus::Result<Option<Vec<u8>>> {
         if !self.shard.span().contains(key) {
             return Err(misrouted(self.shard.clone()).into());
         }
@@ -636,7 +636,7 @@ impl<C: Config> Transaction for Txn<'_, C> {
             .replica
             .state
             .read(|state| self.draft.get(state.kv(), key));
-        Ok(value.map_err(kurator_storage::Error::from)?)
+        Ok(value.map_err(oleaph_storage::Error::from)?)
     }
 
     /// The entries between `start` and `end` that the shard holds, in key
@@ -650,13 +650,13 @@ impl<C: Config> Transaction for Txn<'_, C> {
         &mut self,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
-    ) -> kurator_consensus::Result<Vec<KeyValue>> {
+    ) -> oleaph_consensus::Result<Vec<KeyValue>> {
         let (start, end) = self.shard.span().clip(start, end);
         let entries = self
             .replica
             .state
             .read(|state| self.draft.range(state.kv(), start, end));
-        Ok(entries.map_err(kurator_storage::Error::from)?)
+        Ok(entries.map_err(oleaph_storage::Error::from)?)
     }
 
     /// Sets `key` to `value` when the transaction commits.
@@ -675,12 +675,12 @@ impl<C: Config> Transaction for Txn<'_, C> {
     ///
     /// # Errors
     ///
-    /// [`Error::Storage`] with [`kurator_storage::Error::Aborted`] when a
+    /// [`Error::Storage`] with [`oleaph_storage::Error::Aborted`] when a
     /// write after the read version touched what it read: it wrote
     /// nothing, and running it again may succeed. Otherwise as
     /// [`Replica::write`]; [`Error::Misrouted`] means the shard split
     /// before the transaction applied, and a key it touched moved.
-    async fn commit(self) -> kurator_consensus::Result<Version> {
+    async fn commit(self) -> oleaph_consensus::Result<Version> {
         let read_at = self.draft.read_at();
         let Some(transaction) = self.draft.into_transaction() else {
             return Ok(read_at);
@@ -691,34 +691,34 @@ impl<C: Config> Transaction for Txn<'_, C> {
     }
 }
 const LEADER: Values = Values::gauge(
-    "kurator_shard_leader",
+    "oleaph_shard_leader",
     "1 while this node's replica of the shard leads it, 0 otherwise.",
 );
 const TERM: Values = Values::gauge(
-    "kurator_raft_term",
+    "oleaph_raft_term",
     "The Raft term the replica is in; it grows by one an election.",
 );
 const LAST_LOG: Values = Values::gauge(
-    "kurator_raft_last_log_index",
+    "oleaph_raft_last_log_index",
     "The index of the last entry in the replica's log.",
 );
 const APPLIED: Values = Values::gauge(
-    "kurator_raft_applied_index",
+    "oleaph_raft_applied_index",
     "The index of the last entry the replica applied.",
 );
 const FOOTPRINT: Values = Values::gauge(
-    "kurator_shard_footprint_bytes",
+    "oleaph_shard_footprint_bytes",
     "The bytes the shard's keys take with every version they keep: about its snapshot's size.",
 );
 const KEYS: Values = Values::gauge(
-    "kurator_shard_keys",
+    "oleaph_shard_keys",
     "The keys the shard keeps versions of, removed ones included.",
 );
 const SYNCS: Histograms = Histograms::new(
-    "kurator_wal_sync_seconds",
+    "oleaph_wal_sync_seconds",
     "How long each fdatasync of the replica's log took.",
 );
 const COMMITS: Histograms = Histograms::new(
-    "kurator_commit_seconds",
+    "oleaph_commit_seconds",
     "How long each proposal this replica made as the leader took to commit and apply.",
 );

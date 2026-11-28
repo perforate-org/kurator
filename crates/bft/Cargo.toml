@@ -1,6 +1,6 @@
 [package]
-name = "kurator-bft"
-description = "Byzantine fault tolerant consensus for Kurator's shards: two-chain HotStuff with a rotating leader, as a deterministic state machine"
+name = "oleaph-bft"
+description = "Byzantine fault tolerant consensus for OleaphDB's shards: two-chain HotStuff with a rotating leader, as a deterministic state machine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,12 @@ categories.workspace = true
 [dependencies]
 blake3.workspace = true
 futures-channel.workspace = true
-kurator-codec.workspace = true
-kurator-consensus.workspace = true
-kurator-crypto.workspace = true
-kurator-shard.workspace = true
-kurator-storage.workspace = true
-kurator-wal.workspace = true
+oleaph-codec.workspace = true
+oleaph-consensus.workspace = true
+oleaph-crypto.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
+oleaph-wal.workspace = true
 parking_lot.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

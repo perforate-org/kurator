@@ -1,6 +1,6 @@
 //! What can go wrong when a replica is asked to read or write.
 
-use kurator_shard::Shard;
+use oleaph_shard::Shard;
 
 use crate::node::NodeId;
 
@@ -28,9 +28,9 @@ pub enum Error {
         leader: Option<NodeId>,
     },
     /// The command could not be encoded, or a transaction could not read
-    /// or commit: [`kurator_storage::Error::Aborted`] when it aborted.
+    /// or commit: [`oleaph_storage::Error::Aborted`] when it aborted.
     #[error(transparent)]
-    Storage(#[from] kurator_storage::Error),
+    Storage(#[from] oleaph_storage::Error),
     /// The shard does not hold a key the request touches: it split
     /// meanwhile. `shard` is the shard as the replica holds it now.
     #[error("misrouted: the shard is {shard}")]
@@ -62,6 +62,6 @@ impl Error {
     /// succeed.
     #[must_use]
     pub const fn is_aborted(&self) -> bool {
-        matches!(self, Self::Storage(kurator_storage::Error::Aborted(_)))
+        matches!(self, Self::Storage(oleaph_storage::Error::Aborted(_)))
     }
 }

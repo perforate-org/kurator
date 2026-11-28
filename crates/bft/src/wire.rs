@@ -3,9 +3,9 @@
 
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_consensus::NodeId;
-use kurator_crypto::{Algorithm, Signature};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Algorithm, Signature};
 
 use crate::view::View;
 

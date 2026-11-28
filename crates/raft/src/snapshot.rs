@@ -2,10 +2,10 @@
 //! the network.
 //!
 //! ```text
-//! kurator_codec::Format "KRRS", version 4, around:
+//! oleaph_codec::Format "OLRS", version 4, around:
 //! meta             as in crate::codec: the last entry, the membership's
 //!                  entry and the membership with every peer
-//! state            kurator_shard::ShardState::encode: the shard, then its
+//! state            oleaph_shard::ShardState::encode: the shard, then its
 //!                  keys
 //! ```
 //!
@@ -17,9 +17,9 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use kurator_codec::{DecodeError, Format};
-use kurator_shard::ShardState;
-use kurator_wal::sync_dir;
+use oleaph_codec::{DecodeError, Format};
+use oleaph_shard::ShardState;
+use oleaph_wal::sync_dir;
 
 use crate::codec::{meta, put_meta};
 use crate::error::{Error, Result, SnapshotDamage};
@@ -27,7 +27,7 @@ use crate::types::{LeaderId, Membership, SnapshotMeta};
 
 /// Version 2 added peers to the membership, version 3 the readable
 /// versions of each key, version 4 the shard.
-const FORMAT: Format = Format::new(*b"KRRS", 1);
+const FORMAT: Format = Format::new(*b"OLRS", 1);
 const FILE: &str = "snapshot";
 const TEMP_PREFIX: &str = ".snapshot-";
 
@@ -141,9 +141,9 @@ impl SnapshotDir {
 
 #[cfg(test)]
 mod tests {
-    use kurator_codec::{DecodeError, Format};
-    use kurator_shard::ShardState;
-    use kurator_storage::{Command, WriteBatch};
+    use oleaph_codec::{DecodeError, Format};
+    use oleaph_shard::ShardState;
+    use oleaph_storage::{Command, WriteBatch};
 
     use super::{SnapshotBytes, SnapshotDir};
     use crate::error::SnapshotDamage;
@@ -169,7 +169,7 @@ mod tests {
     fn state() -> ShardState {
         let mut state = ShardState::default();
         let _committed = state.apply(
-            kurator_storage::Version::new(1),
+            oleaph_storage::Version::new(1),
             Command::Kv(WriteBatch::new().put("a", "1").put("b", "")),
         );
         state
@@ -203,7 +203,7 @@ mod tests {
             Err(SnapshotDamage::Format(DecodeError::Checksum)),
             "too short"
         );
-        let foreign = Format::new(*b"KRSN", 1)
+        let foreign = Format::new(*b"OLSN", 1)
             .write(Vec::new(), |_| Ok(()))
             .unwrap();
         assert_eq!(

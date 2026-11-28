@@ -5,8 +5,8 @@
 //! accounts always hold the money they started with, and every replica
 //! ends with the same state.
 //!
-//! `KURATOR_SIM_SEEDS=<n>` runs more seeds than the default, and
-//! `KURATOR_SIM_SEED=<seed>` runs just one, to reproduce a failure.
+//! `OLEAPH_SIM_SEEDS=<n>` runs more seeds than the default, and
+//! `OLEAPH_SIM_SEED=<seed>` runs just one, to reproduce a failure.
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,12 +17,12 @@
 use std::time::Duration;
 
 use futures_util::future::join;
-use kurator_client::{Across, Collected, Collector, Coordinator, Error, Transacted};
-use kurator_consensus::Transaction as _;
-use kurator_raft::Txn;
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_sim::{Cluster, Faults, Holdings, Outcome, Rng, Sim};
-use kurator_storage::WriteBatch;
+use oleaph_client::{Across, Collected, Collector, Coordinator, Error, Transacted};
+use oleaph_consensus::Transaction as _;
+use oleaph_raft::Txn;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_sim::{Cluster, Faults, Holdings, Outcome, Rng, Sim};
+use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 const DEFAULT_SEEDS: u64 = 8;
@@ -35,10 +35,10 @@ const SPLIT_AT: u64 = 2;
 const MAX_GAP_MS: u64 = 200;
 
 fn seeds() -> Vec<u64> {
-    if let Some(seed) = env_u64("KURATOR_SIM_SEED") {
+    if let Some(seed) = env_u64("OLEAPH_SIM_SEED") {
         return vec![seed];
     }
-    (0..env_u64("KURATOR_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS)).collect()
+    (0..env_u64("OLEAPH_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS)).collect()
 }
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -55,7 +55,7 @@ fn amount(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes.try_into().expect("an amount"))
 }
 
-fn balance(txn: &mut Txn<'_, Sim>, index: u64) -> kurator_consensus::Result<u64> {
+fn balance(txn: &mut Txn<'_, Sim>, index: u64) -> oleaph_consensus::Result<u64> {
     Ok(txn.get(&account(index))?.map_or(0, |bytes| amount(&bytes)))
 }
 

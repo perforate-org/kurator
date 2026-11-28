@@ -13,10 +13,10 @@
 
 use std::time::Duration;
 
-use kurator_consensus::Replicated as _;
-use kurator_meta::{Meta, MetaError, Placement};
-use kurator_net::{Quic, Store};
-use kurator_shard::{Ceiling, Halves, ShardId};
+use oleaph_consensus::Replicated as _;
+use oleaph_meta::{Meta, MetaError, Placement};
+use oleaph_net::{Quic, Store};
+use oleaph_shard::{Ceiling, Halves, ShardId};
 
 /// How often a node checks the shards it leads.
 pub const EVERY: Duration = Duration::from_secs(10);
@@ -33,7 +33,7 @@ pub enum Unsplit {
     Allocate(MetaError),
     /// The shard refused the split, or this node does not lead it.
     #[error(transparent)]
-    Split(#[from] kurator_raft::Error),
+    Split(#[from] oleaph_raft::Error),
     /// The shard split, but the meta shard did not record a half; the next
     /// heartbeat reports it.
     #[error("split, but not recorded: {0}")]

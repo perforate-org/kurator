@@ -11,12 +11,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use kurator_wal::{Corruption, Error, InvalidFrame, Lsn, Options, Start, TailDamage, Wal};
+use oleaph_wal::{Corruption, Error, InvalidFrame, Lsn, Options, Start, TailDamage, Wal};
 use proptest as _;
 
 type Records = Vec<(u64, Vec<u8>)>;
 
-fn open(dir: &Path, after: u64) -> Result<(Wal, Records, kurator_wal::RecoveryReport), Error> {
+fn open(dir: &Path, after: u64) -> Result<(Wal, Records, oleaph_wal::RecoveryReport), Error> {
     open_with(dir, Options::default(), after)
 }
 
@@ -24,7 +24,7 @@ fn open_with(
     dir: &Path,
     options: Options,
     after: u64,
-) -> Result<(Wal, Records, kurator_wal::RecoveryReport), Error> {
+) -> Result<(Wal, Records, oleaph_wal::RecoveryReport), Error> {
     let mut records = Vec::new();
     let (wal, report) = Wal::open(
         dir,
@@ -300,7 +300,7 @@ fn replay_errors_stop_opening() {
 fn oversized_payloads_are_rejected_before_writing() {
     let dir = tempfile::tempdir().unwrap();
     let (mut wal, _, _) = open(dir.path(), 0).unwrap();
-    let huge = vec![0_u8; kurator_wal::MAX_PAYLOAD_LEN + 1];
+    let huge = vec![0_u8; oleaph_wal::MAX_PAYLOAD_LEN + 1];
     assert!(
         matches!(wal.append_batch([huge]), Err(Error::PayloadTooLarge { .. })),
         "rejected"

@@ -7,7 +7,7 @@
 //! member <id> <addr> <transport key> <consensus key> <operator>
 //! ```
 //!
-//! Keys are as `kurator key` prints them. An operator is one word, and no
+//! Keys are as `oleaph key` prints them. An operator is one word, and no
 //! operator runs two members: a committee tolerates a third of its
 //! members failing only when they fail apart.
 //!
@@ -18,12 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_bft::{Committee, Config, Core, Domain, Journal, Ledger};
-use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
-use kurator_net::{BftReplica, Quic, Wiring};
-use kurator_raft::{NodeId, Peer};
-use kurator_shard::{Shard, ShardId, ShardState};
-use kurator_storage::KvState;
+use oleaph_bft::{Committee, Config, Core, Domain, Journal, Ledger};
+use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_net::{BftReplica, Quic, Wiring};
+use oleaph_raft::{NodeId, Peer};
+use oleaph_shard::{Shard, ShardId, ShardState};
+use oleaph_storage::KvState;
 
 use crate::NodeError;
 use crate::args::{addr, key, node_id};
@@ -237,7 +237,7 @@ impl Seat<'_> {
             committee,
             peers,
         } = self.charter;
-        let (journal, recovered) = Journal::open(dir, kurator_wal::Options::default())?;
+        let (journal, recovered) = Journal::open(dir, oleaph_wal::Options::default())?;
         let state = ShardState::new(Shard::whole(shard), KvState::default());
         let ledger = Ledger::replay(state, &recovered);
         let domain = Domain::of(shard, &committee);
@@ -249,9 +249,9 @@ impl Seat<'_> {
 
 #[cfg(test)]
 mod tests {
-    use kurator_crypto::{KeyPurpose, NodeSecret};
-    use kurator_raft::NodeId;
-    use kurator_shard::ShardId;
+    use oleaph_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_raft::NodeId;
+    use oleaph_shard::ShardId;
 
     use super::{Charter, CharterError, Problem};
 

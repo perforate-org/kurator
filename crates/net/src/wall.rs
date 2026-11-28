@@ -4,8 +4,8 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime};
 
-use kurator_client::Time;
-use kurator_storage::Deadline;
+use oleaph_client::Time;
+use oleaph_storage::Deadline;
 
 /// The wall clock, in milliseconds since the Unix epoch, and Tokio's
 /// timers.
@@ -42,7 +42,7 @@ impl Time for Wall {
 mod tests {
     use std::time::Duration;
 
-    use kurator_client::Time as _;
+    use oleaph_client::Time as _;
 
     use super::Wall;
 

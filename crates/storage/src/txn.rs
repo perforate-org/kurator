@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::ops::Bound;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 
 use crate::batch::WriteBatch;
 use crate::error::{Error, Result};
@@ -246,7 +246,7 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::{bound, put_bound};
-    use kurator_codec::Reader;
+    use oleaph_codec::Reader;
 
     /// Decoding a bound never panics, and a decoded bound encodes back to
     /// exactly the bytes it was read from.

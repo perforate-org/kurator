@@ -22,7 +22,7 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// read from, so the same draft works on either.
 ///
 /// ```
-/// use kurator_storage::{Command, Draft, KvState, Version, WriteBatch};
+/// use oleaph_storage::{Command, Draft, KvState, Version, WriteBatch};
 ///
 /// let mut state = KvState::default();
 /// let _ = state.apply(Version::new(1), Command::Kv(WriteBatch::new().put("n", "1")));
@@ -33,7 +33,7 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// assert_eq!(draft.get(&state, b"n")?, Some(b"2".to_vec()), "its own write");
 /// let transaction = draft.into_transaction().expect("it writes");
 /// assert_eq!(transaction.read_at(), Version::new(1));
-/// # Ok::<(), kurator_storage::Unreadable>(())
+/// # Ok::<(), oleaph_storage::Unreadable>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {

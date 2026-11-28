@@ -1,4 +1,10 @@
-# Kurator
+# OleaphDB
+
+速さも信頼も、データごとに選べるデータベース。
+
+Oleaph(オリーフ)は Gleaph の G を閉じて円にした名前で、P2P のノードの輪と、
+すべてのデータモデルを包む円を表す。Oleaph はネットワークとエコシステム全体、
+OleaphDB はそのデータベース本体を指す。
 
 独立運営者による P2P マルチモデルデータベース(作業中)。
 
@@ -14,7 +20,7 @@
 - Phase 2: 実ネットワーク。QUIC の永続接続でRaft RPC・ログ複製・スナップショット転送を
   独自バイナリ符号化で流し、TLS 1.3 の Raw Public Key(Ed25519)で相互認証する。
   メンバー変更は learner として追いつかせてから voter に昇格し、ノード除去もできる。
-  QUIC とシミュレーションは同じ `kurator_raft::Transport` 境界で差し替わる。
+  QUIC とシミュレーションは同じ `oleaph_raft::Transport` 境界で差し替わる。
 - Phase 3: MVCC と単一シャードの直列化可能なトランザクション。各コマンドは版
   (単一ノードでは LSN、レプリカでは Raft エントリの index)で適用され、各キーは
   保持期間(既定 4096 版)ぶんの履歴を持つ。トランザクションは 1 つの版を読み、
@@ -75,21 +81,21 @@
 | `crates/client` | クライアント: 通信形式(`Request`・`Call`・`Reply`)とノード側の `answer`、シャード地図とリーダー追従で経路を決める `Client`、シャード横断トランザクションの調整役 `Coordinator` と決定の回収 `Collector`(`Shards` 越しに動くので sim も同じコードを使う) |
 | `crates/bft` | BFT 合意の試作: 2 段階確定の HotStuff(ビューごとにリーダー交代、タイムアウト証明)を、時計も I/O も持たない決定論的な状態機械 `Core` として実装。投票は、そのステップの記録(ブロック・安全性の状態・確定位置)を `Journal` が WAL に書いてからでないと送れず、再起動時は `Core::recover` で同じビューに二度投票しない。確定したブロックのコマンドは `Ledger` が `ShardState` に適用する。`Replica` がこれらをまとめて `Replicated` を実装する(送受信とタイマーは `Host` トレイトの裏)。コマンドは受けたレプリカから次に提案するリーダーへ転送し、決めることがないあいだリーダーは提案しない(空ブロックで回り続けない)。1000 ブロックごとに状態を 1 MiB のチャンクに分けたマニフェストのルートで名づけ、各レプリカが合意鍵で署名したものがクォーラム集まるとチェックポイントの証明になる(自分の状態だけ違うレプリカは止まる)。各レプリカはチェックポイントの状態を `<journal>/states/` に書き、証明されたらそれより前のジャーナルとブロックを捨て、再起動時はその状態から再生する。悪意あるノード(沈黙・二重提案・二重投票・なりすまし)と、同期前の書き込みを失うクラッシュを含むシミュレーションで検査 |
 | `crates/raft` | Raft ログストア・状態機械・スナップショット・`Replica`、シャードごとのレプリカを束ねる `Store` |
-| `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱、分割、レプリカ移動。シャード横断トランザクションは `kurator-client` の調整役で動かす) |
+| `crates/sim` | 決定論的シミュレーション(シード付きネットワークと障害、参加・離脱、分割、レプリカ移動。シャード横断トランザクションは `oleaph-client` の調整役で動かす) |
 | `crates/net` | QUIC トランスポート(quinn、Raw Public Key の相互認証。署名方式は鍵のアルゴリズムに従う。鍵交換は耐量子のハイブリッド X25519MLKEM768 のみ、暗号は aws-lc-rs)。feature `bft` で BFT レプリカも同じ接続で運ぶ(既定はオフなので Raft だけなら BFT に依存しない) |
-| `crates/node` | `kurator` バイナリ: ノード 1 つ(全シャードのレプリカ)をプロセスとして動かすコンソール |
+| `crates/node` | `oleaph` バイナリ: ノード 1 つ(全シャードのレプリカ)をプロセスとして動かすコンソール |
 
-シミュレーションは既定で 12 シード。`KURATOR_SIM_SEEDS=500 cargo test -p kurator-sim --release`
-で増やし、失敗したシードは `KURATOR_SIM_SEED=<seed>` で再現する。
+シミュレーションは既定で 12 シード。`OLEAPH_SIM_SEEDS=500 cargo test -p oleaph-sim --release`
+で増やし、失敗したシードは `OLEAPH_SIM_SEED=<seed>` で再現する。
 
 ## ローカルで 3 ノードを動かす
 
 各ノードはディレクトリに秘密 `node.secret` を持ち、そこから WAL 署名鍵と通信鍵を
-用途別に導出する。`kurator key` は秘密を作り(既にあれば読み)、通信鍵の公開鍵を表示する。
+用途別に導出する。`oleaph key` は秘密を作り(既にあれば読み)、通信鍵の公開鍵を表示する。
 
 ```sh
-cargo build -p kurator-node
-K=target/debug/kurator
+cargo build -p oleaph-node
+K=target/debug/oleaph
 K1=$($K key n1); K2=$($K key n2); K3=$($K key n3)
 P1=1=127.0.0.1:7001,$K1; P2=2=127.0.0.1:7002,$K2; P3=3=127.0.0.1:7003,$K3
 
@@ -129,7 +135,7 @@ $K client --dir client --peer $P1 put apple red put melon green
 $K client --dir client --peer $P1 get apple get melon
 ```
 
-`kurator client` は並べた操作(`get <key>`・`put <key> <value>`・`del <key>`)を
+`oleaph client` は並べた操作(`get <key>`・`put <key> <value>`・`del <key>`)を
 1 つのトランザクションとして実行する。シャードをまたぐときは二相コミットになる。
 `--peer` のノードからシャード地図を受け取り、各シャードのリーダーへ直接送る。
 `committed at <版>` なら書き込みは確定、`aborted` は競合なので再実行すればよい。
@@ -141,7 +147,7 @@ $K client --dir client --peer $P1 get apple get melon
 
 BFT シャードは静的な委員会ファイル(charter)で決める。全メンバーに同じファイルを配り、
 `--bft <file>` で起動する(複数可)。委員会の変更はまだできないので、変えるときは
-全メンバーで同時に差し替える。合意鍵は `kurator key <dir> --consensus` で表示する。
+全メンバーで同時に差し替える。合意鍵は `oleaph key <dir> --consensus` で表示する。
 
 ```text
 shard 40
@@ -153,7 +159,7 @@ member 4 127.0.0.1:7004 <通信鍵> <合意鍵> dave
 
 1 人の運営者が 2 つのメンバーを持つことはできない(4 台なら 1 台までの故障・不正に耐える)。
 ジャーナルは `<dir>/bft/<shard>/` に置かれる。シャード ID は Raft のシャードと重ならない
-値を選ぶ。登録簿にはまだ載らないので、`kurator client` からは届かない(クライアント経路で
+値を選ぶ。登録簿にはまだ載らないので、`oleaph client` からは届かない(クライアント経路で
 シャード ID を指定すれば読み書きできる)。
 
 開発の決まりと品質ゲートは [CLAUDE.md](CLAUDE.md) を参照。

@@ -12,13 +12,13 @@ use std::num::NonZeroU64;
 
 use std::ops::Bound::Unbounded;
 
-use kurator_client::Transacted;
-use kurator_consensus::Transaction as _;
-use kurator_raft::NodeId;
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_shard::{Ceiling, ShardId};
-use kurator_sim::{Cluster, Faults, Holdings, Outcome};
-use kurator_storage::{Version, WriteBatch};
+use oleaph_client::Transacted;
+use oleaph_consensus::Transaction as _;
+use oleaph_raft::NodeId;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_shard::{Ceiling, ShardId};
+use oleaph_sim::{Cluster, Faults, Holdings, Outcome};
+use oleaph_storage::{Version, WriteBatch};
 use openraft_rt_sim::SimRuntime;
 
 /// Writes `key-<n>` for every `n` in `range`; returns the keys
@@ -218,10 +218,7 @@ fn a_transaction_reads_only_the_keys_of_its_shard() {
         expected.sort();
         assert_eq!(keys, expected, "the first shard's keys and its own write");
         assert!(
-            matches!(
-                beyond,
-                Some(Err(kurator_consensus::Error::Misrouted { .. }))
-            ),
+            matches!(beyond, Some(Err(oleaph_consensus::Error::Misrouted { .. }))),
             "a key of the other shard: {beyond:?}"
         );
         cluster.shutdown().await.unwrap();

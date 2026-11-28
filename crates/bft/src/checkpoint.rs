@@ -18,9 +18,9 @@ use std::fmt;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_consensus::NodeId;
-use kurator_crypto::{Signature, SigningKey};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Signature, SigningKey};
 
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
@@ -28,7 +28,7 @@ use crate::vote::{BlockId, check};
 use crate::wire::{put_count, put_node, put_signature, read_count, read_node, read_signature};
 
 /// What a checkpoint share's signature is over, after the domain.
-const SHARE: &[u8] = b"kurator-bft checkpoint";
+const SHARE: &[u8] = b"oleaph-bft checkpoint";
 
 /// How many heights past the last certified one a replica keeps each
 /// member's shares for, the lowest first: a faulty member cannot fill its
@@ -445,8 +445,8 @@ impl Tally {
 mod tests {
     use std::num::NonZeroU64;
 
-    use kurator_codec::Reader;
-    use kurator_consensus::NodeId;
+    use oleaph_codec::Reader;
+    use oleaph_consensus::NodeId;
 
     use super::{
         Checkpoint, CheckpointCertificate, Height, Interval, Own, Share, StateRoot, Tally, Verdict,

@@ -1,10 +1,10 @@
-# Kurator: rules for contributors and agents
+# OleaphDB: rules for contributors and agents
 
 日本語でやりとりする。コードとドキュメントのコメントは英語。
 
 ## Design principles
 
-- DRY: one definition per rule or format (e.g. `kurator_wal::LsnFiles` names every
+- DRY: one definition per rule or format (e.g. `oleaph_wal::LsnFiles` names every
   LSN-numbered file).
 - Behaviour lives in types: enums, newtypes and typestates, not `bool` or strings
   (`Health`, `Place`, `TailDamage`, `Encoded`). `max-struct-bools = 0` and

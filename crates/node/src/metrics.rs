@@ -9,7 +9,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use kurator_net::Store;
+use oleaph_net::Store;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 

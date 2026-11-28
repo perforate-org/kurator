@@ -3,7 +3,7 @@
 //! File `<applied lsn as 20 digits>.snap`:
 //!
 //! ```text
-//! kurator_codec::Format "KRSN", version 2, around:
+//! oleaph_codec::Format "OLSN", version 2, around:
 //! applied lsn u64
 //! state           KvState::encode: every key with its readable versions
 //! ```
@@ -16,15 +16,15 @@ use std::fs;
 use std::io::{self, BufWriter, Write as _};
 use std::path::PathBuf;
 
-use kurator_wal::{Lsn, LsnFiles, sync_dir};
+use oleaph_wal::{Lsn, LsnFiles, sync_dir};
 
-use kurator_codec::{DecodeError, Format};
+use oleaph_codec::{DecodeError, Format};
 
 use crate::error::{Error, Result, SnapshotDamage};
 use crate::state::{KvState, LoggedState};
 
 /// Version 2 keeps every readable version of each key.
-const FORMAT: Format = Format::new(*b"KRSN", 1);
+const FORMAT: Format = Format::new(*b"OLSN", 1);
 const FILES: LsnFiles = LsnFiles::new(".snap");
 const TEMP_PREFIX: &str = ".snapshot-";
 
@@ -130,14 +130,14 @@ fn decode(data: &[u8]) -> Result<LoggedState, DecodeError> {
 mod tests {
     use std::fs;
 
-    use kurator_codec::DecodeError;
+    use oleaph_codec::DecodeError;
 
     use super::Snapshots;
     use crate::batch::WriteBatch;
     use crate::command::Command;
     use crate::error::{Error, SnapshotDamage};
     use crate::state::LoggedState;
-    use kurator_wal::Lsn;
+    use oleaph_wal::Lsn;
 
     fn state(lsn: u64) -> LoggedState {
         let mut state = LoggedState::default();
