@@ -569,3 +569,85 @@ fn a_node_runs_the_bft_shards_its_charters_seat_it_in() {
     assert!(dir.path().join("bft/40").is_dir(), "its journal");
     assert!(Console::start(&args, dir.path()).quit().is_empty(), "again");
 }
+
+#[test]
+fn a_charter_makes_a_bft_namespace_clients_are_routed_to() {
+    let (dir, client_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (transport, consensus) = (key_of(dir.path()), consensus_key_of(dir.path()));
+    let client_key = key_of(client_dir.path());
+    let charter = dir.path().join("charter");
+    std::fs::write(
+        &charter,
+        format!(
+            "shard 40\nnamespace 7 ledger\nmember 1 127.0.0.1:1 {transport} {consensus} alice\n"
+        ),
+    )
+    .unwrap();
+    let charter = charter.to_str().unwrap();
+    let mut console = Console::start(
+        &[
+            "--id",
+            "1",
+            "--listen",
+            "127.0.0.1:0",
+            "--client",
+            &client_key,
+            "--bft",
+            charter,
+            "--found",
+        ],
+        dir.path(),
+    );
+    let started = Instant::now();
+    while !console.ask("put a plain", 1).starts_with("ok at") {
+        assert!(started.elapsed() < Duration::from_secs(20), "no leader");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        console.ask("namespace audit bft", 1),
+        "error: a bft namespace is made by its committee's charter: `namespace <id> <name>`",
+        "not from the console"
+    );
+    // The meta shard and the first, each with its one voter.
+    let members = console.ask("members", 4);
+    let addr = members
+        .lines()
+        .nth(1)
+        .and_then(|voter| voter.split_whitespace().nth(2))
+        .unwrap_or_else(|| panic!("an address: {members}"))
+        .to_owned();
+    let node_key = key_of(dir.path());
+    let peer = format!("1={addr},{node_key}");
+    let client_dir = client_dir.path().to_str().unwrap();
+    let ledger = |args: &[&str]| {
+        let common = [
+            "--dir",
+            client_dir,
+            "--peer",
+            &peer,
+            "--namespace",
+            "ledger",
+        ];
+        client(&[common.as_slice(), args].concat())
+    };
+    // The node records the namespace in the meta shard once it leads it.
+    let mut wrote = ledger(&["put", "a", "chartered"]);
+    while !wrote.1.starts_with("committed at") {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no commit: {wrote:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        wrote = ledger(&["put", "a", "chartered"]);
+    }
+    let (read, shown) = ledger(&["get", "a"]);
+    assert!(read, "reads: {shown}");
+    assert_eq!(shown.lines().next(), Some("a = chartered"), "{shown}");
+    assert_eq!(console.ask("get a", 1), "plain", "apart from the default");
+    assert_eq!(
+        console.ask("namespaces", 2),
+        "default ns0 cft\nledger ns7 bft",
+        "listed"
+    );
+    assert!(console.quit().is_empty(), "nothing more");
+}

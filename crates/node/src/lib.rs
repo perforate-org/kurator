@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_meta::Chartered;
 use oleaph_net::{BftReplica, Endpoint, NetError, Quic, Server, Store};
 use oleaph_raft::{Backup, Member, NodeId, Peer};
 use oleaph_shard::ShardId;
@@ -34,6 +35,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use crate::args::{Settings, Start};
 use crate::charter::{Charter, CharterError};
 use crate::console::{Reply, execute};
+use crate::namespace::Uncreated;
 
 /// Why a node stopped.
 #[derive(Debug, thiserror::Error)]
@@ -92,7 +94,7 @@ pub fn key(dir: &Path, purpose: KeyPurpose) -> io::Result<VerifyingKey> {
 /// When the node cannot start, or the console fails.
 pub async fn run(settings: Settings) -> Result<(), NodeError> {
     let (secret, _) = secret::load_or_create(settings.dir())?;
-    let (store, quic, _server) = open(&settings, secret).await?;
+    let (store, quic, _server, mut unrecorded) = open(&settings, secret).await?;
     let mut out = tokio::io::stdout();
     let scrapes = metrics::Endpoint::bind(settings.metrics()).await?;
     out.write_all(b"ready; type a command, or anything else for help\n")
@@ -105,6 +107,7 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
     let mut beats = tokio::time::interval(report::EVERY);
     let mut sweeps = tokio::time::interval(sweep::EVERY);
     let mut checks = tokio::time::interval(split::EVERY);
+    let mut records = tokio::time::interval(report::EVERY);
     loop {
         let line = tokio::select! {
             line = lines.next_line() => line?,
@@ -130,6 +133,10 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
                 drop(split::grow(&store, &quic, settings.ceiling()).await);
                 continue;
             }
+            _ = records.tick(), if !unrecorded.is_empty() => {
+                unrecorded = Box::pin(record(&store, &quic, unrecorded)).await?;
+                continue;
+            }
         };
         let Some(line) = line else {
             break;
@@ -146,7 +153,36 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
     Ok(())
 }
 
-async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, Server), NodeError> {
+/// Records each namespace of `chartered` in the meta shard, and returns
+/// those to try again: the ones the meta shard could not be asked about,
+/// from here or yet. A charter the meta shard refuses is told on stderr.
+async fn record(
+    store: &Store,
+    quic: &Quic,
+    chartered: Vec<Chartered>,
+) -> io::Result<Vec<Chartered>> {
+    let mut left = Vec::new();
+    for namespace in chartered {
+        match namespace::charter(store, quic, namespace.clone()).await {
+            Ok(_) => {}
+            Err(error @ (Uncreated::Taken(_) | Uncreated::Spent)) => {
+                let told = format!(
+                    "oleaph: the namespace {} of a charter is not recorded: {error}\n",
+                    namespace.name()
+                );
+                tokio::io::stderr().write_all(told.as_bytes()).await?;
+            }
+            Err(_) => left.push(namespace),
+        }
+    }
+    Ok(left)
+}
+
+/// The node's store, its transport, its server, and the namespaces its
+/// charters make, which the meta shard is yet to record.
+type Opened = (Store, Quic, Server, Vec<Chartered>);
+
+async fn open(settings: &Settings, secret: NodeSecret) -> Result<Opened, NodeError> {
     let member = Member::new(settings.id(), secret);
     let bootstrap: BTreeMap<_, _> = settings
         .peers()
@@ -155,11 +191,14 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         .collect();
     let endpoint = Endpoint::bind(settings.listen(), member.secret(), bootstrap)?
         .with_clients(settings.clients().to_vec());
-    let bft = settings
-        .charters()
-        .iter()
-        .map(|path| bft(path, settings, member.secret(), endpoint.transport()))
-        .collect::<Result<_, _>>()?;
+    let mut bft = BTreeMap::new();
+    let mut chartered = Vec::new();
+    for path in settings.charters() {
+        let (shard, replica, namespace) =
+            self::bft(path, settings, member.secret(), endpoint.transport())?;
+        drop(bft.insert(shard, replica));
+        chartered.extend(namespace);
+    }
     let endpoint = endpoint.with_bft(bft);
     let me = member.peer(endpoint.local_addr()?);
     let config = Arc::new(oleaph_raft::openraft::Config::default().validate()?);
@@ -184,17 +223,18 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         }
         Start::Wait | Start::Restore(_) => {}
     }
-    Ok((store, quic, server))
+    Ok((store, quic, server, chartered))
 }
 
 /// Starts this node's replica of the BFT shard the charter at `path`
-/// names, reaching the committee through `quic`.
+/// names, reaching the committee through `quic`. Returns the shard, the
+/// replica, and the namespace the charter makes, if it makes one.
 fn bft(
     path: &Path,
     settings: &Settings,
     secret: &NodeSecret,
     quic: Quic,
-) -> Result<(ShardId, Arc<BftReplica>), NodeError> {
+) -> Result<(ShardId, Arc<BftReplica>, Option<Chartered>), NodeError> {
     let charter = |error| NodeError::Charter {
         path: path.to_owned(),
         error,
@@ -203,8 +243,9 @@ fn bft(
     let parsed = Charter::parse(&text).map_err(charter)?;
     let shard = parsed.shard();
     let dir = settings.dir().join("bft").join(shard.get().to_string());
+    let chartered = parsed.chartered();
     let seat = parsed.seat(settings.id(), secret).map_err(charter)?;
-    Ok((shard, seat.start(&dir, quic)?))
+    Ok((shard, seat.start(&dir, quic)?, chartered))
 }
 
 /// Plants the backup in `from` in the node directory `dir`, with `node`,

@@ -14,7 +14,8 @@
 //! get <key> [in <namespace>]           a linearizable read through the leader
 //! split <key> [in <namespace>]         split the shard that holds <key> there, under an id the meta shard allocates
 //! shards                   every shard the meta shard records, with its span, epoch, namespace and replicas
-//! namespace <name> cft     make a namespace whose shards are crash fault tolerant, on the meta shard's voters
+//! namespace <name> cft     make a namespace whose shards are crash fault tolerant, on the meta shard's voters;
+//!                          a bft one is made by its committee's charter
 //! namespaces               every namespace by name, with its id and assurance
 //! status                   role, term, leader and log positions, by shard
 //! members                  voters and learners with their peers, by shard

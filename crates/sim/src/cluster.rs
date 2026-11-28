@@ -2,7 +2,7 @@
 //! network, and what a test drives: writes, splits, crashes, restarts,
 //! partitions, and nodes joining and leaving.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -12,9 +12,7 @@ use std::time::Duration;
 use oleaph_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
 use oleaph_consensus::{Duty, Replicated as _, Route, Transaction as _};
 use oleaph_crypto::NodeSecret;
-use oleaph_meta::{
-    Assurance, Created, MetaError, NamespaceName, Placement, Registry, Reported, allocate,
-};
+use oleaph_meta::{Created, MetaError, NamespaceName, Placement, Registry, Reported, allocate};
 use oleaph_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
 use oleaph_raft::{
     Error, Member, Membership, NodeId, Peer, Progress, Replica, Role, Status, Store, Txn,
@@ -324,7 +322,7 @@ impl Cluster {
         let created = self
             .on_leader(ShardId::META, |meta| {
                 let replicas = &replicas;
-                async move { oleaph_meta::create(&meta, name, Assurance::Cft, replicas, 0).await }
+                async move { oleaph_meta::create(&meta, name, replicas, 0).await }
             })
             .await?;
         let Created::Founded(shard) = created else {
@@ -334,6 +332,32 @@ impl Cluster {
         store.found_shard(shard.clone(), voters).await.ok()?;
         self.adopt().await;
         Some(shard)
+    }
+
+    /// Records the Byzantine fault tolerant namespace `name`, with id
+    /// `namespace` and its one shard `shard` decided by the meta shard's
+    /// voters, as a charter's member does. What the meta shard made of
+    /// it, or `None` when no leader answered.
+    pub async fn charter_namespace(
+        &self,
+        name: &NamespaceName,
+        namespace: NamespaceId,
+        shard: ShardId,
+    ) -> Option<Created> {
+        let members = self.leader_replica(ShardId::META)?.members();
+        let voters: BTreeSet<NodeId> = members
+            .peers()
+            .map(|(id, _)| id)
+            .filter(|id| members.votes(*id))
+            .collect();
+        let created = self
+            .on_leader(ShardId::META, |meta| {
+                let voters = &voters;
+                async move { oleaph_meta::charter(&meta, name, namespace, shard, voters).await }
+            })
+            .await?;
+        self.adopt().await;
+        Some(created)
     }
 
     /// Writes `batch` through `id` alone, without following leader hints.

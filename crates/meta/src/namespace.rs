@@ -91,16 +91,24 @@ pub enum Assurance {
     /// replicas one operator runs, and which survives fewer than half of
     /// them stopping, but trusts them all.
     Cft,
+    /// Byzantine fault tolerant, for trust: every shard is a committee of
+    /// replicas that as many operators run, deciding by HotStuff-2, which
+    /// survives fewer than a third of them lying.
+    Bft,
 }
 
 /// The tag of [`Assurance::Cft`].
 const CFT: u8 = 1;
+
+/// The tag of [`Assurance::Bft`].
+const BFT: u8 = 2;
 
 impl Assurance {
     /// Writes the assurance as one byte, its tag.
     pub(crate) fn encode(self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
         let tag = match self {
             Self::Cft => CFT,
+            Self::Bft => BFT,
         };
         out.write_all(&[tag])
     }
@@ -110,15 +118,16 @@ impl Assurance {
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         match reader.read::<u8>()? {
             CFT => Ok(Self::Cft),
+            BFT => Ok(Self::Bft),
             other => Err(DecodeError::Tag(other)),
         }
     }
 }
 
-/// An assurance that is not `cft`.
+/// An assurance that is neither `cft` nor `bft`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-#[error("the assurance is `cft`")]
+#[error("the assurance is `cft` or `bft`")]
 pub struct BadAssurance;
 
 impl FromStr for Assurance {
@@ -127,6 +136,7 @@ impl FromStr for Assurance {
     fn from_str(name: &str) -> Result<Self, BadAssurance> {
         match name {
             "cft" => Ok(Self::Cft),
+            "bft" => Ok(Self::Bft),
             _ => Err(BadAssurance),
         }
     }
@@ -136,6 +146,7 @@ impl fmt::Display for Assurance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Cft => "cft",
+            Self::Bft => "bft",
         })
     }
 }
@@ -217,8 +228,13 @@ pub(crate) mod tests {
         "[a-z]([a-z0-9-]{0,61}[a-z0-9])?".prop_map(|name| name.parse().unwrap())
     }
 
+    pub(crate) fn assurances() -> impl Strategy<Value = Assurance> {
+        prop_oneof![Just(Assurance::Cft), Just(Assurance::Bft)]
+    }
+
     pub(crate) fn namespaces() -> impl Strategy<Value = Namespace> {
-        any::<u32>().prop_map(|id| Namespace::new(NamespaceId::new(id), Assurance::Cft))
+        (any::<u32>(), assurances())
+            .prop_map(|(id, assurance)| Namespace::new(NamespaceId::new(id), assurance))
     }
 
     #[test]
@@ -247,9 +263,19 @@ pub(crate) mod tests {
 
     #[test]
     fn assurances_read_and_show() {
-        assert_eq!("cft".parse(), Ok(Assurance::Cft), "cft");
-        assert_eq!("raft".parse::<Assurance>(), Err(BadAssurance), "raft");
-        assert_eq!(Assurance::Cft.to_string(), "cft", "display");
+        for assurance in [Assurance::Cft, Assurance::Bft] {
+            let name = assurance.to_string();
+            assert_eq!(name.parse(), Ok(assurance), "{name}");
+        }
+        assert_eq!(Assurance::Cft.to_string(), "cft", "cft");
+        assert_eq!(Assurance::Bft.to_string(), "bft", "bft");
+        for algorithm in ["raft", "hotstuff", "CFT", ""] {
+            assert_eq!(
+                algorithm.parse::<Assurance>(),
+                Err(BadAssurance),
+                "{algorithm}"
+            );
+        }
     }
 
     #[test]

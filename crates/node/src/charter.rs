@@ -4,8 +4,16 @@
 //! ```text
 //! # a comment
 //! shard <id>
+//! namespace <id> <name>
 //! member <id> <addr> <transport key> <consensus key> <operator>
 //! ```
+//!
+//! A charter with a `namespace` line makes a Byzantine fault tolerant
+//! namespace of that id and name, which the shard holds all of; a member
+//! that holds a replica of the meta shard records it there, so that
+//! clients find it. The meta shard takes the ids only if it never handed
+//! them out, so pick them above the ones in use. Without the line, the
+//! shard is a shard of the default namespace that no client is routed to.
 //!
 //! Keys are as `oleaph key` prints them. An operator is one word, and no
 //! operator runs two members: a committee tolerates a third of its
@@ -20,6 +28,7 @@ use std::sync::Arc;
 
 use oleaph_bft::{Committee, Config, Core, Domain, Journal, Ledger};
 use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_meta::{Chartered, NamespaceName};
 use oleaph_net::{BftReplica, Quic, Wiring};
 use oleaph_raft::{NodeId, Peer};
 use oleaph_shard::{NamespaceId, Shard, ShardId, ShardState};
@@ -32,6 +41,7 @@ use crate::args::{addr, key, node_id};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Charter {
     shard: ShardId,
+    namespace: Option<(NamespaceId, NamespaceName)>,
     committee: Committee,
     peers: BTreeMap<NodeId, Peer>,
 }
@@ -66,17 +76,21 @@ pub enum CharterError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Problem {
-    /// A line that is neither a shard's nor a member's.
+    /// A line that is not a shard's, a namespace's or a member's.
     #[error(
-        "expected `shard <id>` or `member <id> <addr> <transport key> <consensus key> <operator>`"
+        "expected `shard <id>`, `namespace <id> <name>` or \
+         `member <id> <addr> <transport key> <consensus key> <operator>`"
     )]
     Unknown,
-    /// A shard or member line whose fields do not read.
+    /// A shard, namespace or member line whose fields do not read.
     #[error("cannot read it")]
     Unreadable,
     /// A second shard line.
     #[error("a charter names one shard")]
     SecondShard,
+    /// A second namespace line.
+    #[error("a charter names one namespace")]
+    SecondNamespace,
     /// A member named twice.
     #[error("{0} is a member already")]
     SameNode(NodeId),
@@ -97,6 +111,7 @@ struct Line {
 #[derive(Default)]
 struct Draft {
     shard: Option<ShardId>,
+    namespace: Option<(NamespaceId, NamespaceName)>,
     voters: BTreeMap<NodeId, VerifyingKey>,
     peers: BTreeMap<NodeId, Peer>,
     operators: BTreeSet<String>,
@@ -114,6 +129,14 @@ impl Draft {
                     None => Ok(()),
                 }
             }
+            ["namespace", id, name] => {
+                let id = id.parse().map_err(|_| Problem::Unreadable)?;
+                let name = name.parse().map_err(|_| Problem::Unreadable)?;
+                match self.namespace.replace((NamespaceId::new(id), name)) {
+                    Some(_) => Err(Problem::SecondNamespace),
+                    None => Ok(()),
+                }
+            }
             ["member", fields @ ..] => self.seat(member(fields).ok_or(Problem::Unreadable)?),
             _ => Err(Problem::Unknown),
         }
@@ -123,6 +146,7 @@ impl Draft {
     fn finish(self) -> Result<Charter, CharterError> {
         Ok(Charter {
             shard: self.shard.ok_or(CharterError::NoShard)?,
+            namespace: self.namespace,
             committee: Committee::new(self.voters).ok_or(CharterError::NoMembers)?,
             peers: self.peers,
         })
@@ -177,6 +201,15 @@ impl Charter {
     #[must_use]
     pub const fn shard(&self) -> ShardId {
         self.shard
+    }
+
+    /// The namespace the shard holds all of, for the meta shard to
+    /// record, if the charter names one.
+    #[must_use]
+    pub fn chartered(&self) -> Option<Chartered> {
+        let (namespace, name) = self.namespace.clone()?;
+        let members = self.peers.keys().copied().collect();
+        Some(Chartered::new(name, namespace, self.shard, members))
     }
 
     /// The committee that decides it.
@@ -234,14 +267,13 @@ impl Seat<'_> {
     pub fn start(self, dir: &Path, quic: Quic) -> Result<Arc<BftReplica>, NodeError> {
         let Charter {
             shard,
+            namespace,
             committee,
             peers,
         } = self.charter;
         let (journal, recovered) = Journal::open(dir, oleaph_wal::Options::default())?;
-        let state = ShardState::new(
-            Shard::whole(NamespaceId::DEFAULT, shard),
-            KvState::default(),
-        );
+        let namespace = namespace.map_or(NamespaceId::DEFAULT, |(id, _)| id);
+        let state = ShardState::new(Shard::whole(namespace, shard), KvState::default());
         let ledger = Ledger::replay(state, &recovered);
         let domain = Domain::of(shard, &committee);
         let key = self.secret.signing_key(KeyPurpose::Consensus);
@@ -253,8 +285,9 @@ impl Seat<'_> {
 #[cfg(test)]
 mod tests {
     use oleaph_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_meta::Chartered;
     use oleaph_raft::NodeId;
-    use oleaph_shard::ShardId;
+    use oleaph_shard::{NamespaceId, ShardId};
 
     use super::{Charter, CharterError, Problem};
 
@@ -278,6 +311,7 @@ mod tests {
         );
         let charter = Charter::parse(&text).unwrap();
         assert_eq!(charter.shard(), ShardId::new(40), "shard");
+        assert_eq!(charter.chartered(), None, "no namespace");
         assert_eq!(charter.committee().size(), 2, "members");
         let peer = &charter.peers()[&NodeId::new(2)];
         assert_eq!(peer.addr().port(), 7002, "addr");
@@ -319,12 +353,43 @@ mod tests {
     }
 
     #[test]
+    fn a_charter_may_make_a_namespace() {
+        let text = format!(
+            "shard 40\nnamespace 7 ledger\n{}\n{}",
+            member(2, "bob"),
+            member(1, "alice")
+        );
+        let chartered = Charter::parse(&text).unwrap().chartered();
+        let members = [NodeId::new(1), NodeId::new(2)].into();
+        let expected = Chartered::new(
+            "ledger".parse().unwrap(),
+            NamespaceId::new(7),
+            ShardId::new(40),
+            members,
+        );
+        assert_eq!(chartered, Some(expected), "the namespace and its committee");
+    }
+
+    #[test]
     fn a_bad_charter_says_what_is_wrong() {
         let line = |line, problem| Err(CharterError::Line { line, problem });
         let cases = [
             ("shard x".to_owned(), line(1, Problem::Unreadable)),
             ("shard 1\nshard 2".to_owned(), line(2, Problem::SecondShard)),
             ("keeper 1".to_owned(), line(1, Problem::Unknown)),
+            ("namespace 7".to_owned(), line(1, Problem::Unknown)),
+            (
+                "namespace x ledger".to_owned(),
+                line(1, Problem::Unreadable),
+            ),
+            (
+                "namespace 7 Ledger".to_owned(),
+                line(1, Problem::Unreadable),
+            ),
+            (
+                "namespace 7 a\nnamespace 8 b".to_owned(),
+                line(2, Problem::SecondNamespace),
+            ),
             ("member 1 nowhere".to_owned(), line(1, Problem::Unreadable)),
             (
                 format!("{}\n{}", member(1, "a"), member(1, "b")),
