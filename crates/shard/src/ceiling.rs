@@ -9,15 +9,18 @@ use oleaph_storage::{Footprint, KvState};
 ///
 /// A shard's snapshot is about as large as its footprint, and a new
 /// replica, or one that fell behind, receives the whole snapshot, so the
-/// ceiling bounds what a replica moves at once. Smaller shards also spread
-/// load over more Raft groups; each group costs its heartbeats.
+/// ceiling bounds what a replica moves at once, and what it encodes each
+/// time it takes a snapshot. Smaller shards also spread load over more
+/// Raft groups; each group costs its heartbeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ceiling(NonZeroU64);
 
 impl Ceiling {
-    /// 64 MiB: well under the largest snapshot a replica sends, and in
-    /// the range `TiKV` splits its regions at.
-    pub const DEFAULT: Self = match NonZeroU64::new(64 << 20) {
+    /// 128 MiB, for a CFT shard. Snapshots go in chunks, so their size is
+    /// not bounded by one request's deadline; a shard is held in memory and
+    /// encoded whole for each snapshot, so it stays below what disk-based
+    /// stores split at (`TiKV` 256 MiB, `CockroachDB` 512 MiB).
+    pub const DEFAULT: Self = match NonZeroU64::new(128 << 20) {
         Some(bytes) => Self(bytes),
         None => Self(NonZeroU64::MIN),
     };
@@ -92,7 +95,7 @@ mod tests {
         let one = state(&["a"]);
         assert_eq!(ceiling(1).split_point(&one), None, "one key");
         assert_eq!(Ceiling::default(), Ceiling::DEFAULT, "default");
-        assert_eq!(Ceiling::DEFAULT.bytes().get(), 64 << 20, "64 MiB");
+        assert_eq!(Ceiling::DEFAULT.bytes().get(), 128 << 20, "128 MiB");
         assert_eq!(ceiling(12).to_string(), "12 B", "display");
     }
 }
