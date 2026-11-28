@@ -247,7 +247,8 @@ npm install -g @informalsystems/quint@0.35.0   # Java 17 以上も(Apalache 用)
 specs/check.sh
 ```
 
-`specs/check.sh` は CI(`quint` ジョブ)と同じものを走らせる。仕様ごとのディレクトリの
+`specs/check.sh` は CI と同じものを走らせる。引数 `run` は Apalache 以外(CI の `quint` ジョブ)、
+`verify` は Apalache による有界モデル検査だけ(`quint-verify` ジョブ、約 20 分)、省略すると両方。仕様ごとのディレクトリの
 `check.sh`(`bft/check.sh` など)を順に呼ぶだけで、各 `check.sh` は `specs/common.sh` の
 回数・評価器・感度分析(`check_mutants`)を使う。新しい仕様はディレクトリと `check.sh` を
 足せば加わる。`bft` では型検査、シナリオ(`quint test`)、感度分析、ランダムシミュレーション

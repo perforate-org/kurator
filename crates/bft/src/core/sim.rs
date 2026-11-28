@@ -29,6 +29,10 @@ use crate::vote::{BlockId, Certificate, Justify, Vote};
 const SETTLED: u64 = 800;
 /// The latest a run may take.
 const DEADLINE: u64 = 10_000;
+/// The most events a run may take. A run decides every command in some
+/// 1,600; a broken replica that answers its own messages at once can
+/// flood the network without the clock moving, and this ends that run.
+const STEPS: usize = 100_000;
 /// A view's timer before any timeout, in ticks.
 const BASE_TIMEOUT: u64 = 40;
 /// How many commands the clients submit.
@@ -454,7 +458,10 @@ impl Sim {
 
     fn run(&mut self) -> Result<(), String> {
         self.start();
-        while let Some(Reverse((at, _, slot))) = self.queue.pop() {
+        for _ in 0..STEPS {
+            let Some(Reverse((at, _, slot))) = self.queue.pop() else {
+                break;
+            };
             self.now = at;
             if self.now > DEADLINE {
                 break;
@@ -469,7 +476,10 @@ impl Sim {
                 return Ok(());
             }
         }
-        Err(format!("not every command decided by {}", self.now))
+        Err(format!(
+            "not every command decided by {}, in {STEPS} events at most",
+            self.now
+        ))
     }
 
     fn step(&mut self, pending: Pending) {
