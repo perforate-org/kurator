@@ -37,6 +37,7 @@ if runs run; then
     "decides past the change|s/chain\.filter\(b => Changes\.forall\(c => not\(blocks\.get\(b\)\.ancestors\.contains\(c\)\)\)\)/chain/"
     "votes after the end|s/    not\(ended\(s\)\),\n    b\.view == s\.view,/    b.view == s.view,/"
     "proposes after the end|s/    not\(ended\(s\)\),\n    LeaderOf/    LeaderOf/"
+    "hands on before the end|s/      ended\(theirs\),\n//"
   )
   check_mutants "$spec" n4f0 n4f1 n4f2
 

@@ -429,8 +429,10 @@ impl Replay {
         let end = CHANGES
             .iter()
             .find(|change| decided.contains(change))
-            .map(|change| &self.blocks[change])
-            .unwrap_or_else(|| panic!("{}: no end to hand on", self.at("handOff")));
+            .map_or_else(
+                || panic!("{}: no end to hand on", self.at("handOff")),
+                |change| &self.blocks[change],
+            );
         let change = change_to(1, &[1, 2, 3]);
         let checkpoint = Checkpoint::new(
             Height::new(1),
