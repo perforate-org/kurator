@@ -1,4 +1,5 @@
-//! Views: the numbered turns of the protocol, each with its own leader.
+//! Views, the numbered turns of the protocol, each with its own leader;
+//! and epochs, the turns of a shard's committees.
 
 use std::fmt;
 
@@ -46,6 +47,40 @@ impl View {
 impl fmt::Display for View {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "v{}", self.0)
+    }
+}
+
+/// One of a shard's committees in turn: the first, the charter's, is
+/// epoch 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Epoch(u64);
+
+impl Epoch {
+    /// The charter's committee's.
+    pub const FIRST: Self = Self(0);
+
+    /// Epoch `epoch`.
+    #[must_use]
+    pub const fn new(epoch: u64) -> Self {
+        Self(epoch)
+    }
+
+    /// Its number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The epoch after it, if there is one.
+    #[must_use]
+    pub fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+impl fmt::Display for Epoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "epoch {}", self.0)
     }
 }
 

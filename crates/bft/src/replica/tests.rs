@@ -15,11 +15,14 @@ use oleaph_wal::Options;
 use parking_lot::Mutex;
 use tempfile::TempDir;
 
-use super::{Host, Journal, Ledger, Replica};
+use super::{Host, Journal, Ledger, Replica, Settled};
+use crate::block::Order;
 use crate::checkpoint::{Height, Interval};
 use crate::core::{Config, Core};
-use crate::fixture::{DOMAIN, committee, key};
+use crate::fixture::{DOMAIN, change_to, committee, key};
 use crate::message::Message;
+use crate::rejection::Rejection;
+use crate::view::Epoch;
 use crate::view::View;
 
 /// Messages in flight, as (from, to, message).
@@ -133,6 +136,18 @@ impl Cluster {
                 replica.expire(view);
             }
         }
+    }
+
+    /// Delivers messages and fires timers until `done` holds.
+    fn until(&self, done: impl Fn(&Self) -> bool) {
+        for _ in 0..100 {
+            if done(self) {
+                return;
+            }
+            self.pump(2000);
+            self.expire();
+        }
+        panic!("never got there");
     }
 
     fn replica(&self, node: u64) -> &Replica<Loopback> {
@@ -479,4 +494,56 @@ fn only_a_replica_behind_the_certified_state_asks_for_it() {
     let armed = away.host.wakes.lock().last().copied().unwrap();
     away.expire(armed.0);
     assert_eq!(wants_from(&cluster, node), 1, "asks again");
+}
+
+#[test]
+fn a_committee_hands_the_shard_on_to_the_next() {
+    let mut cluster = Cluster::new();
+    let _put = cluster
+        .run(cluster.replica(2).propose(put("a", "1")))
+        .unwrap();
+    let refused = cluster.run(
+        cluster
+            .replica(2)
+            .submit(Order::Change(change_to(2, &[1, 2]))),
+    );
+    assert_eq!(
+        refused.unwrap(),
+        Settled::Refused(Rejection::OtherEpoch(Epoch::new(2), Epoch::FIRST)),
+        "decided, and changes nothing"
+    );
+    let epoch = cluster.run(cluster.replica(1).change(change_to(1, &[1, 2, 3])));
+    assert_eq!(epoch.unwrap(), Epoch::new(1), "the next epoch");
+    cluster.until(|cluster| (1..=3).all(|node| cluster.replica(node).epoch() == Epoch::new(1)));
+    let retired = cluster.run(cluster.replica(4).propose(put("x", "1")));
+    assert!(retired.is_err(), "the member left out decides no more");
+    let again = cluster.run(cluster.replica(1).change(change_to(1, &[1, 2, 3])));
+    assert!(again.is_err(), "a change for an epoch that has begun");
+    // The new committee decides, in a domain of its own.
+    let _later = cluster
+        .run(cluster.replica(3).propose(put("b", "2")))
+        .unwrap();
+    cluster.pump(2000);
+    for node in 1..=3 {
+        let state = cluster
+            .run(cluster.replica(node).read(Clone::clone))
+            .unwrap();
+        assert_eq!(state.get(b"a"), Some(b"1".as_slice()), "{node} kept");
+        assert_eq!(state.get(b"b"), Some(b"2".as_slice()), "{node} decided");
+        let members = cluster.replica(node).members();
+        assert!(!members.votes(NodeId::new(4)), "{node} decides without 4");
+    }
+    // A member restarted with the charter goes on in the epoch it
+    // reached.
+    let node = NodeId::new(1);
+    let before = cluster.run(cluster.replica(1).read(Clone::clone)).unwrap();
+    drop(cluster.replicas.remove(&node));
+    let restarted = open(&cluster.dir, &cluster.wire, node);
+    assert_eq!(restarted.epoch(), Epoch::new(1), "the epoch it reached");
+    let after = cluster.run(restarted.read(Clone::clone)).unwrap();
+    assert_eq!(after, before, "the same state");
+    drop(cluster.replicas.insert(node, restarted));
+    let _restarted = cluster
+        .run(cluster.replica(1).propose(put("c", "3")))
+        .unwrap();
 }

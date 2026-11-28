@@ -17,6 +17,7 @@
 //! 2 safety:    voted view u64 | lock (as a block's justify)
 //! 3 committed:  block id [32] | view u64
 //! 4 checkpoint: a checkpoint certificate
+//! 5 epoch:      a change certificate | the new epoch's domain [32]
 //! ```
 //!
 //! A step writes its blocks before its safety state and its safety state
@@ -42,6 +43,7 @@ use oleaph_wal::{Lsn, Options, Start, Wal};
 use super::states::{Snapshot, States};
 use crate::block::Block;
 use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest};
+use crate::committee::{ChangeCertificate, Domain};
 use crate::step::{Effects, Record, Recovered, Safety, Step};
 use crate::vote::{BlockId, Justify};
 use crate::wire::{put_view, read_view};
@@ -52,6 +54,7 @@ const BLOCK: u8 = 1;
 const SAFETY: u8 = 2;
 const COMMITTED: u8 = 3;
 const CHECKPOINT: u8 = 4;
+const EPOCH: u8 = 5;
 
 impl Record {
     fn encode(&self) -> io::Result<Vec<u8>> {
@@ -75,6 +78,11 @@ impl Record {
                 out.write_all(&[CHECKPOINT])?;
                 certificate.encode(out)
             }
+            Self::Epoch(change, domain) => {
+                out.write_all(&[EPOCH])?;
+                change.encode(out)?;
+                out.write_all(domain.as_bytes())
+            }
         })
     }
 
@@ -92,6 +100,10 @@ impl Record {
                 Self::Committed(block, read_view(&mut reader)?)
             }
             CHECKPOINT => Self::Checkpoint(CheckpointCertificate::decode(&mut reader)?),
+            EPOCH => {
+                let change = ChangeCertificate::decode(&mut reader)?;
+                Self::Epoch(change, Domain::new(reader.read()?))
+            }
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -218,7 +230,8 @@ mod tests {
     use super::Journal;
     use crate::block::Block;
     use crate::checkpoint::Height;
-    use crate::fixture::certify;
+    use crate::committee::Domain;
+    use crate::fixture::{certify, change_to};
     use crate::step::{Record, Recovered, Safety};
     use crate::view::View;
     use crate::vote::{BlockId, Justify};
@@ -240,6 +253,7 @@ mod tests {
                 .checkpoint()
                 .to_owned(),
             )),
+            Record::Epoch(change_to(1, &[1, 2, 3]), Domain::new([8; 32])),
         ];
         for record in records {
             let bytes = record.encode().unwrap();
@@ -261,12 +275,45 @@ mod tests {
         recovered.note(Record::Committed(first.id(), View::new(1)));
         assert_eq!(recovered.decided(), vec![&first], "the chain only");
         assert_ne!(recovered, Recovered::default(), "remembers");
-        let (safety, blocks, committed, certified) = recovered.into_parts();
+        let (safety, blocks, committed, certified, _) = recovered.into_parts();
         assert_eq!(certified, None, "no checkpoint");
         assert_eq!(safety.voted(), View::GENESIS, "never voted");
         assert_eq!(blocks.len(), 2, "both blocks");
         assert_eq!(committed, (first.id(), View::new(1)), "committed");
         assert_ne!(first.id(), BlockId::GENESIS, "not genesis");
+    }
+
+    #[test]
+    fn a_new_epoch_forgets_all_but_the_state_it_starts_from() {
+        let block = Block::new(View::new(3), Justify::Genesis, vec![b"x".to_vec()]);
+        let snapshot = Snapshot::take(
+            Height::new(1),
+            (block.id(), block.view()),
+            &ShardState::default(),
+        )
+        .unwrap();
+        let base = certify(snapshot.checkpoint().to_owned());
+        let epoch = Record::Epoch(change_to(1, &[1, 2, 3]), Domain::new([8; 32]));
+        let mut recovered = Recovered::default();
+        recovered.note(Record::Block(block.clone()));
+        recovered.note(Record::Committed(block.id(), block.view()));
+        recovered.note(Record::Checkpoint(base.clone()));
+        recovered.note(epoch.clone());
+        assert_eq!(
+            recovered.checkpoint(),
+            Some(&base),
+            "the state it starts from"
+        );
+        assert!(recovered.decided().is_empty(), "nothing decided in it");
+        let later = Block::new(View::new(1), Justify::Genesis, vec![b"y".to_vec()]);
+        recovered.note(Record::Block(later.clone()));
+        recovered.note(Record::Committed(later.id(), later.view()));
+        recovered.note(epoch);
+        assert_eq!(recovered.decided(), vec![&later], "the same epoch again");
+        let Some((change, _)) = recovered.era() else {
+            panic!("an era");
+        };
+        assert_eq!(change.epoch().get(), 1, "the first change");
     }
 
     /// How many segments the journal in `dir` has.
@@ -337,7 +384,7 @@ mod tests {
             (Height::new(2), (second.id(), second.view())),
             "where it stands"
         );
-        let (safety, blocks, _, _) = recovered.into_parts();
+        let (safety, blocks, _, _, _) = recovered.into_parts();
         assert_eq!(safety.voted(), View::new(3), "its safety state");
         assert!(
             !blocks.contains_key(&first.id()),

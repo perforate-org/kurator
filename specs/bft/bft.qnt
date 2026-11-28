@@ -20,6 +20,11 @@
 ///   `Skip`, so this adds no behaviour the code does not have.
 /// - Faults are counted by operator: one replica per operator, so the
 ///   faulty set is a set of replicas.
+/// - The model runs one epoch. A block in `Changes` holds a committee
+///   change the committee admits (`Core::change_in`): deciding it ends the
+///   epoch, and the replica decides nothing after it and votes and
+///   proposes no more. What follows, the next committee in its own domain,
+///   starts afresh, so it is this epoch again with other members.
 module bft {
   // ------------------------------------------------------------------
   // Parameters
@@ -36,6 +41,8 @@ module bft {
   /// The leader of each view, `1..MaxView`. The code draws it from a hash
   /// of the view; any fixed schedule is one of the schedules it can draw.
   const LeaderOf: int -> str
+  /// The blocks that hold a change the committee admits.
+  const Changes: Set[int]
 
   pure val Correct: Set[str] = Replicas.exclude(Faulty)
   /// `f`: the most with `3f + 1 <= n`, as `committee::faults`.
@@ -116,6 +123,9 @@ module bft {
 
   pure def max(a: int, b: int): int = if (a > b) a else b
 
+  /// Whether `s` decided a block that ends the epoch.
+  pure def ended(s: Replica): bool = Changes.exists(c => s.decided.contains(c))
+
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
@@ -190,13 +200,17 @@ module bft {
   /// `Core::observe` with `find_commit` and `decide`: learns of `q`, which
   /// may be newer than the lock, end the view, or, when it certifies a
   /// block proposed in the view right after its own certificate's, decide
-  /// that block's parent and everything before it.
+  /// that block's parent and everything before it, up to the first block
+  /// that ends the epoch. Once the epoch ended, it decides nothing more.
   def observe(s: Replica, q: QC): Replica = {
     val child = blocks.get(q.block)
     val commits = q.block != Genesis and child.view == q.view and child.view == child.justify + 1
+    val chain = blocks.get(child.parent).ancestors.union(Set(child.parent)).exclude(Set(Genesis))
+    // Before the end, no change is decided yet, so the first change on the
+    // chain is the first with no change before it.
+    val upToEnd = chain.filter(b => Changes.forall(c => not(blocks.get(b).ancestors.contains(c))))
     val decided =
-      if (commits)
-        s.decided.union(blocks.get(child.parent).ancestors).union(Set(child.parent)).exclude(Set(Genesis))
+      if (commits and not(ended(s))) s.decided.union(upToEnd)
       else s.decided
     val learned = { ...s, lock: if (q.view > s.lock.view) q else s.lock, decided: decided }
     if (q.view + 1 > s.view) enter(learned, q.view + 1, NoTC) else learned
@@ -209,6 +223,7 @@ module bft {
 
   /// `Core::check_vote`.
   pure def mayVote(s: Replica, b: Block): bool = and {
+    not(ended(s)),
     b.view == s.view,
     s.voted < b.view,
     b.justify >= s.lock.view,
@@ -223,6 +238,8 @@ module bft {
   /// decide; the model takes clients to always have more commands, so the
   /// leader of a view always proposes on entering it.
   def leads(r: str, s: Replica): bool = and {
+    // An ended epoch proposes nothing (`Core::propose`).
+    not(ended(s)),
     LeaderOf.keys().contains(s.view),
     LeaderOf.get(s.view) == r,
     s.proposed < s.view,
@@ -548,8 +565,28 @@ module bft {
   val lockIsCertified: bool =
     Correct.forall(r => certified(replicas.get(r).lock) and replicas.get(r).view > replicas.get(r).lock.view)
 
+  /// Every correct replica that ended the epoch ended it at the same
+  /// block, the first change on the chain.
+  val endsAtOneBlock: bool = {
+    Changes.forall(a => Changes.forall(b =>
+      a == b or not(Correct.exists(r => replicas.get(r).decided.contains(a)) and Correct.exists(r => replicas.get(r).decided.contains(b)))
+    ))
+  }
+
+  /// A correct replica decides nothing after the block that ends its
+  /// epoch: the next committee decides what comes after.
+  val nothingAfterTheEnd: bool =
+    Correct.forall(r => {
+      val decided = replicas.get(r).decided
+      Changes.forall(c => not(decided.contains(c)) or
+        decided.forall(b => blocks.get(b).height <= blocks.get(c).height)
+      )
+    })
+
   val safety: bool = and {
     agreement,
+    endsAtOneBlock,
+    nothingAfterTheEnd,
     oneBlockPerHeight,
     voteOnce,
     noVoteAfterTimeout,
@@ -580,6 +617,12 @@ module bft {
   val certifiedFork: bool =
     qcs.exists(a => qcs.exists(b => not(onOneChain(a.block, b.block))))
 
+  /// A correct replica ended the epoch.
+  val endedSomewhere: bool = Correct.exists(r => ended(replicas.get(r)))
+
+  /// Every correct replica ended the epoch.
+  val endedEverywhere: bool = Correct.forall(r => ended(replicas.get(r)))
+
   /// A correct leader proposed a block that the others reject as
   /// unjustified.
   val unjustifiedProposal: bool =
@@ -602,6 +645,9 @@ module n4f1 {
     MaxView = 5,
     Slots = 2,
     LeaderOf = Leaders,
+    // The faulty n4's first block of view 2 holds a change: anyone can pass
+    // one on.
+    Changes = Set(4),
   ).*
 
   pure val GaveUp1: TC = { view: 1, high: GenesisQC }
@@ -663,6 +709,88 @@ module n4f1 {
       .then(receiveProposal("n3", { block: 8, timeout: NoTC }))
       .then(observeQC("n1", { view: 4, block: 8 }))
       .expect(replicas.get("n1").decided == Set(6) and decidedAfterTimeout and safety)
+
+  pure val GaveUp3: TC = { view: 3, high: { view: 2, block: 4 } }
+
+  /// Block 4, of view 2, holds a change and is certified. View 3 times out,
+  /// and n4 proposes block 8 on it in view 4, which is certified too, and
+  /// so is n2's child of it in view 5. That decides block 8 with its
+  /// ancestors, but the change in block 4 ends the chain there.
+  run aChangeEndsTheChainTest =
+    init
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 2, timeout: NoTC }))
+      .then(faultyPropose("n4", 2, 0, { view: 1, block: 2 }))
+      .then(faultyVote("n4", 4))
+      .then(receiveProposal("n1", { block: 4, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 4, timeout: NoTC }))
+      .expect(qcs.contains({ view: 2, block: 4 }))
+      // n1 and n3 learn its certificate, and never see n2's block of view 3.
+      .then(observeQC("n1", { view: 2, block: 4 }))
+      .then(observeQC("n3", { view: 2, block: 4 }))
+      .then(timeout("n1"))
+      .then(timeout("n3"))
+      .then(faultyTimeout("n4", 3, { view: 2, block: 4 }))
+      .then(collectTimeouts("n1", GaveUp3))
+      .then(collectTimeouts("n3", GaveUp3))
+      .then(faultyPropose("n4", 4, 0, { view: 2, block: 4 }))
+      .then(relay(8, GaveUp3))
+      .then(faultyVote("n4", 8))
+      .then(receiveProposal("n1", { block: 8, timeout: Entered(GaveUp3) }))
+      .then(receiveProposal("n3", { block: 8, timeout: Entered(GaveUp3) }))
+      .then(receiveProposal("n2", { block: 8, timeout: Entered(GaveUp3) }))
+      .expect(qcs.contains({ view: 4, block: 8 }) and not(endedSomewhere))
+      .then(observeQC("n2", { view: 4, block: 8 }))
+      .expect(proposals.contains({ block: 10, timeout: NoTC }))
+      .then(receiveProposal("n1", { block: 10, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 10, timeout: NoTC }))
+      .then(observeQC("n1", { view: 5, block: 10 }))
+      .expect(replicas.get("n1").decided == Set(2, 4) and endedSomewhere and safety)
+
+  /// Once n1 decided block 4, which ends the epoch, it votes for nothing:
+  /// view 3's block extends block 4, and its certificate decides it.
+  run anEndedReplicaVotesNoMoreTest =
+    init
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 2, timeout: NoTC }))
+      .then(faultyPropose("n4", 2, 0, { view: 1, block: 2 }))
+      .then(faultyVote("n4", 4))
+      .then(receiveProposal("n1", { block: 4, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 4, timeout: NoTC }))
+      .then(observeQC("n2", { view: 2, block: 4 }))
+      .expect(proposals.contains({ block: 6, timeout: NoTC }))
+      .then(receiveProposal("n1", { block: 6, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 6, timeout: NoTC }))
+      .then(faultyPropose("n4", 4, 0, { view: 3, block: 6 }))
+      .then(receiveProposal("n1", { block: 8, timeout: NoTC }))
+      .expect(replicas.get("n1").decided == Set(2, 4))
+      .expect(not(votes.exists(v => v.voter == "n1" and v.view == 4)))
+      // n2, which leads view 5, enters it ended and proposes nothing.
+      .then(observeQC("n2", { view: 3, block: 6 }))
+      .then(timeout("n1"))
+      .then(timeout("n2"))
+      .then(timeout("n3"))
+      .then(collectTimeouts("n2", { view: 4, high: { view: 3, block: 6 } }))
+      .expect(replicas.get("n2").view == 5 and ended(replicas.get("n2")))
+      .expect(not(proposals.exists(p => blocks.get(p.block).view == 5)))
+}
+
+/// `n4f1` without the change, for the model checker. No run of 3 steps
+/// ends the epoch: deciding the change takes a certificate of it and one
+/// of a block after it, each the votes of two correct replicas on a
+/// proposal. So the change adds nothing to the runs `quint verify`
+/// explores, and leaving it out lets Apalache unfold the epoch's rules,
+/// which range over `Changes`, to nothing.
+module n4f1c0 {
+  import schedule.*
+  import bft(
+    Replicas = Set("n1", "n2", "n3", "n4"),
+    Faulty = Set("n4"),
+    MaxView = 5,
+    Slots = 2,
+    LeaderOf = Leaders,
+    Changes = Set(),
+  ).*
 }
 
 /// Four replicas, all correct. With one slot, the block of view `v` is
@@ -675,6 +803,7 @@ module n4f0 {
     MaxView = 5,
     Slots = 1,
     LeaderOf = Leaders,
+    Changes = Set(),
   ).*
 
   /// Two views, each certified: the second certifies the first's child,
@@ -792,6 +921,7 @@ module n4f2 {
     MaxView = 4,
     Slots = 2,
     LeaderOf = Map(1 -> "n1", 2 -> "n4", 3 -> "n3", 4 -> "n2"),
+    Changes = Set(),
   ).*
 
   /// The faulty leaders of views 2 and 3 fork the chain, and with two

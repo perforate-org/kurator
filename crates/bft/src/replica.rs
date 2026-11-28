@@ -10,7 +10,7 @@
 //! decide proposes nothing, and its views time out. Reads see the
 //! replica's own decided state ([`Reads::Decided`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use std::ops::Bound;
 use std::time::Duration;
@@ -23,16 +23,20 @@ use oleaph_shard::{Applied, Shard};
 use oleaph_storage::{Command, Draft, Finished, KeyValue, KvState, Outcome, Version};
 use parking_lot::Mutex;
 
-use crate::block::Block;
+use crate::block::{Block, Order};
 use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest, Own, Part, Verdict};
+use crate::committee::ChangeCertificate;
 use crate::core::{Core, Event};
 use crate::message::Message;
 use crate::step::{Act, Timer, To};
+use crate::view::Epoch;
 use crate::view::View;
+use crate::vote::BlockId;
 
 use self::catchup::Catchup;
 pub use self::journal::Journal;
 pub use self::ledger::{Ledger, Settled};
+use self::states::Snapshot;
 
 mod catchup;
 mod journal;
@@ -68,6 +72,9 @@ enum Health {
     /// Its state differs from the one the committee certified at the
     /// same height: it is not the shard's, and serves nothing more.
     Diverged(Checkpoint),
+    /// The committee of the epoch has no place for it: it decides no
+    /// more.
+    Retired(Epoch),
 }
 
 impl Health {
@@ -85,6 +92,9 @@ impl Health {
                 )
                 .into(),
             )),
+            Self::Retired(epoch) => Err(Error::Failed(
+                format!("the replica retired: the committee of {epoch} leaves it out").into(),
+            )),
         }
     }
 }
@@ -98,7 +108,9 @@ struct Inner {
     /// each to apply.
     waiting: BTreeMap<Vec<u8>, Vec<oneshot::Sender<Settled>>>,
     /// The checkpoints its state reached, for the core to share.
-    reached: Vec<Checkpoint>,
+    /// The same checkpoint reached twice, by the interval and by the end
+    /// of the epoch, is shared once.
+    reached: BTreeSet<Checkpoint>,
     /// Those past the newest certified one, to judge against the
     /// certificates to come.
     own: Own,
@@ -129,13 +141,50 @@ impl Inner {
         match self.own.judge(&certified) {
             Verdict::Unknown => {}
             Verdict::Agrees => {
-                let records = self.core.compact(&certified);
+                let (records, succeeded) = match self.core.succeed(&certified) {
+                    Some(records) => (records, Some(self.core.epoch())),
+                    None => (self.core.compact(&certified), None),
+                };
                 if self.journal.compact(&certified, &records).is_err() {
                     self.halt(Health::Stopped);
+                    return;
+                }
+                let node = self.core.node();
+                if let Some(epoch) = succeeded
+                    && self.core.committee().key(node).is_none()
+                {
+                    self.halt(Health::Retired(epoch));
                 }
             }
             Verdict::Differs(mine) => self.halt(Health::Diverged(mine)),
         }
+    }
+
+    /// Keeps `snapshot`, the state at a checkpoint the decided blocks
+    /// reached, for the core to share and the committee to certify.
+    fn reach(&mut self, snapshot: &Snapshot) {
+        let Ok(checkpoint) = self.journal.keep(snapshot) else {
+            self.halt(Health::Stopped);
+            return;
+        };
+        self.own.take(checkpoint);
+        let _new = self.reached.insert(checkpoint);
+        self.judge();
+    }
+
+    /// What became of `command`, which `settled` as the ledger saw it: a
+    /// change is made only if it is the one the core decided ends the
+    /// epoch.
+    fn verdict(&self, command: &[u8], settled: Settled) -> Settled {
+        let Settled::Change(epoch) = settled else {
+            return settled;
+        };
+        let Ok(Order::Change(change)) = Order::decode(command) else {
+            return Settled::Garbled;
+        };
+        self.core
+            .made(&change)
+            .map_or_else(Settled::Refused, |()| Settled::Change(epoch))
     }
 
     /// The newest certified checkpoint, if the replica's state is behind
@@ -178,17 +227,21 @@ impl Inner {
         if self.health.check().is_err() {
             return Vec::new();
         }
-        let node = self.core.node();
-        let others: Vec<NodeId> = self
-            .core
-            .committee()
-            .members()
-            .filter(|member| *member != node)
-            .collect();
+        let others = self.others();
         self.catchup
             .as_mut()
             .map(|catchup| catchup.asks(&others))
             .unwrap_or_default()
+    }
+
+    /// The other members of the committee.
+    fn others(&self) -> Vec<NodeId> {
+        let node = self.core.node();
+        self.core
+            .committee()
+            .members()
+            .filter(|member| *member != node)
+            .collect()
     }
 
     /// Takes in the manifest of the state it catches up to.
@@ -270,25 +323,33 @@ impl Inner {
 struct Acting<'replica, H> {
     host: &'replica H,
     inner: &'replica mut Inner,
+    /// The other members of the committee the step was taken in, which
+    /// its messages are for even once the next committee takes over.
+    others: Vec<NodeId>,
 }
 
 impl<H: Host> Act for Acting<'_, H> {
     fn decide(&mut self, block: &Block) {
         let outcomes = self.inner.ledger.apply(block);
         for (command, settled) in block.commands().iter().zip(outcomes) {
+            let settled = self.inner.verdict(command, settled);
             self.inner.tell(command, &settled);
         }
         // A state that does not encode never took its keys in.
-        let Ok(Some(snapshot)) = self.inner.ledger.checkpoint() else {
+        if let Ok(Some(snapshot)) = self.inner.ledger.checkpoint() {
+            self.inner.reach(&snapshot);
+        }
+    }
+
+    fn end(&mut self, block: BlockId) {
+        let Ok(snapshot) = self.inner.ledger.snapshot() else {
             return;
         };
-        let Ok(checkpoint) = self.inner.journal.keep(&snapshot) else {
-            self.inner.halt(Health::Stopped);
+        // The state is at the block that ends the epoch, decided first.
+        if snapshot.checkpoint().block() != block {
             return;
-        };
-        self.inner.own.take(checkpoint);
-        self.inner.reached.push(checkpoint);
-        self.inner.judge();
+        }
+        self.inner.reach(&snapshot);
     }
 
     fn certify(&mut self, certificate: &CheckpointCertificate) {
@@ -297,14 +358,12 @@ impl<H: Host> Act for Acting<'_, H> {
     }
 
     fn send(&mut self, to: To, message: &Message) {
-        let core = &self.inner.core;
         match to {
             To::One(to) => self.host.send(to, message),
-            To::Others => core
-                .committee()
-                .members()
-                .filter(|member| *member != core.node())
-                .for_each(|member| self.host.send(member, message)),
+            To::Others => self
+                .others
+                .iter()
+                .for_each(|member| self.host.send(*member, message)),
         }
     }
 
@@ -343,7 +402,7 @@ impl<H: Host> Replica<H> {
                 journal,
                 ledger,
                 waiting: BTreeMap::new(),
-                reached: Vec::new(),
+                reached: BTreeSet::new(),
                 own: Own::default(),
                 certified: None,
                 catchup: None,
@@ -415,9 +474,11 @@ impl<H: Host> Replica<H> {
         }
         let step = inner.core.handle(event);
         if let Ok(effects) = inner.journal.persist(step) {
+            let others = inner.others();
             effects.carry_out(&mut Acting {
                 host: &self.host,
                 inner,
+                others,
             });
         } else {
             inner.halt(Health::Stopped);
@@ -426,6 +487,16 @@ impl<H: Host> Replica<H> {
         for checkpoint in mem::take(&mut inner.reached) {
             self.handle(inner, Event::Reached(checkpoint));
         }
+        // A new epoch starts in its first view.
+        if inner.core.view() == View::GENESIS {
+            self.handle(inner, Event::Start);
+        }
+    }
+
+    /// The epoch it decides in.
+    #[must_use]
+    pub fn epoch(&self) -> Epoch {
+        self.inner.lock().core.epoch()
     }
 
     /// The newest checkpoint the committee certified, if any.
@@ -434,10 +505,30 @@ impl<H: Host> Replica<H> {
         self.inner.lock().certified.clone()
     }
 
-    /// Submits `command` and waits until a decided block applied it.
-    async fn submit(&self, command: Command) -> Result<Settled> {
-        let bytes = command.encode()?.payload().to_vec();
-        let receiver = self.enqueue(&mut self.inner.lock(), bytes)?;
+    /// Submits `change`, which ends the epoch, and waits until a decided
+    /// block holds it. The committee of the epoch it starts decides from
+    /// the block after; this replica goes on in it, or retires if that
+    /// committee leaves it out.
+    ///
+    /// # Errors
+    ///
+    /// When the committee cannot make the change, or decided another
+    /// first, or as [`Replicated::propose`].
+    pub async fn change(&self, change: ChangeCertificate) -> Result<Epoch> {
+        let admitted = self.inner.lock().core.admits(&change);
+        admitted.map_err(|rejection| Error::Failed(rejection.to_string().into()))?;
+        match self.submit(Order::Change(change)).await? {
+            Settled::Change(epoch) => Ok(epoch),
+            Settled::Refused(rejection) => Err(Error::Failed(rejection.to_string().into())),
+            other @ (Settled::Applied(_) | Settled::Garbled | Settled::Exhausted) => Err(
+                Error::Failed(format!("the change settled as {other:?}").into()),
+            ),
+        }
+    }
+
+    /// Submits `order` and waits until a decided block applied it.
+    async fn submit(&self, order: Order) -> Result<Settled> {
+        let receiver = self.enqueue(&mut self.inner.lock(), order.encode())?;
         receiver.await.map_err(|_closed| {
             self.inner.lock().health.check().err().unwrap_or_else(|| {
                 Error::Failed(
@@ -513,12 +604,17 @@ impl<H: Host> Replicated for Replica<H> {
     }
 
     async fn propose(&self, command: Command) -> Result<Outcome> {
-        match self.submit(command).await? {
+        let bytes = command.encode()?.payload().to_vec();
+        match self.submit(Order::Command(bytes)).await? {
             Settled::Applied(Applied::Data(outcome)) => Ok(outcome),
             Settled::Applied(Applied::Misrouted(shard)) => Err(misrouted(shard)),
-            other @ (Settled::Applied(_) | Settled::Garbled | Settled::Exhausted) => Err(
-                Error::Failed(format!("the command settled as {other:?}").into()),
-            ),
+            other @ (Settled::Applied(_)
+            | Settled::Garbled
+            | Settled::Exhausted
+            | Settled::Change(_)
+            | Settled::Refused(_)) => Err(Error::Failed(
+                format!("the command settled as {other:?}").into(),
+            )),
         }
     }
 }

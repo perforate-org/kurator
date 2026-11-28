@@ -34,7 +34,7 @@ use oleaph_shard::ShardState;
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
 use crate::view::View;
-use crate::vote::{BlockId, check};
+use crate::vote::BlockId;
 use crate::wire::{
     put_count, put_node, put_signature, put_view, read_count, read_node, read_signature, read_view,
 };
@@ -237,7 +237,7 @@ impl Share {
     /// When the signer is not a member or the signature is not theirs.
     pub fn verify(&self, committee: &Committee, domain: Domain) -> Result<(), Rejection> {
         let statement = self.checkpoint.statement(domain);
-        check(committee, self.signer, &statement, &self.signature)
+        committee.check(self.signer, &statement, &self.signature)
     }
 
     pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
@@ -329,7 +329,7 @@ impl CheckpointCertificate {
         let statement = self.checkpoint.statement(domain);
         self.signatures
             .iter()
-            .try_for_each(|(signer, signature)| check(committee, *signer, &statement, signature))
+            .try_for_each(|(signer, signature)| committee.check(*signer, &statement, signature))
     }
 
     pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {

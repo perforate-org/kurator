@@ -26,8 +26,8 @@ use oleaph_consensus::NodeId;
 use serde_json::Value;
 
 use super::{Config, Core, Event};
-use crate::block::{Block as RealBlock, Proposal as RealProposal};
-use crate::fixture::{DOMAIN, committee, key};
+use crate::block::{Block as RealBlock, Order, Proposal as RealProposal};
+use crate::fixture::{DOMAIN, change_to, committee, key};
 use crate::message::Message;
 use crate::step::{Recovered, To};
 use crate::timeout::{Timeout as RealTimeout, TimeoutCertificate};
@@ -150,6 +150,11 @@ fn config(name: &str) -> Config {
     let node = member(name);
     Config::new(node, key(node.get()), committee(), DOMAIN)
 }
+
+/// The model's `Changes`, the blocks that hold a committee change: in
+/// `n4f1`, the faulty n4's first block of view 2. Only a faulty leader's
+/// blocks are the replay's to fill; `n4f0` has none.
+const CHANGES: [u64; 1] = [4];
 
 /// The view no step reaches: a timeout of it teaches a replica its high
 /// certificate and counts for nothing.
@@ -455,13 +460,20 @@ impl Replay {
         }
     }
 
-    /// A faulty leader's block: commands that set it apart from any other.
+    /// A faulty leader's block: commands that set it apart from any other,
+    /// or a committee change the committee admits for a block in the
+    /// model's `Changes`.
     fn forged(&self, state: &State, id: u64, block: &Block) -> RealBlock {
         let certified = Qc {
             view: block.justify,
             block: block.parent,
         };
-        let commands = vec![format!("faulty {id}").into_bytes()];
+        let command = if CHANGES.contains(&id) {
+            Order::Change(change_to(1, &[1, 2, 3])).encode()
+        } else {
+            format!("faulty {id}").into_bytes()
+        };
+        let commands = vec![command];
         RealBlock::new(
             View::new(block.view),
             self.justify(state, certified),

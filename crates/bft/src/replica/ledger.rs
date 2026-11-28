@@ -8,9 +8,11 @@ use oleaph_shard::{Applied, Shard, ShardState};
 use oleaph_storage::{Encoded, KvState, Version};
 
 use super::states::Snapshot;
-use crate::block::Block;
+use crate::block::{Block, Order};
 use crate::checkpoint::{CheckpointCertificate, Height, Interval};
+use crate::rejection::Rejection;
 use crate::step::Recovered;
+use crate::view::Epoch;
 use crate::view::View;
 use crate::vote::BlockId;
 
@@ -27,6 +29,12 @@ pub enum Settled {
     /// The shard has used every version there is, which it cannot do in
     /// any lifetime of the universe: nothing applies any more.
     Exhausted,
+    /// A committee change, which takes no version: the committee of the
+    /// epoch decides from the block after on.
+    Change(Epoch),
+    /// A committee change the committee did not make, for the reason
+    /// given: it changes nothing.
+    Refused(Rejection),
 }
 
 /// A shard's state as of the last decided block: each block's commands
@@ -156,8 +164,15 @@ impl Ledger {
         self.height
     }
 
+    /// What becomes of `command`. A change it takes as made: only the
+    /// core knows whether the committee made it.
     fn settle(&mut self, command: &[u8]) -> Settled {
-        let Ok(encoded) = Encoded::decode(command.to_vec()) else {
+        let command = match Order::decode(command) {
+            Ok(Order::Command(command)) => command,
+            Ok(Order::Change(change)) => return Settled::Change(change.epoch()),
+            Err(_) => return Settled::Garbled,
+        };
+        let Ok(encoded) = Encoded::decode(command) else {
             return Settled::Garbled;
         };
         let Some(next) = self.state.kv().version().get().checked_add(1) else {
@@ -187,19 +202,18 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{Ledger, Settled};
-    use crate::block::Block;
+    use crate::block::{Block, Order};
     use crate::checkpoint::Manifest;
     use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Interval, StateRoot};
+    use crate::fixture::change_to;
     use crate::step::{Record, Recovered};
+    use crate::view::Epoch;
     use crate::view::View;
     use crate::vote::{BlockId, Justify};
 
     fn put(key: &str, value: &str) -> Vec<u8> {
-        Command::Kv(WriteBatch::new().put(key, value))
-            .encode()
-            .unwrap()
-            .payload()
-            .to_vec()
+        let command = Command::Kv(WriteBatch::new().put(key, value)).encode();
+        Order::Command(command.unwrap().payload().to_vec()).encode()
     }
 
     #[test]
@@ -224,6 +238,21 @@ mod tests {
             ledger.kv().get(b"a"),
             Some(b"2".as_slice()),
             "the later write wins"
+        );
+    }
+
+    #[test]
+    fn a_change_takes_no_version() {
+        let change = Order::Change(change_to(1, &[1, 2, 3])).encode();
+        let block = Block::new(View::new(1), Justify::Genesis, vec![change, put("a", "1")]);
+        let mut ledger = Ledger::new(ShardState::default());
+        assert_eq!(
+            ledger.apply(&block),
+            vec![
+                Settled::Change(Epoch::new(1)),
+                Settled::Applied(Applied::Data(Outcome::Committed(Version::new(1)))),
+            ],
+            "the command after takes the first version"
         );
     }
 

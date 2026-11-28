@@ -1,13 +1,23 @@
 //! Who decides: the replicas of a shard, their voting keys, how many of
-//! them must agree, and who leads each view.
+//! them must agree, and who leads each view; and how a committee hands
+//! the shard on to the next.
+//!
+//! A shard's committees follow one another in epochs. The charter names
+//! the first, in epoch 0. A [`ChangeCertificate`], a quorum of one epoch's
+//! committee signing the next one's, ends the epoch at the block that
+//! carries it.
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 use oleaph_consensus::NodeId;
-use oleaph_crypto::VerifyingKey;
+use oleaph_crypto::{Algorithm, Signature, SigningKey, VerifyingKey};
 use oleaph_shard::ShardId;
 
-use crate::view::View;
+use crate::rejection::Rejection;
+use crate::view::{Epoch, View};
+use crate::wire::{put_count, put_node, put_signature, read_count, read_node, read_signature};
 
 /// What every signature in one shard's consensus is bound to, so that a
 /// vote in one shard, or one test, never counts in another.
@@ -43,7 +53,22 @@ impl Domain {
         }
         Self(*hasher.finalize().as_bytes())
     }
+
+    /// The domain of the epoch that `change` starts, after this one's: a
+    /// hash of this domain and the change, so that the domains of a
+    /// shard's epochs are all different, even when a committee returns.
+    #[must_use]
+    pub fn next(&self, change: &ChangeCertificate) -> Self {
+        let mut hasher = blake3::Hasher::new_derive_key(NEXT_DOMAIN_CONTEXT);
+        let _domain = hasher.update(&self.0);
+        let _change = hasher.update(&change.change.statement());
+        Self(*hasher.finalize().as_bytes())
+    }
 }
+
+/// The key derivation context of the domains after the first. Fixed
+/// forever.
+const NEXT_DOMAIN_CONTEXT: &str = "oleaph 2026-11 bft next domain";
 
 /// The key derivation context of shard domains. Fixed forever.
 const DOMAIN_CONTEXT: &str = "oleaph 2026-11 bft shard domain";
@@ -96,6 +121,54 @@ impl Committee {
         self.members.keys().copied()
     }
 
+    /// Checks that `signature` is `signer`'s, on `message`.
+    ///
+    /// # Errors
+    ///
+    /// When `signer` is not a member, or the signature is not its.
+    pub(crate) fn check(
+        &self,
+        signer: NodeId,
+        message: &[u8],
+        signature: &Signature,
+    ) -> Result<(), Rejection> {
+        let key = self.key(signer).ok_or(Rejection::Stranger(signer))?;
+        if key.verify(message, signature) {
+            Ok(())
+        } else {
+            Err(Rejection::Forged(signer))
+        }
+    }
+
+    pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
+        put_count(out, self.members.len())?;
+        self.members.iter().try_for_each(|(node, key)| {
+            put_node(out, *node)?;
+            out.write_all(&[key.algorithm().id()])?;
+            put_bytes(out, key.as_bytes())
+        })
+    }
+
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let count = read_count(reader)?;
+        let mut members = BTreeMap::new();
+        for _ in 0..count {
+            let node = read_node(reader)?;
+            if members
+                .last_key_value()
+                .is_some_and(|(last, _): (&NodeId, _)| *last >= node)
+            {
+                return Err(DecodeError::Invalid);
+            }
+            let id = reader.read::<u8>()?;
+            let algorithm = Algorithm::from_id(id).ok_or(DecodeError::Tag(id))?;
+            let key =
+                VerifyingKey::from_parts(algorithm, reader.bytes()?).ok_or(DecodeError::Invalid)?;
+            drop(members.insert(node, key));
+        }
+        Self::new(members).ok_or(DecodeError::Invalid)
+    }
+
     /// The leader of `view`, drawn from the members by a hash of the
     /// view, so that a leader that stalls or censors holds up one view
     /// only, and no member always follows the same one.
@@ -115,6 +188,180 @@ impl Committee {
 
 /// The key derivation context of the leader schedule. Fixed forever.
 const LEADER_CONTEXT: &str = "oleaph 2026-11 bft leader schedule";
+
+/// What a signature on a change is over, after the domain.
+const CHANGE: &[u8] = b"oleaph-bft change";
+
+/// The committee that decides a shard from `epoch` on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    epoch: Epoch,
+    committee: Committee,
+}
+
+impl Change {
+    /// `committee` decides from `epoch` on.
+    #[must_use]
+    pub const fn new(epoch: Epoch, committee: Committee) -> Self {
+        Self { epoch, committee }
+    }
+
+    /// The epoch it starts.
+    #[must_use]
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// The committee of that epoch.
+    #[must_use]
+    pub const fn committee(&self) -> &Committee {
+        &self.committee
+    }
+
+    /// The bytes that name it, after the domain and [`CHANGE`].
+    fn statement(&self) -> Vec<u8> {
+        let mut bytes = self.epoch.get().to_le_bytes().to_vec();
+        // Writing to a vector does not fail, and a committee holds fewer
+        // members than a `u32` counts.
+        let _written = self.committee.encode(&mut bytes);
+        bytes
+    }
+
+    /// What a member of the committee before signs, in `domain`.
+    fn signed(&self, domain: Domain) -> Vec<u8> {
+        [domain.as_bytes().as_slice(), CHANGE, &self.statement()].concat()
+    }
+
+    pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
+        out.write_all(&self.epoch.get().to_le_bytes())?;
+        self.committee.encode(out)
+    }
+
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            epoch: Epoch::new(reader.read()?),
+            committee: Committee::decode(reader)?,
+        })
+    }
+}
+
+/// One member's consent to a [`Change`]: its signature, in the domain of
+/// the epoch the change ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endorsement {
+    signer: NodeId,
+    signature: Signature,
+}
+
+impl Endorsement {
+    /// `signer`, which signs with `key`, consents to `change` in `domain`.
+    #[must_use]
+    pub fn sign(key: &SigningKey, domain: Domain, signer: NodeId, change: &Change) -> Self {
+        Self {
+            signer,
+            signature: key.sign(&change.signed(domain)),
+        }
+    }
+
+    /// Who signed it.
+    #[must_use]
+    pub const fn signer(&self) -> NodeId {
+        self.signer
+    }
+}
+
+/// A [`Change`] with the consent of a quorum of the committee it follows:
+/// what it takes to end an epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeCertificate {
+    change: Change,
+    signatures: BTreeMap<NodeId, Signature>,
+}
+
+impl ChangeCertificate {
+    /// `change`, with `endorsements`.
+    #[must_use]
+    pub fn new(change: Change, endorsements: impl IntoIterator<Item = Endorsement>) -> Self {
+        let signatures = endorsements
+            .into_iter()
+            .map(|endorsement| (endorsement.signer, endorsement.signature))
+            .collect();
+        Self { change, signatures }
+    }
+
+    /// The change.
+    #[must_use]
+    pub const fn change(&self) -> &Change {
+        &self.change
+    }
+
+    /// The epoch it starts.
+    #[must_use]
+    pub const fn epoch(&self) -> Epoch {
+        self.change.epoch
+    }
+
+    /// The committee of that epoch.
+    #[must_use]
+    pub const fn committee(&self) -> &Committee {
+        &self.change.committee
+    }
+
+    /// Checks that a quorum of `committee`, which decides `epoch` in
+    /// `domain`, consents to the change, and that it starts the epoch
+    /// after.
+    ///
+    /// # Errors
+    ///
+    /// When it starts another epoch, a signer is not a member, a
+    /// signature is not its signer's, or the signers are fewer than a
+    /// quorum.
+    pub fn verify(
+        &self,
+        committee: &Committee,
+        domain: Domain,
+        epoch: Epoch,
+    ) -> Result<(), Rejection> {
+        if epoch.next() != Some(self.change.epoch) {
+            return Err(Rejection::OtherEpoch(self.change.epoch, epoch));
+        }
+        let need = committee.quorum();
+        let have = self.signatures.len();
+        if have < need {
+            return Err(Rejection::Short { have, need });
+        }
+        let signed = self.change.signed(domain);
+        self.signatures
+            .iter()
+            .try_for_each(|(signer, signature)| committee.check(*signer, &signed, signature))
+    }
+
+    pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
+        self.change.encode(out)?;
+        put_count(out, self.signatures.len())?;
+        self.signatures.iter().try_for_each(|(signer, signature)| {
+            put_node(out, *signer)?;
+            put_signature(out, signature)
+        })
+    }
+
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let change = Change::decode(reader)?;
+        let count = read_count(reader)?;
+        let mut signatures = BTreeMap::new();
+        for _ in 0..count {
+            let signer = read_node(reader)?;
+            if signatures
+                .last_key_value()
+                .is_some_and(|(last, _): (&NodeId, _)| *last >= signer)
+            {
+                return Err(DecodeError::Invalid);
+            }
+            drop(signatures.insert(signer, read_signature(reader)?));
+        }
+        Ok(Self { change, signatures })
+    }
+}
 
 /// How many of `n` replicas may be faulty: the most `f` with `3f + 1 <= n`.
 const fn faults(n: usize) -> usize {
@@ -138,8 +385,13 @@ mod tests {
 
     use oleaph_shard::ShardId;
 
-    use super::{Committee, Domain, faults, quorum};
-    use crate::view::View;
+    use oleaph_codec::{DecodeError, Reader, put_bytes};
+
+    use super::{ChangeCertificate, Committee, Domain, Endorsement, faults, quorum};
+    use crate::fixture::{self, DOMAIN, change_to, key};
+    use crate::rejection::Rejection;
+    use crate::view::{Epoch, View};
+    use crate::wire::{put_count, put_node};
 
     fn committee(size: u64) -> Committee {
         let members = (1..=size)
@@ -199,6 +451,90 @@ mod tests {
         assert!(four.key(NodeId::new(25)).is_none(), "a stranger");
         assert_eq!(four.members().count(), 4, "members");
         assert!(Committee::new(BTreeMap::new()).is_none(), "nobody");
+    }
+
+    #[test]
+    fn a_change_needs_a_quorum_of_the_committee_it_follows() {
+        let four = fixture::committee();
+        let change = change_to(1, &[1, 2, 3]);
+        assert_eq!(change.verify(&four, DOMAIN, Epoch::FIRST), Ok(()), "valid");
+        assert_eq!(
+            change.verify(&four, DOMAIN, Epoch::new(1)),
+            Err(Rejection::OtherEpoch(Epoch::new(1), Epoch::new(1))),
+            "not the epoch after"
+        );
+        assert_eq!(
+            change.verify(&four, Domain::new([7; 32]), Epoch::FIRST),
+            Err(Rejection::Forged(NodeId::new(1))),
+            "another domain"
+        );
+        let two: Vec<_> = (1..=2)
+            .map(|node| Endorsement::sign(&key(node), DOMAIN, NodeId::new(node), change.change()))
+            .collect();
+        let short = ChangeCertificate::new(change.change().clone(), two);
+        assert_eq!(
+            short.verify(&four, DOMAIN, Epoch::FIRST),
+            Err(Rejection::Short { have: 2, need: 3 }),
+            "two of four"
+        );
+        let mut endorsements: Vec<_> = (1..=2)
+            .map(|node| Endorsement::sign(&key(node), DOMAIN, NodeId::new(node), change.change()))
+            .collect();
+        endorsements.push(Endorsement::sign(
+            &key(9),
+            DOMAIN,
+            NodeId::new(9),
+            change.change(),
+        ));
+        assert_eq!(endorsements[2].signer(), NodeId::new(9), "its signer");
+        let stranger = ChangeCertificate::new(change.change().clone(), endorsements);
+        assert_eq!(
+            stranger.verify(&four, DOMAIN, Epoch::FIRST),
+            Err(Rejection::Stranger(NodeId::new(9))),
+            "a stranger"
+        );
+        assert_eq!(change.committee().size(), 3, "three");
+        assert_eq!(Epoch::new(u64::MAX).next(), None, "the last epoch");
+        assert_eq!(Epoch::new(4).to_string(), "epoch 4", "named");
+    }
+
+    #[test]
+    fn every_epoch_signs_in_a_domain_of_its_own() {
+        let one = change_to(1, &[1, 2, 3]);
+        let other = change_to(1, &[1, 2, 4]);
+        let next = DOMAIN.next(&one);
+        assert_ne!(next, DOMAIN, "not the one before");
+        assert_ne!(next, DOMAIN.next(&other), "another committee");
+        assert_ne!(next, next.next(&one), "the same change again");
+    }
+
+    #[test]
+    fn changes_round_trip() {
+        let change = change_to(1, &[1, 2, 3]);
+        let mut bytes = Vec::new();
+        change.encode(&mut bytes).unwrap();
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(ChangeCertificate::decode(&mut reader), Ok(change), "same");
+        assert_eq!(reader.finish(), Ok(()), "all of it");
+        let mut empty = Vec::new();
+        put_count(&mut empty, 0).unwrap();
+        assert_eq!(
+            Committee::decode(&mut Reader::new(&empty)),
+            Err(DecodeError::Invalid),
+            "nobody"
+        );
+        let mut twice = Vec::new();
+        put_count(&mut twice, 2).unwrap();
+        for _ in 0..2 {
+            put_node(&mut twice, NodeId::new(1)).unwrap();
+            twice.push(key(1).verifying_key().algorithm().id());
+            put_bytes(&mut twice, key(1).verifying_key().as_bytes()).unwrap();
+        }
+        assert_eq!(
+            Committee::decode(&mut Reader::new(&twice)),
+            Err(DecodeError::Invalid),
+            "a member twice"
+        );
     }
 
     #[test]
