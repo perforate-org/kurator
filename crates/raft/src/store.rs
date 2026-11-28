@@ -399,11 +399,13 @@ mod tests {
     use openraft::raft::VoteRequest;
     use openraft_rt_sim::SimRuntime;
 
+    use std::num::NonZeroUsize;
+
     use super::Store;
     use crate::network::{Connection, Failure, Transport};
     use crate::replica::Member;
-    use crate::rpc::{Message, Request, Response};
-    use crate::snapshot::SnapshotBytes;
+    use crate::rpc::{Message, Refusal, Request, Response};
+    use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk, chunks};
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, Peer, SnapshotMeta, StoredMembership, Vote};
     use oleaph_crypto::NodeSecret;
@@ -547,6 +549,66 @@ mod tests {
             let kept = reopened.replica(shard).await.unwrap().unwrap();
             assert_eq!(kept.shard().span().start(), b"m", "kept: {}", kept.shard());
             reopened.shutdown().await.unwrap();
+        });
+    }
+
+    /// Sends `chunk` of a snapshot of `shard` from the leader of `vote`.
+    async fn send(
+        store: &Store<Test, Nowhere>,
+        shard: ShardId,
+        vote: Vote,
+        chunk: &SnapshotChunk,
+    ) -> Response<Test> {
+        let request = Request::InstallSnapshot {
+            vote,
+            chunk: chunk.clone(),
+        };
+        store.inbox().handle(Message::new(shard, request)).await
+    }
+
+    #[test]
+    fn a_snapshot_sent_in_chunks_is_installed_once_whole() {
+        SimRuntime::with_seed(3).block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let store = open(root.path()).await;
+            let shard = ShardId::new(2);
+            let bytes = seed();
+            let (meta, _) = bytes.decode().unwrap();
+            let snapshot = Snapshot {
+                meta,
+                snapshot: bytes,
+            };
+            let parts: Vec<_> = chunks(&snapshot, NonZeroUsize::new(16).unwrap()).collect();
+            let (last, before) = parts.split_last().unwrap();
+            assert!(before.len() > 2, "several chunks");
+            let leader = Vote::new_committed(2, NodeId::new(2));
+
+            let stray = send(&store, shard, leader, &before[1]).await;
+            assert!(
+                matches!(stray, Response::Refused(Refusal::OutOfOrder)),
+                "{stray:?}"
+            );
+            for part in before {
+                let kept = send(&store, shard, leader, part).await;
+                assert!(matches!(kept, Response::Received), "{kept:?}");
+            }
+            let replica = store.replica(shard).await.unwrap().unwrap();
+            assert!(!replica.is_initialized(), "not before the last chunk");
+            let installed = send(&store, shard, leader, last).await;
+            assert!(
+                matches!(&installed, Response::InstallSnapshot(answer) if answer.vote == leader),
+                "{installed:?}"
+            );
+            assert!(replica.is_initialized(), "installed");
+            assert_eq!(replica.shard().span().start(), b"m", "the seed's half");
+
+            let deposed = Vote::new_committed(1, NodeId::new(2));
+            let refused = send(&store, shard, deposed, &before[0]).await;
+            assert!(
+                matches!(&refused, Response::InstallSnapshot(answer) if answer.vote == leader),
+                "a lower vote is answered with the held one: {refused:?}"
+            );
+            store.shutdown().await.unwrap();
         });
     }
 }

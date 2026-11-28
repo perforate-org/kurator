@@ -172,11 +172,13 @@ impl Cluster {
     ///
     /// When a node cannot start.
     pub async fn start(seed: u64, size: u64, faults: Faults) -> Result<Self, SimError> {
-        // Snapshots and purges every few dozen entries, so that runs exercise
-        // catching up from a snapshot.
+        // Snapshots and purges every few dozen entries, and sends snapshots
+        // in small chunks, so that runs exercise catching up from a snapshot
+        // that takes many requests.
         let config = openraft::Config {
             snapshot_policy: SnapshotPolicy::LogsSinceLast(40),
             max_in_snapshot_log_to_keep: 10,
+            snapshot_max_chunk_size: 256,
             ..openraft::Config::default()
         }
         .validate()?;

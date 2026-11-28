@@ -11,7 +11,7 @@
 //!
 //! A snapshot is written to a temporary file, synced, renamed into place
 //! and the directory synced, so a crash leaves the old snapshot or the new
-//! one.
+//! one. It goes to other replicas in [chunks](SnapshotChunk).
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -24,6 +24,11 @@ use oleaph_wal::sync_dir;
 use crate::codec::{meta, put_meta};
 use crate::error::{Error, Result, SnapshotDamage};
 use crate::types::{LeaderId, Membership, SnapshotMeta};
+
+mod chunk;
+
+pub use chunk::SnapshotChunk;
+pub(crate) use chunk::{Assembly, Received, chunks};
 
 /// Version 2 added peers to the membership, version 3 the readable
 /// versions of each key, version 4 the shard.

@@ -9,7 +9,11 @@
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::num::NonZeroUsize;
+use std::pin::pin;
 use std::time::Duration;
+
+use futures_util::future::{Either, select};
 
 use openraft::error::{NetworkError, RPCError, ReplicationClosed, StreamingError, Unreachable};
 use openraft::network::{RPCOption, RaftNetworkFactory, v2::RaftNetworkV2};
@@ -19,9 +23,33 @@ use openraft::raft::{
 
 use crate::config::Config;
 use crate::rpc::{Message, Refusal, Request, Response};
-use crate::snapshot::{Snapshot, SnapshotBytes};
+use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk, chunks};
 use crate::types::{NodeId, Peer, Vote};
 use oleaph_shard::ShardId;
+
+/// The size of a snapshot chunk when `OpenRaft` names none: its own
+/// default.
+const CHUNK: NonZeroUsize = match NonZeroUsize::new(3 << 20) {
+    Some(size) => size,
+    None => NonZeroUsize::MIN,
+};
+
+/// How fast a replica is taken to install a snapshot it has received:
+/// check, decode, write and sync it, in bytes a second. The last chunk's
+/// deadline grows by the time the whole snapshot takes at this pace, so
+/// that a large shard is not refused for the work after its transfer.
+const INSTALL_PACE: u64 = 32 << 20;
+
+/// How long to wait for the answer to `chunk` when a request may take
+/// `deadline`: the last chunk also waits for the install.
+fn chunk_deadline(chunk: &SnapshotChunk, deadline: Duration) -> Duration {
+    if chunk.is_last() {
+        let install = chunk.total().saturating_mul(1000).div_ceil(INSTALL_PACE);
+        deadline.saturating_add(Duration::from_millis(install))
+    } else {
+        deadline
+    }
+}
 
 /// Why a request got no answer.
 #[derive(Debug)]
@@ -153,9 +181,47 @@ impl<K> Link<K> {
             answer @ (Response::AppendEntries(_)
             | Response::Vote(_)
             | Response::PreVote(_)
-            | Response::InstallSnapshot(_)) => expect(answer)
+            | Response::InstallSnapshot(_)
+            | Response::Received) => expect(answer)
                 .ok_or_else(|| RPCError::Network(NetworkError::new(&Mismatched { target }))),
         }
+    }
+
+    /// Sends `snapshot`'s chunks of `size` bytes in order, waiting at
+    /// most `deadline` for each answer, and returns the answer to the last
+    /// one, or the first that names a higher vote.
+    async fn send_chunks<C>(
+        &mut self,
+        vote: Vote,
+        snapshot: &Snapshot,
+        size: NonZeroUsize,
+        deadline: Duration,
+    ) -> Result<SnapshotResponse<C>, RPCError<C>>
+    where
+        C: Config,
+        K: Connection<C>,
+    {
+        let target = self.target;
+        for chunk in chunks(snapshot, size) {
+            let last = chunk.is_last();
+            let wait = chunk_deadline(&chunk, deadline);
+            let request = Request::InstallSnapshot { vote, chunk };
+            let answer = self
+                .exchange(request, wait, |response| match response {
+                    Response::InstallSnapshot(installed) => Some(Answer::Done(installed)),
+                    Response::Received if !last => Some(Answer::Kept),
+                    Response::Received
+                    | Response::Refused(_)
+                    | Response::AppendEntries(_)
+                    | Response::Vote(_)
+                    | Response::PreVote(_) => None,
+                })
+                .await?;
+            if let Answer::Done(installed) = answer {
+                return Ok(installed);
+            }
+        }
+        Err(RPCError::Network(NetworkError::new(&Mismatched { target })))
     }
 }
 
@@ -207,31 +273,39 @@ impl<C: Config, K: Connection<C>> RaftNetworkV2<C> for Link<K> {
         .await
     }
 
+    /// Sends `snapshot` in chunks of the size `option` names, each
+    /// within `option`'s deadline, and stops when `cancel` resolves.
     async fn full_snapshot(
         &mut self,
         vote: Vote,
         snapshot: Snapshot,
-        _cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
+        cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<C>, StreamingError<C>> {
-        let request = Request::InstallSnapshot { vote, snapshot };
-        let installed = self
-            .exchange(request, option.hard_ttl(), |response| {
-                if let Response::InstallSnapshot(installed) = response {
-                    Some(installed)
-                } else {
-                    None
+        let size = option
+            .snapshot_chunk_size()
+            .and_then(NonZeroUsize::new)
+            .unwrap_or(CHUNK);
+        let sending = pin!(self.send_chunks(vote, &snapshot, size, option.hard_ttl()));
+        match select(pin!(cancel), sending).await {
+            Either::Left((closed, _)) => Err(StreamingError::Closed(closed)),
+            Either::Right((sent, _)) => sent.map_err(|error| match error {
+                RPCError::Unreachable(unreachable) => StreamingError::Unreachable(unreachable),
+                RPCError::Network(network) => StreamingError::Network(network),
+                other @ (RPCError::Timeout(_) | RPCError::RemoteError(_)) => {
+                    StreamingError::Network(NetworkError::new(&other))
                 }
-            })
-            .await;
-        installed.map_err(|error| match error {
-            RPCError::Unreachable(unreachable) => StreamingError::Unreachable(unreachable),
-            RPCError::Network(network) => StreamingError::Network(network),
-            other @ (RPCError::Timeout(_) | RPCError::RemoteError(_)) => {
-                StreamingError::Network(NetworkError::new(&other))
-            }
-        })
+            }),
+        }
     }
+}
+
+/// What the receiver said to a chunk.
+enum Answer<C: openraft::RaftTypeConfig> {
+    /// It kept the chunk: send the next.
+    Kept,
+    /// It installed the snapshot, or holds a higher vote: stop.
+    Done(SnapshotResponse<C>),
 }
 
 #[cfg(test)]
@@ -247,10 +321,18 @@ mod tests {
 
     use oleaph_shard::ShardId;
 
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use openraft::error::{ReplicationClosed, StreamingError};
+    use parking_lot::Mutex;
+
     use super::{Connection, Failure, Network, Transport};
-    use crate::rpc::{Message, Refusal, Response};
+    use crate::rpc::{Message, Refusal, Request, Response};
+    use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk};
     use crate::types::testing::peer;
-    use crate::types::{NodeId, Peer, Vote};
+    use crate::types::{NodeId, Peer, SnapshotMeta, Vote};
 
     crate::declare_config!(Test, SimRuntime);
 
@@ -314,5 +396,177 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Takes snapshot chunks, noting each one's deadline and whether it
+    /// was the last, and answers as `answer` says for the nth chunk.
+    #[derive(Clone)]
+    struct Taker {
+        seen: Arc<Mutex<Vec<(bool, Duration)>>>,
+        answer: fn(usize, &SnapshotChunk) -> Response<Test>,
+    }
+
+    impl Transport<Test> for Taker {
+        type Connection = Self;
+
+        fn connect(&self, _target: NodeId, _peer: &Peer) -> Self {
+            self.clone()
+        }
+    }
+
+    impl Connection<Test> for Taker {
+        async fn call(
+            &mut self,
+            message: Message<Test>,
+            deadline: Duration,
+        ) -> Result<Response<Test>, Failure> {
+            let Request::InstallSnapshot { chunk, .. } = message.into_request() else {
+                return Ok(Response::Refused(Refusal::Malformed));
+            };
+            let mut seen = self.seen.lock();
+            seen.push((chunk.is_last(), deadline));
+            Ok((self.answer)(seen.len(), &chunk))
+        }
+    }
+
+    fn installed(_nth: usize, chunk: &SnapshotChunk) -> Response<Test> {
+        if chunk.is_last() {
+            Response::InstallSnapshot(SnapshotResponse::new(leader()))
+        } else {
+            Response::Received
+        }
+    }
+
+    fn deposed(_nth: usize, _chunk: &SnapshotChunk) -> Response<Test> {
+        Response::InstallSnapshot(SnapshotResponse::new(Vote::new_committed(
+            9,
+            NodeId::new(3),
+        )))
+    }
+
+    fn lost(nth: usize, chunk: &SnapshotChunk) -> Response<Test> {
+        if nth == 2 {
+            Response::Refused(Refusal::OutOfOrder)
+        } else {
+            installed(nth, chunk)
+        }
+    }
+
+    fn early(_nth: usize, _chunk: &SnapshotChunk) -> Response<Test> {
+        Response::InstallSnapshot(SnapshotResponse::new(leader()))
+    }
+
+    /// What came of sending a snapshot, and what the receiver saw of each
+    /// chunk: whether it was the last, and its deadline.
+    type Sent = (
+        Result<SnapshotResponse<Test>, StreamingError<Test>>,
+        Vec<(bool, Duration)>,
+    );
+
+    /// When the replication that sends a snapshot is closed.
+    #[derive(Debug, Clone, Copy)]
+    enum Cancel {
+        Never,
+        AtOnce,
+    }
+
+    fn leader() -> Vote {
+        Vote::new_committed(2, NodeId::new(1))
+    }
+
+    /// Sends a snapshot of `len` bytes to a [`Taker`] answering with
+    /// `answer`, and returns the outcome and what the taker saw.
+    fn send(
+        len: usize,
+        answer: fn(usize, &SnapshotChunk) -> Response<Test>,
+        cancel: Cancel,
+    ) -> Sent {
+        SimRuntime::with_seed(0).block_on(async move {
+            let taker = Taker {
+                seen: Arc::default(),
+                answer,
+            };
+            let mut network = Network::new(taker.clone(), ShardId::FIRST);
+            let mut link = network.new_client(NodeId::new(2), &peer(2)).await;
+            let snapshot = Snapshot {
+                meta: SnapshotMeta::default(),
+                snapshot: SnapshotBytes::from_vec(vec![7; len]),
+            };
+            let option = RPCOption::new(Duration::from_millis(200));
+            let wait: Pin<Box<dyn Future<Output = ()> + Send>> = match cancel {
+                Cancel::Never => Box::pin(std::future::pending()),
+                Cancel::AtOnce => Box::pin(std::future::ready(())),
+            };
+            let closing = async move {
+                wait.await;
+                ReplicationClosed::new("cancelled")
+            };
+            let outcome = link
+                .full_snapshot(leader(), snapshot, closing, option)
+                .await;
+            let seen = taker.seen.lock().clone();
+            (outcome, seen)
+        })
+    }
+
+    #[test]
+    fn a_snapshot_goes_in_chunks_and_the_last_waits_for_the_install() {
+        let (outcome, seen) = send((7 << 20) + 1, installed, Cancel::Never);
+        assert_eq!(outcome.unwrap().vote, leader(), "installed");
+        let ttl = Duration::from_millis(200);
+        // 7 MiB at 32 MiB a second: 219 ms more for the install.
+        assert_eq!(
+            seen,
+            [
+                (false, ttl),
+                (false, ttl),
+                (true, ttl + Duration::from_millis(219))
+            ],
+            "three chunks of at most 3 MiB"
+        );
+    }
+
+    #[test]
+    fn sending_stops_at_a_higher_vote() {
+        let (outcome, seen) = send(7 << 20, deposed, Cancel::Never);
+        assert_eq!(outcome.unwrap().vote.leader_id.term, 9, "higher vote");
+        assert_eq!(seen.len(), 1, "stopped after the first chunk");
+    }
+
+    #[test]
+    fn sending_stops_at_a_refusal() {
+        let (outcome, seen) = send(7 << 20, lost, Cancel::Never);
+        assert!(
+            matches!(outcome, Err(StreamingError::Unreachable(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(seen.len(), 2, "stopped at the refusal");
+    }
+
+    #[test]
+    fn sending_stops_when_cancelled() {
+        let (outcome, seen) = send(7 << 20, installed, Cancel::AtOnce);
+        assert!(
+            matches!(outcome, Err(StreamingError::Closed(_))),
+            "{outcome:?}"
+        );
+        assert!(seen.is_empty(), "nothing sent");
+    }
+
+    #[test]
+    fn a_kept_last_chunk_answers_another_request() {
+        let (outcome, seen) = send(1, |_, _| Response::Received, Cancel::Never);
+        assert!(
+            matches!(outcome, Err(StreamingError::Network(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(seen, [(true, Duration::from_millis(201))], "one chunk");
+    }
+
+    #[test]
+    fn an_empty_snapshot_is_one_chunk() {
+        let (outcome, seen) = send(0, early, Cancel::Never);
+        assert_eq!(outcome.unwrap().vote, leader(), "answered");
+        assert_eq!(seen.len(), 1, "one chunk");
     }
 }

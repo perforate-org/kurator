@@ -66,7 +66,7 @@ pub use openraft;
 pub use proposal::Proposal;
 pub use replica::{Member, Replica, Status, Txn};
 pub use rpc::{Message, Refusal, Request, Response};
-pub use snapshot::{Snapshot, SnapshotBytes};
+pub use snapshot::{Snapshot, SnapshotBytes, SnapshotChunk};
 pub use state_machine::StateMachine;
 pub use store::{Inbox, Memberships, Store};
 pub use types::{

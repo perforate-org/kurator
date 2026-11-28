@@ -22,9 +22,9 @@ use crate::layout::Home;
 use crate::log_store::LogStore;
 use crate::proposal::Proposal;
 use crate::rpc::{Refusal, Request, Response};
-use crate::snapshot::SnapshotBytes;
+use crate::snapshot::{Assembly, Received, SnapshotBytes, SnapshotChunk};
 use crate::state_machine::StateMachine;
-use crate::types::{LogId, Membership, NodeId, Peer, Progress};
+use crate::types::{LogId, Membership, NodeId, Peer, Progress, Vote};
 use oleaph_crypto::{KeyPurpose, NodeSecret};
 
 /// Who a replica is: its id in the cluster and the secret its keys come
@@ -79,6 +79,8 @@ pub struct Replica<C: Config> {
     /// How long each proposal took from this replica, as the leader, to
     /// being committed and applied. Proposals that failed are not counted.
     commits: Histogram,
+    /// The snapshot the leader is sending, as far as it has come.
+    incoming: parking_lot::Mutex<Assembly>,
 }
 
 /// Where a replica stands, from its own point of view.
@@ -168,6 +170,7 @@ impl<C: Config> Replica<C> {
             state,
             syncs,
             commits: Histogram::default(),
+            incoming: parking_lot::Mutex::default(),
         })
     }
 
@@ -438,14 +441,34 @@ impl<C: Config> Replica<C> {
                 .map(Response::AppendEntries),
             Request::Vote(request) => self.raft.vote(request).await.map(Response::Vote),
             Request::PreVote(request) => self.raft.pre_vote(request).await.map(Response::PreVote),
-            Request::InstallSnapshot { vote, snapshot } => self
+            Request::InstallSnapshot { vote, chunk } => return self.receive(vote, chunk).await,
+        };
+        response.unwrap_or(Response::Refused(Refusal::Stopped))
+    }
+
+    /// Takes `chunk` of the snapshot the leader of `vote` sends, and
+    /// installs the snapshot once its last chunk is in. A chunk from a
+    /// leader of a lower vote than this replica holds is answered with
+    /// that vote, so the sender stops.
+    async fn receive(&self, vote: Vote, chunk: SnapshotChunk) -> Response<C> {
+        let held = self.raft.metrics().borrow_watched().vote;
+        if held > vote {
+            return Response::InstallSnapshot(openraft::raft::SnapshotResponse::new(held));
+        }
+        let received = self.incoming.lock().add(vote, chunk);
+        match received {
+            Received::Stray => Response::Refused(Refusal::OutOfOrder),
+            Received::Damaged => Response::Refused(Refusal::Malformed),
+            Received::Part => Response::Received,
+            Received::Whole(snapshot) => self
                 .raft
                 .install_full_snapshot(vote, snapshot)
                 .await
-                .map(Response::InstallSnapshot)
-                .map_err(RaftError::Fatal),
-        };
-        response.unwrap_or(Response::Refused(Refusal::Stopped))
+                .map_or(
+                    Response::Refused(Refusal::Stopped),
+                    Response::InstallSnapshot,
+                ),
+        }
     }
 }
 
