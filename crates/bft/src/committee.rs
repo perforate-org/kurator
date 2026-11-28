@@ -21,7 +21,7 @@ use crate::wire::{put_count, put_node, put_signature, read_count, read_node, rea
 
 /// What every signature in one shard's consensus is bound to, so that a
 /// vote in one shard, or one test, never counts in another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Domain([u8; 32]);
 
 impl Domain {

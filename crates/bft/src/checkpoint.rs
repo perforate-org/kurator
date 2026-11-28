@@ -123,19 +123,58 @@ impl StateRoot {
     }
 }
 
+/// Whether the epoch goes on after a checkpoint's block, or ends there.
+///
+/// The members sign it with the rest, so a certificate of the checkpoint
+/// at the block that ends an epoch shows, to anyone who trusts that
+/// epoch's committee, where the epoch ended and which domain the next one
+/// decides in: what a replica that missed the end needs to follow on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Boundary {
+    /// More blocks follow in the same epoch.
+    Within,
+    /// The block ends the epoch, and the next decides in this domain.
+    Ends(Domain),
+}
+
+/// The tags of [`Boundary`] on the wire and in signatures.
+const WITHIN: u8 = 0;
+const ENDS: u8 = 1;
+
+impl Boundary {
+    fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
+        match self {
+            Self::Within => out.write_all(&[WITHIN]),
+            Self::Ends(next) => {
+                out.write_all(&[ENDS])?;
+                out.write_all(next.as_bytes())
+            }
+        }
+    }
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        match reader.read::<u8>()? {
+            WITHIN => Ok(Self::Within),
+            ENDS => Ok(Self::Ends(Domain::new(reader.read()?))),
+            _ => Err(DecodeError::Invalid),
+        }
+    }
+}
+
 /// The state of a shard once it decided `block`, of `view`, its block at
-/// `height`: the state named by `root`.
+/// `height`: the state named by `root`, and whether the epoch ends there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Checkpoint {
     height: Height,
     block: BlockId,
     view: View,
     root: StateRoot,
+    boundary: Boundary,
 }
 
 impl Checkpoint {
     /// The state named by `root`, after `block` of `view`, decided at
-    /// `height`.
+    /// `height`, with more blocks to follow in the epoch.
     #[must_use]
     pub const fn new(height: Height, block: BlockId, view: View, root: StateRoot) -> Self {
         Self {
@@ -143,7 +182,32 @@ impl Checkpoint {
             block,
             view,
             root,
+            boundary: Boundary::Within,
         }
+    }
+
+    /// The same state, at the block that ends the epoch, the next deciding
+    /// in `next`.
+    #[must_use]
+    pub const fn ending(self, next: Domain) -> Self {
+        Self {
+            boundary: Boundary::Ends(next),
+            ..self
+        }
+    }
+
+    /// Whether the epoch ends at its block.
+    #[must_use]
+    pub const fn boundary(&self) -> Boundary {
+        self.boundary
+    }
+
+    /// Whether it names the same state as `other`, whatever each says of
+    /// the epoch: the state a replica reaches knows nothing of epochs.
+    #[must_use]
+    pub fn names(&self, other: &Self) -> bool {
+        (self.height, self.block, self.view, self.root)
+            == (other.height, other.block, other.view, other.root)
     }
 
     /// How many blocks were decided.
@@ -172,22 +236,18 @@ impl Checkpoint {
 
     /// The bytes a share of it signs.
     fn statement(&self, domain: Domain) -> Vec<u8> {
-        [
-            domain.as_bytes().as_slice(),
-            SHARE,
-            &self.height.0.to_le_bytes(),
-            self.block.as_bytes(),
-            &self.view.get().to_le_bytes(),
-            &self.root.0,
-        ]
-        .concat()
+        let mut statement = [domain.as_bytes().as_slice(), SHARE].concat();
+        // Writing to a vector cannot fail.
+        let _written = self.encode(&mut statement);
+        statement
     }
 
     fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&self.height.0.to_le_bytes())?;
         self.block.encode(out)?;
         put_view(out, self.view)?;
-        out.write_all(&self.root.0)
+        out.write_all(&self.root.0)?;
+        self.boundary.encode(out)
     }
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
@@ -195,7 +255,11 @@ impl Checkpoint {
         let block = BlockId::decode(reader)?;
         let view = read_view(reader)?;
         let root = StateRoot(reader.read()?);
-        Ok(Self::new(height, block, view, root))
+        let boundary = Boundary::decode(reader)?;
+        Ok(Self {
+            boundary,
+            ..Self::new(height, block, view, root)
+        })
     }
 }
 
@@ -302,10 +366,16 @@ impl CheckpointCertificate {
         self.checkpoint.root
     }
 
-    /// Whether it certifies `checkpoint`.
+    /// Whether it certifies the state `checkpoint` names.
     #[must_use]
     pub fn certifies(&self, checkpoint: &Checkpoint) -> bool {
-        self.checkpoint == *checkpoint
+        self.checkpoint.names(checkpoint)
+    }
+
+    /// Whether the epoch ends at its block.
+    #[must_use]
+    pub const fn boundary(&self) -> Boundary {
+        self.checkpoint.boundary
     }
 
     /// Whether it certifies a later checkpoint than `older` does.
@@ -609,7 +679,7 @@ mod tests {
     use oleaph_storage::{Version, WriteBatch};
 
     use super::{
-        CHUNK, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Own, Share,
+        Boundary, CHUNK, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Own, Share,
         StateRoot, Tally, Verdict, span,
     };
     use crate::committee::Domain;
@@ -655,6 +725,37 @@ mod tests {
         signed.encode(&mut bytes).unwrap();
         let mut reader = Reader::new(&bytes);
         assert_eq!(Share::decode(&mut reader).unwrap(), signed, "round trip");
+    }
+
+    #[test]
+    fn the_end_of_an_epoch_is_signed_with_the_state() {
+        let next = Domain::new([5; 32]);
+        let within = checkpoint(10, 1);
+        let ends = within.ending(next);
+        assert_eq!(within.boundary(), Boundary::Within, "goes on");
+        assert_eq!(ends.boundary(), Boundary::Ends(next), "ends");
+        assert!(ends.names(&within), "the same state");
+        assert!(!ends.names(&checkpoint(10, 2)), "not another");
+
+        let signed = share(1, ends);
+        assert_eq!(signed.verify(&committee(), DOMAIN), Ok(()), "valid");
+        let claimed = Share {
+            checkpoint: within,
+            ..signed.clone()
+        };
+        assert_eq!(
+            claimed.verify(&committee(), DOMAIN),
+            Err(Rejection::Forged(NodeId::new(1))),
+            "the signature covers where the epoch ends"
+        );
+        let mut bytes = Vec::new();
+        signed.encode(&mut bytes).unwrap();
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(Share::decode(&mut reader).unwrap(), signed, "round trip");
+
+        let certified = certify(ends);
+        assert_eq!(certified.boundary(), Boundary::Ends(next), "certified");
+        assert!(certified.certifies(&within), "the state the ledger reached");
     }
 
     #[test]

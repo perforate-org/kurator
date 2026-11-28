@@ -7,7 +7,9 @@ use oleaph_wal::Options;
 
 use super::{Config, Core, Event};
 use crate::block::{Block, Order, Proposal};
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot};
+use crate::checkpoint::{
+    Boundary, Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot,
+};
 use crate::committee::ChangeCertificate;
 use crate::fixture::{DOMAIN, change_to, committee, key};
 use crate::message::Message;
@@ -1018,6 +1020,30 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
     };
 
     let core = cores.get_mut(&NodeId::new(3)).unwrap();
+    // Its share of the state at the end says where the epoch ends, and
+    // the domain of the next.
+    let shared = |core: &mut Core, block| {
+        let checkpoint =
+            Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]));
+        let reached = core.handle(Event::Reached(checkpoint)).persisted();
+        reached
+            .messages()
+            .iter()
+            .find_map(|outgoing| match outgoing.message() {
+                Message::Checkpoint(share) => Some(share.checkpoint().boundary()),
+                _ => None,
+            })
+    };
+    assert_eq!(
+        shared(core, last.id()),
+        Some(Boundary::Ends(DOMAIN.next(&ends))),
+        "the end"
+    );
+    assert_eq!(
+        shared(core, BlockId::new([9; 32])),
+        Some(Boundary::Within),
+        "not at the end"
+    );
     assert_eq!(
         core.succeed(&at(BlockId::new([9; 32]))),
         None,

@@ -61,7 +61,7 @@ mod wire;
 
 pub use block::{Block, Order, Proposal};
 pub use checkpoint::{
-    Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Share, StateRoot,
+    Boundary, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Share, StateRoot,
 };
 pub use committee::{Change, ChangeCertificate, Committee, Domain, Endorsement};
 pub use core::{Config, Core, Event};

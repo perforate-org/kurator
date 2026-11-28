@@ -380,6 +380,7 @@ impl Core {
                 Ok(())
             }
             Event::Reached(checkpoint) => {
+                let checkpoint = self.bound(checkpoint);
                 let share = Share::sign(
                     &self.config.key,
                     self.config.domain,
@@ -487,6 +488,18 @@ impl Core {
                 self.store(block);
                 Ok(())
             }
+        }
+    }
+
+    /// `checkpoint`, saying whether the epoch ends at its block: it does
+    /// at the block that holds the change the replica decided, and the
+    /// next epoch decides in the domain that change leads to.
+    fn bound(&self, checkpoint: Checkpoint) -> Checkpoint {
+        match &self.ending {
+            Some(change) if checkpoint.block() == self.committed.0 => {
+                checkpoint.ending(self.config.domain.next(change))
+            }
+            _ => checkpoint,
         }
     }
 
