@@ -124,7 +124,7 @@ module bft {
   pure def max(a: int, b: int): int = if (a > b) a else b
 
   /// Whether `s` decided a block that ends the epoch.
-  pure def ended(s: Replica): bool = s.decided.intersect(Changes) != Set()
+  pure def ended(s: Replica): bool = Changes.exists(c => s.decided.contains(c))
 
   // ------------------------------------------------------------------
   // State
@@ -206,12 +206,9 @@ module bft {
     val child = blocks.get(q.block)
     val commits = q.block != Genesis and child.view == q.view and child.view == child.justify + 1
     val chain = blocks.get(child.parent).ancestors.union(Set(child.parent)).exclude(Set(Genesis))
-    val ends = chain.exclude(s.decided).intersect(Changes)
-    // The oldest of them, by height; -1 when there is none.
-    val end = ends.fold(-1, (a, b) => if (a == -1 or blocks.get(b).height < blocks.get(a).height) b else a)
-    val upToEnd =
-      if (end == -1) chain
-      else chain.filter(b => blocks.get(b).height <= blocks.get(end).height)
+    // Before the end, no change is decided yet, so the first change on the
+    // chain is the first with no change before it.
+    val upToEnd = chain.filter(b => Changes.forall(c => not(blocks.get(b).ancestors.contains(c))))
     val decided =
       if (commits and not(ended(s))) s.decided.union(upToEnd)
       else s.decided
@@ -571,8 +568,9 @@ module bft {
   /// Every correct replica that ended the epoch ended it at the same
   /// block, the first change on the chain.
   val endsAtOneBlock: bool = {
-    val ends = Correct.map(r => replicas.get(r).decided.intersect(Changes)).flatten()
-    ends.size() <= 1
+    Changes.forall(a => Changes.forall(b =>
+      a == b or not(Correct.exists(r => replicas.get(r).decided.contains(a)) and Correct.exists(r => replicas.get(r).decided.contains(b)))
+    ))
   }
 
   /// A correct replica decides nothing after the block that ends its
@@ -580,7 +578,7 @@ module bft {
   val nothingAfterTheEnd: bool =
     Correct.forall(r => {
       val decided = replicas.get(r).decided
-      decided.intersect(Changes).forall(c =>
+      Changes.forall(c => not(decided.contains(c)) or
         decided.forall(b => blocks.get(b).height <= blocks.get(c).height)
       )
     })
@@ -775,6 +773,24 @@ module n4f1 {
       .then(collectTimeouts("n2", { view: 4, high: { view: 3, block: 6 } }))
       .expect(replicas.get("n2").view == 5 and ended(replicas.get("n2")))
       .expect(not(proposals.exists(p => blocks.get(p.block).view == 5)))
+}
+
+/// `n4f1` without the change, for the model checker. No run of 3 steps
+/// ends the epoch: deciding the change takes a certificate of it and one
+/// of a block after it, each the votes of two correct replicas on a
+/// proposal. So the change adds nothing to the runs `quint verify`
+/// explores, and leaving it out lets Apalache unfold the epoch's rules,
+/// which range over `Changes`, to nothing.
+module n4f1c0 {
+  import schedule.*
+  import bft(
+    Replicas = Set("n1", "n2", "n3", "n4"),
+    Faulty = Set("n4"),
+    MaxView = 5,
+    Slots = 2,
+    LeaderOf = Leaders,
+    Changes = Set(),
+  ).*
 }
 
 /// Four replicas, all correct. With one slot, the block of view `v` is

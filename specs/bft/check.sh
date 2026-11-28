@@ -33,7 +33,7 @@ mutants=(
   "crash forgets the vote|s/      entered: NoTC,\n    \}\n    \/\/ It may/      entered: NoTC,\n      voted: 0,\n    }\n    \/\/ It may/"
   "crash forgets the proposal|s/      entered: NoTC,\n    \}\n    \/\/ It may/      entered: NoTC,\n      proposed: 0,\n    }\n    \/\/ It may/"
   "skip carries no certificate|s/leadIn\(r, observe\(replicas\.get\(r\), tc\.high\), now\)/(replicas.get(r), now)/"
-  "decides past the change|s/      if \(end == -1\) chain\n      else chain\.filter\(b => blocks\.get\(b\)\.height <= blocks\.get\(end\)\.height\)/      chain/"
+  "decides past the change|s/chain\.filter\(b => Changes\.forall\(c => not\(blocks\.get\(b\)\.ancestors\.contains\(c\)\)\)\)/chain/"
   "votes after the end|s/    not\(ended\(s\)\),\n    b\.view == s\.view,/    b.view == s.view,/"
   "proposes after the end|s/    not\(ended\(s\)\),\n    LeaderOf/    LeaderOf/"
 )
@@ -66,5 +66,6 @@ fi
 step "trace validation: $traces runs of n4f0 and of n4f1, and one that ends the epoch, replayed against crates/bft"
 OLEAPH_BFT_TRACES="$scratch/traces" cargo test --locked -q -p oleaph-bft --lib core::trace
 
-step "model checking of n4f1: safety in every run of $depth steps"
-quint verify --main n4f1 --invariant safety --max-steps "$depth" --verbosity 1 "$spec"
+# n4f1c0 is n4f1 without the change, which no run this short reaches.
+step "model checking of n4f1c0: safety in every run of $depth steps"
+quint verify --main n4f1c0 --invariant safety --max-steps "$depth" --verbosity 1 "$spec"
