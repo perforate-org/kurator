@@ -149,6 +149,17 @@ pub struct Core {
     effects: Effects,
 }
 
+/// The state a replica that follows a handoff must take before it moves
+/// on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Following {
+    /// The state at the end of the epoch it ends, which starts the next.
+    End(CheckpointCertificate),
+    /// The state at a checkpoint that the committee of the epoch this
+    /// succession starts certified, past the start.
+    Past(Box<Succession>, CheckpointCertificate),
+}
+
 impl Core {
     /// A replica that never ran: it knows only the genesis block.
     #[must_use]
@@ -300,11 +311,12 @@ impl Core {
     }
 
     /// Follows `successions` past the epoch it decides in, as a member of
-    /// a later epoch sent them: it checks each against the committee
+    /// a later epoch sent them with `newest`, the newest checkpoint that
+    /// member's committee certified: it checks each against the committee
     /// before it, starts every epoch but the last, and ends the one it is
     /// then in at the last one's change, as if it had decided it. It
-    /// returns the checkpoint the last one starts from, whose state the
-    /// replica must take before it moves on, or nothing when none is new.
+    /// returns the state the replica must take before it moves on, or
+    /// nothing when none of them is new.
     ///
     /// # Errors
     ///
@@ -312,7 +324,8 @@ impl Core {
     pub(crate) fn follow(
         &mut self,
         successions: &[Succession],
-    ) -> Result<Option<CheckpointCertificate>, Rejection> {
+        newest: Option<&CheckpointCertificate>,
+    ) -> Result<Option<Following>, Rejection> {
         let epoch = self.epoch();
         let new: Vec<&Succession> = successions
             .iter()
@@ -335,16 +348,40 @@ impl Core {
             self.begin((*succession).clone());
         }
         self.ending = Some(last.change().clone());
-        Ok(Some(last.end().clone()))
+        // Once the last committee certified a checkpoint of its own, the
+        // state at the end may be gone: the replica takes the newer one.
+        let newer = newest.filter(|certificate| {
+            certificate.verify(&committee, domain).is_ok() && certificate.supersedes(last.end())
+        });
+        Ok(Some(newer.map_or_else(
+            || Following::End(last.end().clone()),
+            |certificate| Following::Past(Box::new((*last).clone()), certificate.clone()),
+        )))
+    }
+
+    /// Starts the epoch `succession` starts, past its start: at
+    /// `certificate`, a checkpoint its committee certified, whose state the
+    /// replica took from that committee. It returns the records the
+    /// journal needs, as [`Core::compact`] does.
+    pub(crate) fn leap(
+        &mut self,
+        succession: Succession,
+        certificate: &CheckpointCertificate,
+    ) -> Vec<Record> {
+        self.begin(succession);
+        self.rebase(certificate)
     }
 
     /// Shows `to`, who sent what this epoch's committee cannot have
-    /// signed, how its epochs succeeded, once a timeout at most: `to` may
-    /// have missed the end of one.
+    /// signed, how its epochs succeeded and the newest checkpoint it
+    /// knows, once a timeout at most: `to` may have missed the end of an
+    /// epoch, or this replica may have, and `to` answers.
     fn hand_off(&mut self, to: NodeId) {
-        if !self.eras.is_empty() && self.handed.insert(to) {
-            self.effects
-                .send(To::One(to), Message::Handoff(self.eras.clone()));
+        if self.handed.insert(to) {
+            self.effects.send(
+                To::One(to),
+                Message::Handoff(self.eras.clone(), self.base.clone()),
+            );
         }
     }
 
@@ -547,12 +584,19 @@ impl Core {
                 }
                 Ok(())
             }
-            // The state at a checkpoint, and the epochs it follows, are the
-            // replica's to send and take.
-            Message::Want(..)
-            | Message::Manifest(..)
-            | Message::Chunk(..)
-            | Message::Handoff(_) => Err(Rejection::Unwanted),
+            // The replica follows the epochs a handoff shows: what is left
+            // is to answer one from a replica further behind.
+            Message::Handoff(successions, _) => {
+                let theirs = successions.last().map_or(Epoch::FIRST, Succession::epoch);
+                if theirs < self.epoch() {
+                    self.hand_off(from);
+                }
+                Ok(())
+            }
+            // The state at a checkpoint is the replica's to send and take.
+            Message::Want(..) | Message::Manifest(..) | Message::Chunk(..) => {
+                Err(Rejection::Unwanted)
+            }
             Message::Deliver(block) => {
                 if !self.wanted.remove(&block.id()) {
                     return Err(Rejection::Unwanted);

@@ -28,7 +28,8 @@ use crate::checkpoint::{
     Checkpoint, CheckpointCertificate, Height, Manifest, Own, Part, Succession, Verdict,
 };
 use crate::committee::ChangeCertificate;
-use crate::core::{Core, Event};
+use crate::committee::Committee;
+use crate::core::{Core, Event, Following};
 use crate::message::Message;
 use crate::step::{Act, Record, Timer, To};
 use crate::view::Epoch;
@@ -121,6 +122,9 @@ struct Inner {
     /// The state at it, as the replica takes it from the others when the
     /// blocks up to it are gone.
     catchup: Option<Catchup>,
+    /// The epoch a handoff showed it, which it starts once it holds the
+    /// state of the newest checkpoint that epoch's committee certified.
+    leap: Option<Succession>,
     health: Health,
 }
 
@@ -224,14 +228,21 @@ impl Inner {
             .unwrap_or_default()
     }
 
-    /// The other members of the committee.
+    /// The other members of the committee that holds the state it takes:
+    /// that of the epoch it leaps to, if any.
     fn others(&self) -> Vec<NodeId> {
         let node = self.core.node();
-        self.core
-            .committee()
+        self.committee()
             .members()
             .filter(|member| *member != node)
             .collect()
+    }
+
+    /// The committee of the epoch it leaps to, or else of its own.
+    fn committee(&self) -> &Committee {
+        self.leap
+            .as_ref()
+            .map_or_else(|| self.core.committee(), |leap| leap.change().committee())
     }
 
     /// Takes in the manifest of the state it catches up to.
@@ -270,7 +281,10 @@ impl Inner {
             self.halt(Health::Stopped);
             return;
         }
-        let records = self.core.rebase(certificate);
+        let records = match self.leap.take() {
+            Some(succession) => self.core.leap(succession, certificate),
+            None => self.core.rebase(certificate),
+        };
         self.settle(certificate, records);
         let _judged = self.own.judge(certificate);
         self.waiting.clear();
@@ -297,17 +311,36 @@ impl Inner {
         }
     }
 
-    /// Follows `successions`, sent by a member of a later epoch, and
-    /// takes the state the last of them starts from, unless it holds it.
-    fn follow(&mut self, successions: &[Succession]) {
-        let Ok(Some(end)) = self.core.follow(successions) else {
-            return;
-        };
-        self.certified = Some(end);
-        // It decided up to the end itself, and only missed the
-        // certificate, or it takes the state from the others.
-        self.judge();
-        self.catch_up();
+    /// Follows `successions`, sent by a member of a later epoch with
+    /// `newest`, and takes the state it must hold to move on, unless it
+    /// holds it.
+    fn follow(&mut self, successions: &[Succession], newest: Option<&CheckpointCertificate>) {
+        match self.core.follow(successions, newest) {
+            Ok(Some(Following::End(end))) => {
+                self.certified = Some(end);
+                // It decided up to the end itself, and only missed the
+                // certificate, or it takes the state from the others.
+                self.judge();
+                self.catch_up();
+            }
+            Ok(Some(Following::Past(succession, newest))) => {
+                // Left out of that epoch's committee, it has nothing to
+                // take.
+                if succession
+                    .change()
+                    .committee()
+                    .key(self.core.node())
+                    .is_none()
+                {
+                    self.halt(Health::Retired(succession.epoch()));
+                    return;
+                }
+                self.leap = Some(*succession);
+                self.certified = Some(newest);
+                self.catch_up();
+            }
+            Ok(None) | Err(_) => {}
+        }
     }
 
     /// Answers a replica catching up with `part` of the state kept at
@@ -427,6 +460,7 @@ impl<H: Host> Replica<H> {
                 own: Own::default(),
                 certified: None,
                 catchup: None,
+                leap: None,
                 health: Health::Running,
             }),
         };
@@ -468,7 +502,18 @@ impl<H: Host> Replica<H> {
                 self.handle(inner, Event::Received { from, message });
                 inner.catch_up();
             }
-            Message::Handoff(successions) => inner.follow(&successions),
+            Message::Handoff(successions, newest) => {
+                inner.follow(&successions, newest.as_ref());
+                // Its own, for a sender further behind.
+                let handoff = Message::Handoff(successions, newest);
+                self.handle(
+                    inner,
+                    Event::Received {
+                        from,
+                        message: handoff,
+                    },
+                );
+            }
             message @ (Message::Proposal(_)
             | Message::Vote(_)
             | Message::Timeout(_)
