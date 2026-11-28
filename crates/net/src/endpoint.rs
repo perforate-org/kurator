@@ -134,7 +134,7 @@ impl Endpoint {
         #[cfg(feature = "bft")]
         let committees: Box<dyn Members> = Box::new(self.committees.clone());
         #[cfg(not(feature = "bft"))]
-        let committees: Box<dyn Members> = Box::new(BTreeMap::new());
+        let committees: Box<dyn Members> = Box::new(crate::roster::NoCommittees);
         let roster = Arc::new(Roster::new(
             self.bootstrap,
             inbox.memberships(),

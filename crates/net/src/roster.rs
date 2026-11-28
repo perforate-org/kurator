@@ -96,10 +96,15 @@ pub(crate) trait Members: Debug + Send + Sync {
     fn keys(&self) -> BTreeMap<NodeId, VerifyingKey>;
 }
 
-/// No committees: a node that holds no BFT shard.
-impl Members for BTreeMap<NodeId, VerifyingKey> {
+/// No committees: a build without BFT holds no BFT shard.
+#[cfg(not(feature = "bft"))]
+#[derive(Debug)]
+pub(crate) struct NoCommittees;
+
+#[cfg(not(feature = "bft"))]
+impl Members for NoCommittees {
     fn keys(&self) -> BTreeMap<NodeId, VerifyingKey> {
-        self.clone()
+        BTreeMap::new()
     }
 }
 
