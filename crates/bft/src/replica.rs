@@ -280,10 +280,10 @@ impl Inner {
     /// certifies, with `records`, all the core still knows, and moves on
     /// to the next epoch if the checkpoint ends this one: it retires if
     /// the next committee leaves it out.
-    fn settle(&mut self, certificate: &CheckpointCertificate, records: Vec<Record>) {
+    fn settle(&mut self, certificate: &CheckpointCertificate, compacted: Vec<Record>) {
         let (records, succeeded) = match self.core.succeed(certificate) {
             Some(records) => (records, Some(self.core.epoch())),
-            None => (records, None),
+            None => (compacted, None),
         };
         if self.journal.compact(certificate, &records).is_err() {
             self.halt(Health::Stopped);

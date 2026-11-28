@@ -107,13 +107,19 @@ mod fixture {
     /// The change to a committee of `members` in `epoch`, which nodes 1
     /// to 3 endorse in [`DOMAIN`].
     pub(crate) fn change_to(epoch: u64, members: &[u64]) -> ChangeCertificate {
+        change_in(DOMAIN, epoch, members)
+    }
+
+    /// The change to a committee of `members` in `epoch`, which nodes 1
+    /// to 3 endorse in `domain`.
+    pub(crate) fn change_in(domain: Domain, epoch: u64, members: &[u64]) -> ChangeCertificate {
         let keys = members
             .iter()
             .map(|node| (NodeId::new(*node), key(*node).verifying_key()))
             .collect();
         let change = Change::new(Epoch::new(epoch), Committee::new(keys).unwrap());
         let endorsements: Vec<_> = (1..=3)
-            .map(|node| Endorsement::sign(&key(node), DOMAIN, NodeId::new(node), &change))
+            .map(|node| Endorsement::sign(&key(node), domain, NodeId::new(node), &change))
             .collect();
         ChangeCertificate::new(change, endorsements)
     }
@@ -121,18 +127,34 @@ mod fixture {
     /// The epoch `change_to(epoch, members)` starts, after a checkpoint at
     /// `block` that nodes 1 to 3 certify in [`DOMAIN`].
     pub(crate) fn succession_to(epoch: u64, members: &[u64], block: BlockId) -> Succession {
-        let change = change_to(epoch, members);
+        succession_in(DOMAIN, epoch, members, block)
+    }
+
+    /// The epoch `change_in(domain, epoch, members)` starts, after a
+    /// checkpoint at `block` that nodes 1 to 3 certify in `domain`.
+    pub(crate) fn succession_in(
+        domain: Domain,
+        epoch: u64,
+        members: &[u64],
+        block: BlockId,
+    ) -> Succession {
+        let change = change_in(domain, epoch, members);
         let end = Checkpoint::new(Height::new(1), block, View::new(1), StateRoot::new([6; 32]))
-            .ending(DOMAIN.next(&change));
-        Succession::new(change, certify(end)).unwrap()
+            .ending(domain.next(&change));
+        Succession::new(change, certify_in(domain, end)).unwrap()
     }
 
     /// A certificate for `checkpoint`, signed by nodes 1 to 3.
     pub(crate) fn certify(checkpoint: Checkpoint) -> CheckpointCertificate {
+        certify_in(DOMAIN, checkpoint)
+    }
+
+    /// A certificate for `checkpoint`, signed by nodes 1 to 3 in `domain`.
+    pub(crate) fn certify_in(domain: Domain, checkpoint: Checkpoint) -> CheckpointCertificate {
         let mut tally = Tally::default();
         (1..=3)
             .find_map(|node| {
-                let share = Share::sign(&key(node), DOMAIN, NodeId::new(node), checkpoint);
+                let share = Share::sign(&key(node), domain, NodeId::new(node), checkpoint);
                 tally.count(share, 3)
             })
             .unwrap()

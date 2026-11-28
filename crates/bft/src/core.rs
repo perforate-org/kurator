@@ -140,8 +140,8 @@ pub struct Core {
     /// The change it decided, which ends the epoch at the last decided
     /// block.
     ending: Option<ChangeCertificate>,
-    /// Those it showed how its epochs succeeded, since it entered its
-    /// view: once a view each.
+    /// Those it showed how its epochs succeeded, since its view began or
+    /// its timer last fired: once in that time each.
     handed: BTreeSet<NodeId>,
     /// Blocks the event in hand taught it, to write down.
     learned: Vec<Block>,
@@ -339,8 +339,8 @@ impl Core {
     }
 
     /// Shows `to`, who sent what this epoch's committee cannot have
-    /// signed, how its epochs succeeded, once a view: `to` may have missed
-    /// the end of one.
+    /// signed, how its epochs succeeded, once a timeout at most: `to` may
+    /// have missed the end of one.
     fn hand_off(&mut self, to: NodeId) {
         if !self.eras.is_empty() && self.handed.insert(to) {
             self.effects
@@ -658,6 +658,9 @@ impl Core {
         if view != self.view {
             return;
         }
+        // A handoff may have been lost, and a committee that needs the
+        // replica it went to stays in its view.
+        self.handed.clear();
         self.voted = self.voted.max(view);
         let timeout = Timeout::sign(
             &self.config.key,

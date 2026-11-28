@@ -547,3 +547,36 @@ fn a_committee_hands_the_shard_on_to_the_next() {
         .run(cluster.replica(1).propose(put("c", "3")))
         .unwrap();
 }
+
+#[test]
+fn a_member_that_missed_the_end_of_an_epoch_follows_on() {
+    let mut cluster = Cluster::new();
+    let late = NodeId::new(3);
+    // It hears nothing while the others decide the change and end the
+    // epoch.
+    let away = cluster.replicas.remove(&late).unwrap();
+    let _put = cluster
+        .run(cluster.replica(1).propose(put("a", "1")))
+        .unwrap();
+    let epoch = cluster.run(cluster.replica(1).change(change_to(1, &[1, 2, 3])));
+    assert_eq!(epoch.unwrap(), Epoch::new(1), "the next epoch");
+    cluster.until(|cluster| (1..=2).all(|node| cluster.replica(node).epoch() == Epoch::new(1)));
+    assert_eq!(away.epoch(), Epoch::FIRST, "missed it");
+
+    // The next committee has no quorum without it. Back, it times out in
+    // the epoch it knows; the others show it how that epoch ended, and it
+    // takes the state there and follows on.
+    drop(cluster.replicas.insert(late, away));
+    cluster.until(|cluster| cluster.replica(3).epoch() == Epoch::new(1));
+    let _later = cluster
+        .run(cluster.replica(3).propose(put("b", "2")))
+        .unwrap();
+    cluster.pump(2000);
+    for node in 1..=3 {
+        let state = cluster
+            .run(cluster.replica(node).read(Clone::clone))
+            .unwrap();
+        assert_eq!(state.get(b"a"), Some(b"1".as_slice()), "{node} kept");
+        assert_eq!(state.get(b"b"), Some(b"2".as_slice()), "{node} decided");
+    }
+}
