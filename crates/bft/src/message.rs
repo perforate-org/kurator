@@ -2,7 +2,7 @@
 
 use std::io;
 
-use kurator_codec::{DecodeError, Format, Reader};
+use oleaph_codec::{DecodeError, Format, Reader};
 
 use crate::block::{Block, Proposal};
 use crate::checkpoint::Share;
@@ -10,8 +10,8 @@ use crate::timeout::{Timeout, TimeoutCertificate};
 use crate::vote::{BlockId, Vote};
 use crate::wire::{put_commands, read_commands};
 
-/// Every message: magic `KBFT`, version 1, a tag, the body, a CRC-32C.
-const FORMAT: Format = Format::new(*b"KBFT", 1);
+/// Every message: magic `OBFT`, version 1, a tag, the body, a CRC-32C.
+const FORMAT: Format = Format::new(*b"OBFT", 1);
 
 const PROPOSAL: u8 = 1;
 const VOTE: u8 = 2;
@@ -122,8 +122,8 @@ mod tests {
     use crate::fixture::{DOMAIN, key};
     use std::collections::BTreeMap;
 
-    use kurator_codec::DecodeError;
-    use kurator_consensus::NodeId;
+    use oleaph_codec::DecodeError;
+    use oleaph_consensus::NodeId;
     use proptest::prelude::*;
 
     use super::Message;

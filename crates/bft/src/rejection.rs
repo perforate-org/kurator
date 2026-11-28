@@ -1,6 +1,6 @@
 //! Why a replica ignored a message.
 
-use kurator_consensus::NodeId;
+use oleaph_consensus::NodeId;
 
 use crate::view::View;
 

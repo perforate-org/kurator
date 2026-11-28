@@ -1,21 +1,21 @@
-//! `kurator`: run a replica, make a node key, or run a client. See [`kurator_node::args`].
+//! `oleaph`: run a replica, make a node key, or run a client. See [`oleaph_node::args`].
 
 use std::io::Write as _;
 use std::process::ExitCode;
 
-use kurator_node::args::{self, Invocation};
+use oleaph_node::args::{self, Invocation};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let outcome = match args::parse(std::env::args().skip(1)) {
-        Ok(Invocation::Key(dir, purpose)) => kurator_node::key(&dir, purpose)
+        Ok(Invocation::Key(dir, purpose)) => oleaph_node::key(&dir, purpose)
             .map(|key| Some(key.to_string()))
             .map_err(|error| error.to_string()),
-        Ok(Invocation::Run(settings)) => kurator_node::run(settings)
+        Ok(Invocation::Run(settings)) => oleaph_node::run(settings)
             .await
             .map(|()| None)
             .map_err(|error| error.to_string()),
-        Ok(Invocation::Client(session)) => kurator_node::session::run(&session)
+        Ok(Invocation::Client(session)) => oleaph_node::session::run(&session)
             .await
             .map(Some)
             .map_err(|error| error.to_string()),
@@ -35,7 +35,7 @@ fn report(outcome: Result<Option<String>, String>) -> std::io::Result<ExitCode> 
             Ok(ExitCode::SUCCESS)
         }
         Err(error) => {
-            writeln!(std::io::stderr(), "kurator: {error}")?;
+            writeln!(std::io::stderr(), "oleaph: {error}")?;
             Ok(ExitCode::FAILURE)
         }
     }

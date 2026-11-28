@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::rpc::{Message, Refusal, Request, Response};
 use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{NodeId, Peer, Vote};
-use kurator_shard::ShardId;
+use oleaph_shard::ShardId;
 
 /// Why a request got no answer.
 #[derive(Debug)]
@@ -245,7 +245,7 @@ mod tests {
     use openraft::raft::{SnapshotResponse, VoteRequest};
     use openraft_rt_sim::SimRuntime;
 
-    use kurator_shard::ShardId;
+    use oleaph_shard::ShardId;
 
     use super::{Connection, Failure, Network, Transport};
     use crate::rpc::{Message, Refusal, Response};

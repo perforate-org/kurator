@@ -8,7 +8,7 @@
 
 use std::io;
 
-use kurator_shard::ShardState;
+use oleaph_shard::ShardState;
 
 use crate::checkpoint::StateRoot;
 
@@ -16,10 +16,10 @@ use crate::checkpoint::StateRoot;
 const CHUNK: usize = 1 << 20;
 
 /// The key derivation context of chunk hashes. Fixed forever.
-const CHUNK_CONTEXT: &str = "kurator 2026-11 bft state chunk";
+const CHUNK_CONTEXT: &str = "oleaph 2026-11 bft state chunk";
 
 /// The key derivation context of state roots. Fixed forever.
-const ROOT_CONTEXT: &str = "kurator 2026-11 bft state root";
+const ROOT_CONTEXT: &str = "oleaph 2026-11 bft state root";
 
 /// The hash of each chunk of a shard's encoded state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,8 +78,8 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
-    use kurator_shard::ShardState;
-    use kurator_storage::{Version, WriteBatch};
+    use oleaph_shard::ShardState;
+    use oleaph_storage::{Version, WriteBatch};
 
     use super::{CHUNK, Manifest};
 
@@ -95,7 +95,7 @@ mod tests {
         let mut state = ShardState::default();
         let _applied = state.apply(
             Version::new(1),
-            kurator_storage::Command::Kv(WriteBatch::new().put("a", "1")),
+            oleaph_storage::Command::Kv(WriteBatch::new().put("a", "1")),
         );
         let written = Manifest::of(&state).unwrap();
         assert_ne!(written.root(), empty.root(), "another state");

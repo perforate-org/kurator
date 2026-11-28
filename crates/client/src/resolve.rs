@@ -2,8 +2,8 @@
 //! runs into one of their locks past its deadline asks the primary how it
 //! came out, aborting it there when it never decided.
 
-use kurator_shard::ShardId;
-use kurator_storage::{
+use oleaph_shard::ShardId;
+use oleaph_storage::{
     Abort, Command, Deadline, Decide, Decided, Decision, Outcome, Prepare, TxnId,
 };
 
@@ -123,8 +123,8 @@ pub(crate) const fn decision(decided: Decided) -> Decision {
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
-    use kurator_shard::ShardId;
-    use kurator_storage::{Abort, Command, Deadline, Decision, Outcome, TxnId, Version};
+    use oleaph_shard::ShardId;
+    use oleaph_storage::{Abort, Command, Deadline, Decision, Outcome, TxnId, Version};
     use parking_lot::Mutex;
 
     use super::{Lock, resolve_expired};

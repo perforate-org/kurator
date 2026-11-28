@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use kurator_shard::ShardId;
-use kurator_storage::{Abort, Collect, Command, Deadline, Outcome};
+use oleaph_shard::ShardId;
+use oleaph_storage::{Abort, Collect, Command, Deadline, Outcome};
 
 use crate::remote::{Call, Reply};
 use crate::resolve::Lock;
@@ -134,8 +134,8 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::FutureExt as _;
-    use kurator_shard::ShardId;
-    use kurator_storage::{Abort, Collect, Command, Deadline, Decision, Outcome, TxnId, Version};
+    use oleaph_shard::ShardId;
+    use oleaph_storage::{Abort, Collect, Command, Deadline, Decision, Outcome, TxnId, Version};
     use parking_lot::Mutex;
 
     use super::{Collected, Collector, FENCE_TRIES};

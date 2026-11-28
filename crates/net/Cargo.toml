@@ -1,6 +1,6 @@
 [package]
-name = "kurator-net"
-description = "QUIC transport for Kurator replicas: persistent connections, binary RPC, Ed25519 raw-public-key authentication"
+name = "oleaph-net"
+description = "QUIC transport for OleaphDB replicas: persistent connections, binary RPC, Ed25519 raw-public-key authentication"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,17 +13,17 @@ categories.workspace = true
 [features]
 # BFT replicas on the same transport. Off by default: a Raft-only build
 # does not depend on the BFT crate.
-bft = ["dep:kurator-bft", "dep:parking_lot"]
+bft = ["dep:oleaph-bft", "dep:parking_lot"]
 
 [dependencies]
-kurator-bft = { workspace = true, optional = true }
-kurator-client.workspace = true
-kurator-meta.workspace = true
-kurator-consensus.workspace = true
-kurator-crypto.workspace = true
-kurator-raft.workspace = true
-kurator-shard.workspace = true
-kurator-storage.workspace = true
+oleaph-bft = { workspace = true, optional = true }
+oleaph-client.workspace = true
+oleaph-meta.workspace = true
+oleaph-consensus.workspace = true
+oleaph-crypto.workspace = true
+oleaph-raft.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
 openraft-rt-tokio.workspace = true
 parking_lot = { workspace = true, optional = true }
 quinn.workspace = true
@@ -32,7 +32,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-kurator-wal.workspace = true
+oleaph-wal.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

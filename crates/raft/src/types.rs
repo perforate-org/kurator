@@ -3,7 +3,7 @@
 
 use openraft::impls::leader_id_adv;
 
-pub use kurator_consensus::{NodeId, Peer};
+pub use oleaph_consensus::{NodeId, Peer};
 
 /// How far a learner is from joining the quorum, as the leader sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ pub(crate) mod testing {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use super::{Membership, NodeId, Peer};
-    use kurator_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_crypto::{KeyPurpose, NodeSecret};
 
     /// Replica `id`'s peer: a loopback address and a key from its id.
     pub(crate) fn peer(id: u64) -> Peer {

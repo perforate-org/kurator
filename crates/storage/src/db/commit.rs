@@ -27,7 +27,7 @@ impl GroupCommit {
     pub(crate) fn spawn(core: Arc<Core>, max_batch: NonZeroUsize) -> Result<Self> {
         let (requests, queue) = mpsc::channel();
         let worker = thread::Builder::new()
-            .name("kurator-commit".to_owned())
+            .name("oleaph-commit".to_owned())
             .spawn(move || run(&core, &queue, max_batch))?;
         Ok(Self {
             requests: Some(requests),

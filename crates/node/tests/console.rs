@@ -1,4 +1,4 @@
-//! The `kurator` binary, driven through its console like an operator would.
+//! The `oleaph` binary, driven through its console like an operator would.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -10,13 +10,13 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-const KURATOR: &str = env!("CARGO_BIN_EXE_kurator");
+const OLEAPH: &str = env!("CARGO_BIN_EXE_oleaph");
 
 #[test]
 fn key_prints_the_same_key_every_time() {
     let dir = tempfile::tempdir().unwrap();
     let key = || {
-        let output = Command::new(KURATOR)
+        let output = Command::new(OLEAPH)
             .arg("key")
             .arg(dir.path())
             .output()
@@ -35,13 +35,10 @@ fn key_prints_the_same_key_every_time() {
 
 #[test]
 fn a_bad_command_line_fails_with_a_message() {
-    let output = Command::new(KURATOR).arg("serve").output().unwrap();
+    let output = Command::new(OLEAPH).arg("serve").output().unwrap();
     assert!(!output.status.success(), "fails");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.starts_with("kurator: expected"),
-        "explains: {stderr}"
-    );
+    assert!(stderr.starts_with("oleaph: expected"), "explains: {stderr}");
     assert!(output.stdout.is_empty(), "nothing on stdout");
 }
 
@@ -57,10 +54,10 @@ struct Console {
 }
 
 impl Console {
-    /// Runs `kurator run` with `args` and `--dir <dir>`, and waits for it
+    /// Runs `oleaph run` with `args` and `--dir <dir>`, and waits for it
     /// to say it is ready.
     fn start(args: &[&str], dir: &Path) -> Self {
-        let mut node = Command::new(KURATOR)
+        let mut node = Command::new(OLEAPH)
             .arg("run")
             .args(args)
             .arg("--dir")
@@ -200,17 +197,17 @@ fn a_node_that_holds_no_shard_says_so() {
     assert!(console.quit().is_empty(), "nothing more");
 }
 
-/// The key `kurator key` prints for `dir`.
+/// The key `oleaph key` prints for `dir`.
 fn key_of(dir: &Path) -> String {
-    let output = Command::new(KURATOR).arg("key").arg(dir).output().unwrap();
+    let output = Command::new(OLEAPH).arg("key").arg(dir).output().unwrap();
     assert!(output.status.success(), "key succeeds");
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// Runs `kurator client` with `args`: whether it succeeded, and what it
+/// Runs `oleaph client` with `args`: whether it succeeded, and what it
 /// printed on stdout and stderr.
 fn client(args: &[&str]) -> (bool, String) {
-    let output = Command::new(KURATOR)
+    let output = Command::new(OLEAPH)
         .arg("client")
         .args(args)
         .output()
@@ -294,7 +291,7 @@ fn a_trusted_client_runs_a_transaction_across_shards() {
     let stranger = stranger_dir.path().to_str().unwrap();
     let (refused, said) = client(&["--dir", stranger, "--peer", &peer, "get", "a"]);
     assert!(!refused, "a stranger is not served");
-    assert_eq!(said, "kurator: no node answered", "and is told so");
+    assert_eq!(said, "oleaph: no node answered", "and is told so");
     assert!(console.quit().is_empty(), "nothing more");
 }
 
@@ -442,7 +439,7 @@ fn a_backup_restores_as_a_new_cluster() {
 fn http_get(addr: &str, path: &str) -> String {
     use std::io::Read as _;
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
-    write!(stream, "GET {path} HTTP/1.1\r\nhost: kurator\r\n\r\n").unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nhost: oleaph\r\n\r\n").unwrap();
     let mut response = String::new();
     let _read = stream.read_to_string(&mut response).unwrap();
     response
@@ -474,14 +471,14 @@ fn a_node_serves_its_metrics() {
     assert!(page.starts_with("HTTP/1.1 200 OK\r\n"), "{page}");
     for expected in [
         "content-type: text/plain; version=0.0.4\r\n",
-        "# TYPE kurator_shard_leader gauge\n",
-        "kurator_shard_leader{shard=\"1\"} 1\n",
-        "kurator_shard_keys{shard=\"1\"} 1\n",
-        "# TYPE kurator_wal_sync_seconds histogram\n",
+        "# TYPE oleaph_shard_leader gauge\n",
+        "oleaph_shard_leader{shard=\"1\"} 1\n",
+        "oleaph_shard_keys{shard=\"1\"} 1\n",
+        "# TYPE oleaph_wal_sync_seconds histogram\n",
     ] {
         assert!(page.contains(expected), "{expected:?} in {page}");
     }
-    for family in ["kurator_wal_sync_seconds", "kurator_commit_seconds"] {
+    for family in ["oleaph_wal_sync_seconds", "oleaph_commit_seconds"] {
         let prefix = format!("{family}_count{{shard=\"1\"}} ");
         let count = page
             .lines()
@@ -496,9 +493,9 @@ fn a_node_serves_its_metrics() {
     assert!(console.quit().is_empty(), "nothing more");
 }
 
-/// The consensus key `kurator key --consensus` prints for `dir`.
+/// The consensus key `oleaph key --consensus` prints for `dir`.
 fn consensus_key_of(dir: &Path) -> String {
-    let output = Command::new(KURATOR)
+    let output = Command::new(OLEAPH)
         .arg("key")
         .arg(dir)
         .arg("--consensus")
@@ -519,7 +516,7 @@ fn a_node_runs_the_bft_shards_its_charters_seat_it_in() {
 
     // A charter that seats another node.
     std::fs::write(&charter, format!("shard 40\n{}", seat(2))).unwrap();
-    let output = Command::new(KURATOR)
+    let output = Command::new(OLEAPH)
         .args(["run", "--id", "1", "--listen", "127.0.0.1:0", "--bft"])
         .arg(&charter)
         .arg("--dir")

@@ -1,6 +1,6 @@
 [package]
-name = "kurator-consensus"
-description = "The boundary between Kurator's replicated shards and the consensus that replicates them: what a replica offers, whatever protocol runs it"
+name = "oleaph-consensus"
+description = "The boundary between OleaphDB's replicated shards and the consensus that replicates them: what a replica offers, whatever protocol runs it"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-kurator-shard.workspace = true
-kurator-storage.workspace = true
-kurator-codec.workspace = true
-kurator-crypto.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
+oleaph-codec.workspace = true
+oleaph-crypto.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

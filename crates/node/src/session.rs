@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use kurator_client::{Across, Client, Coordinator, Transacted};
-use kurator_net::{Endpoint, Quic, Wall};
+use oleaph_client::{Across, Client, Coordinator, Transacted};
+use oleaph_net::{Endpoint, Quic, Wall};
 
 use crate::NodeError;
 use crate::args::{Op, Session};

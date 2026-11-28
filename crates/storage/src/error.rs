@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kurator_wal::Lsn;
+use oleaph_wal::Lsn;
 
-use kurator_codec::DecodeError;
+use oleaph_codec::DecodeError;
 
 use crate::outcome::{Abort, Unreadable};
 
@@ -21,12 +21,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
     /// The write-ahead log failed while opening or checkpointing.
     #[error(transparent)]
-    Wal(#[from] kurator_wal::Error),
+    Wal(#[from] oleaph_wal::Error),
     /// The log failed to make a commit durable. Every write in the same
     /// group commit gets this error; the database takes no more writes and
     /// must be reopened.
     #[error("commit failed: {0}")]
-    Commit(Arc<kurator_wal::Error>),
+    Commit(Arc<oleaph_wal::Error>),
     /// A log record does not decode.
     #[error("log record {lsn} does not decode: {source}")]
     Record {
@@ -52,7 +52,7 @@ pub enum Error {
     /// The batch has no changes.
     #[error("write batch is empty")]
     EmptyBatch,
-    /// The encoded batch exceeds [`kurator_wal::MAX_PAYLOAD_LEN`].
+    /// The encoded batch exceeds [`oleaph_wal::MAX_PAYLOAD_LEN`].
     #[error("write batch is too large for one log record")]
     BatchTooLarge,
     /// The transaction aborted and wrote nothing.

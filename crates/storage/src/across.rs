@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use kurator_codec::{DecodeError, Reader};
+use oleaph_codec::{DecodeError, Reader};
 
 /// A transaction across shards, named by its coordinator. Ids must not
 /// repeat: a shard that decided a transaction treats any later command

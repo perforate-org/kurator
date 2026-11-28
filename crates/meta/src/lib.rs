@@ -1,7 +1,7 @@
 //! The meta shard: the registry of every other shard, as the placement
 //! driver of `TiKV` and the registry of the Internet Computer keep theirs.
 //!
-//! The meta shard, [`ShardId::META`](kurator_shard::ShardId::META), is a
+//! The meta shard, [`ShardId::META`](oleaph_shard::ShardId::META), is a
 //! Raft group like any other, founded with the cluster on the same voters
 //! and never split. Its key space is its own and holds two kinds of
 //! record:

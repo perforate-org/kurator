@@ -5,8 +5,8 @@ use std::io;
 use std::sync::Arc;
 
 use futures_util::{Stream, TryStreamExt as _};
-use kurator_shard::{Applied, Shard, ShardId, ShardState, Split};
-use kurator_storage::{KvState, Outcome, Version};
+use oleaph_shard::{Applied, Shard, ShardId, ShardState, Split};
+use oleaph_storage::{KvState, Outcome, Version};
 use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
 use parking_lot::Mutex;

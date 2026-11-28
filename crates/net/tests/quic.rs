@@ -11,22 +11,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_client::{
+use oleaph_client::{
     Call as ClientCall, Client, Collected, Collector, Coordinator, Reach as _, Reply,
     Request as ClientRequest, Transacted,
 };
-use kurator_consensus::Replicated as _;
-use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
-use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Registry, Reported};
-use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio, Wall};
-use kurator_raft::openraft::raft::VoteRequest;
-use kurator_raft::openraft::{self, SnapshotPolicy};
-use kurator_raft::{
+use oleaph_consensus::Replicated as _;
+use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_meta::{Answer, Ask as _, Call, Meta, Placement, Registry, Reported};
+use oleaph_net::{Endpoint, Quic, Replica, Server, Store, Tokio, Wall};
+use oleaph_raft::openraft::raft::VoteRequest;
+use oleaph_raft::openraft::{self, SnapshotPolicy};
+use oleaph_raft::{
     Connection as _, Failure, Member, Message, NodeId, Peer, Progress, Refusal, Request, Response,
     Role, Transport as _, Vote,
 };
-use kurator_shard::ShardId;
-use kurator_storage::{Command, Outcome, Version, WriteBatch};
+use oleaph_shard::ShardId;
+use oleaph_storage::{Command, Outcome, Version, WriteBatch};
 
 const LOOPBACK: &str = "127.0.0.1:0";
 
@@ -198,7 +198,7 @@ async fn membership_changes() {
     let peer = newcomer.peer.clone();
     drop(nodes.insert(4, newcomer));
     let four = NodeId::new(4);
-    let _: kurator_raft::LogId = leader(&nodes)
+    let _: oleaph_raft::LogId = leader(&nodes)
         .unwrap()
         .add_learner(four, peer)
         .await
@@ -207,7 +207,7 @@ async fn membership_changes() {
         leader(&nodes).is_some_and(|replica| replica.progress(four) == Progress::CaughtUp)
     })
     .await;
-    let _: kurator_raft::LogId = leader(&nodes).unwrap().promote(four).await.unwrap();
+    let _: oleaph_raft::LogId = leader(&nodes).unwrap().promote(four).await.unwrap();
     let status = nodes[&4].replica().status();
     assert!(
         status.snapshot().is_some(),
@@ -226,7 +226,7 @@ async fn membership_changes() {
         .find(|(id, node)| **id != 4 && node.replica().status().role() != Role::Leader)
         .map(|(id, _)| *id)
         .unwrap();
-    let _: kurator_raft::LogId = leader(&nodes)
+    let _: oleaph_raft::LogId = leader(&nodes)
         .unwrap()
         .remove(NodeId::new(leaving))
         .await
@@ -395,7 +395,9 @@ async fn a_trusted_client_writes_and_reads_through_the_leader() {
 }
 
 /// Asks node `target` for `call` on the first shard, following the leader
-/// each node names, until one answers otherwise.
+/// each node names, until one answers otherwise. A call that a leader
+/// dropped when it lost its term is asked again: the calls here write the
+/// same value again or only read, so applying one twice changes nothing.
 async fn on_leader(
     client: &Quic,
     peers: &BTreeMap<NodeId, Peer>,
@@ -408,7 +410,7 @@ async fn on_leader(
             .reach(target, &peers[&target], &request)
             .await
             .unwrap();
-        let Reply::NotLeader(hint) = reply else {
+        let (Reply::NotLeader(hint) | Reply::Discarded(hint)) = reply else {
             return reply;
         };
         match hint {
@@ -458,9 +460,9 @@ async fn client_requests() {
 
     // A write goes to the leader, and reads see it at its version.
     let put = ClientCall::Propose(Command::Kv(WriteBatch::new().put("k", "v")));
-    let Reply::Applied(Outcome::Committed(at)) = on_leader(&client, &peers, first, &put).await
-    else {
-        panic!("the write did not commit");
+    let reply = on_leader(&client, &peers, first, &put).await;
+    let Reply::Applied(Outcome::Committed(at)) = reply else {
+        panic!("the write did not commit: {reply:?}");
     };
     let Reply::Begun { at: begun, .. } =
         on_leader(&client, &peers, first, &ClientCall::Begin).await

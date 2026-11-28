@@ -19,7 +19,7 @@
 
 use std::fmt;
 
-use kurator_crypto::{Algorithm, Signature, SigningKey, VerifyingKey};
+use oleaph_crypto::{Algorithm, Signature, SigningKey, VerifyingKey};
 
 /// The most bytes a seal adds to a record.
 pub(crate) const MAX_SEAL_LEN: usize = signed_len(Algorithm::MAX_SIGNATURE_LEN);
@@ -279,7 +279,7 @@ fn split(record: &[u8]) -> Result<Split<'_>, SealDamage> {
 }
 
 fn record_digest(lsn: u64, prev: Digest, payload: &[u8]) -> Digest {
-    let digest = blake3::Hasher::new_derive_key("kurator-wal 2026-11 record digest")
+    let digest = blake3::Hasher::new_derive_key("oleaph-wal 2026-11 record digest")
         .update(&lsn.to_le_bytes())
         .update(&prev.0)
         .update(payload)
@@ -289,7 +289,7 @@ fn record_digest(lsn: u64, prev: Digest, payload: &[u8]) -> Digest {
 
 #[cfg(kani)]
 mod proofs {
-    use kurator_crypto::Algorithm;
+    use oleaph_crypto::Algorithm;
 
     use super::{LINKED_LEN, SealDamage, signed_len, split};
 
@@ -339,7 +339,7 @@ mod proofs {
 mod tests {
     use proptest::prelude::*;
 
-    use kurator_crypto::{Algorithm, SigningKey};
+    use oleaph_crypto::{Algorithm, SigningKey};
 
     use super::{Digest, Head, Integrity, LINKED_LEN, Opened, Protection, SealDamage, signed_len};
 

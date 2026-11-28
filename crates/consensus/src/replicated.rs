@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use std::ops::Bound;
 
-use kurator_shard::Shard;
-use kurator_storage::{Command, KeyValue, KvState, Outcome, Version};
+use oleaph_shard::Shard;
+use oleaph_storage::{Command, KeyValue, KvState, Outcome, Version};
 
 use crate::error::Result;
 use crate::node::{NodeId, Peer};
@@ -225,7 +225,7 @@ pub trait Transaction {
     /// # Errors
     ///
     /// [`Error::Storage`](crate::Error::Storage) with
-    /// [`kurator_storage::Error::Aborted`] when a write after its read
+    /// [`oleaph_storage::Error::Aborted`] when a write after its read
     /// version touched what it read: running it again may succeed.
     fn commit(self) -> impl Future<Output = Result<Version>> + Send;
 }
@@ -283,9 +283,9 @@ mod tests {
     use std::sync::Arc;
 
     use futures_util::FutureExt as _;
-    use kurator_crypto::{Algorithm, SigningKey};
-    use kurator_shard::Shard;
-    use kurator_storage::{Command, KeyValue, KvState, Outcome, Version, WriteBatch};
+    use oleaph_crypto::{Algorithm, SigningKey};
+    use oleaph_shard::Shard;
+    use oleaph_storage::{Command, KeyValue, KvState, Outcome, Version, WriteBatch};
 
     use super::{Duty, Members, Reads, Replicated, Route, Transaction};
     use crate::error::{Error, Result};
@@ -434,8 +434,8 @@ mod tests {
         let failed = Error::Failed("stopped".into());
         assert_eq!(failed.redirect(), None, "no redirect");
         assert!(!failed.is_aborted(), "not an abort");
-        let abort = kurator_storage::Abort::RolledBack(kurator_storage::TxnId::new(1));
-        let aborted = Error::Storage(kurator_storage::Error::Aborted(abort));
+        let abort = oleaph_storage::Abort::RolledBack(oleaph_storage::TxnId::new(1));
+        let aborted = Error::Storage(oleaph_storage::Error::Aborted(abort));
         assert!(aborted.is_aborted(), "an abort");
         assert_eq!(aborted.redirect(), None, "no redirect either");
     }

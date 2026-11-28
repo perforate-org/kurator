@@ -3,7 +3,7 @@
 use std::fmt;
 use std::num::NonZeroU64;
 
-use kurator_wal::Lsn;
+use oleaph_wal::Lsn;
 
 /// A version of the state: the position of the command that made it.
 ///
@@ -102,7 +102,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::{Retention, Version};
-    use kurator_wal::Lsn;
+    use oleaph_wal::Lsn;
 
     #[test]
     fn the_horizon_trails_the_newest_version() {

@@ -1,6 +1,6 @@
 [package]
-name = "kurator-client"
-description = "Kurator's client: what a client asks a node, how a node answers, and the client that routes reads, writes and transactions to the shards"
+name = "oleaph-client"
+description = "OleaphDB's client: what a client asks a node, how a node answers, and the client that routes reads, writes and transactions to the shards"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,17 +11,17 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-kurator-codec.workspace = true
-kurator-consensus.workspace = true
-kurator-meta.workspace = true
-kurator-shard.workspace = true
-kurator-storage.workspace = true
+oleaph-codec.workspace = true
+oleaph-consensus.workspace = true
+oleaph-meta.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-kurator-crypto.workspace = true
+oleaph-crypto.workspace = true
 proptest.workspace = true
 
 [lints]

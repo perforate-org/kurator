@@ -17,7 +17,7 @@ const FLAGS: u16 = 0;
 /// ```
 /// use std::io::Write as _;
 ///
-/// use kurator_codec::Format;
+/// use oleaph_codec::Format;
 ///
 /// let format = Format::new(*b"DEMO", 1);
 /// let framed = format.write(Vec::new(), |body| body.write_all(&[42]))?;

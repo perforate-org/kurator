@@ -1,11 +1,11 @@
-//! Shards for Kurator: the keys split into spans, each held by its own
+//! Shards for OleaphDB: the keys split into spans, each held by its own
 //! Raft group, in the manner of `TiKV`'s regions.
 //!
-//! A [`Shard`] is an id, a [`Span`](kurator_storage::Span) of keys
+//! A [`Shard`] is an id, a [`Span`](oleaph_storage::Span) of keys
 //! `[start, end)`, and an [`Epoch`] that counts how often the span
 //! changed. A [`ShardMap`] tiles every key with shards, so a client finds
 //! the shard of any key. A [`ShardState`] is what one shard's replicas
-//! hold: the shard and the [`KvState`](kurator_storage::KvState) of its
+//! hold: the shard and the [`KvState`](oleaph_storage::KvState) of its
 //! keys.
 //!
 //! A shard grows until its state passes its [`Ceiling`] and it
@@ -21,8 +21,8 @@
 //! replica alike, and the refusal tells the sender what the shard is now.
 //!
 //! ```
-//! use kurator_shard::{Applied, Epoch, ShardId, ShardState, Split};
-//! use kurator_storage::{Command, Version, WriteBatch};
+//! use oleaph_shard::{Applied, Epoch, ShardId, ShardState, Split};
+//! use oleaph_storage::{Command, Version, WriteBatch};
 //!
 //! let mut state = ShardState::default();
 //! let _ = state.apply(Version::new(1), Command::Kv(WriteBatch::new().put("zebra", "z")));

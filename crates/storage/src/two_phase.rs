@@ -37,7 +37,7 @@
 //! so its reads on every shard were still current then: committed
 //! transactions are serializable, each at its commit point.
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 
 use crate::across::{Deadline, TxnId};
 use crate::error::{Error, Result};
@@ -284,7 +284,7 @@ pub enum Decided {
 #[cfg(kani)]
 mod proofs {
     use super::{Collect, Decide};
-    use kurator_codec::Reader;
+    use oleaph_codec::Reader;
 
     /// Decoding a decision never panics, and a decoded decision encodes
     /// back to exactly the bytes it was read from.

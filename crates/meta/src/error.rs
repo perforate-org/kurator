@@ -1,6 +1,6 @@
 //! Why a meta operation failed.
 
-use kurator_codec::DecodeError;
+use oleaph_codec::DecodeError;
 
 /// Why a meta operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -9,7 +9,7 @@ pub enum MetaError {
     /// The meta shard's replica failed or refused: it is not the leader,
     /// say.
     #[error(transparent)]
-    Consensus(#[from] kurator_consensus::Error),
+    Consensus(#[from] oleaph_consensus::Error),
     /// A record does not decode.
     #[error("a meta record does not decode: {0}")]
     Record(#[from] DecodeError),
@@ -29,7 +29,7 @@ pub enum MetaError {
     #[error("cannot ask {node}: {source}")]
     Unreachable {
         /// The node.
-        node: kurator_consensus::NodeId,
+        node: oleaph_consensus::NodeId,
         /// Why.
         #[source]
         source: std::io::Error,

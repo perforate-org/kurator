@@ -3,8 +3,8 @@
 //! replica of a shard ends with the same state, the shards hold every key
 //! once, and the same seed replays the same run.
 //!
-//! `KURATOR_SIM_SEEDS=<n>` runs more seeds than the default, and
-//! `KURATOR_SIM_SEED=<seed>` runs just one, to reproduce a failure.
+//! `OLEAPH_SIM_SEEDS=<n>` runs more seeds than the default, and
+//! `OLEAPH_SIM_SEED=<seed>` runs just one, to reproduce a failure.
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -15,12 +15,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use kurator_consensus::{Duty, Route};
-use kurator_raft::NodeId;
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_shard::{Shard, ShardId, ShardMap, ShardState};
-use kurator_sim::{Cluster, Faults, Holdings, Outcome, Rng, SimError};
-use kurator_storage::WriteBatch;
+use oleaph_consensus::{Duty, Route};
+use oleaph_raft::NodeId;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_shard::{Shard, ShardId, ShardMap, ShardState};
+use oleaph_sim::{Cluster, Faults, Holdings, Outcome, Rng, SimError};
+use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 const DEFAULT_SEEDS: u64 = 12;
@@ -49,10 +49,10 @@ const MIN_NODES: usize = 3;
 const MAX_NODES: usize = 5;
 
 fn seeds() -> Vec<u64> {
-    if let Some(seed) = env_u64("KURATOR_SIM_SEED") {
+    if let Some(seed) = env_u64("OLEAPH_SIM_SEED") {
         return vec![seed];
     }
-    let count = env_u64("KURATOR_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS);
+    let count = env_u64("OLEAPH_SIM_SEEDS").unwrap_or(DEFAULT_SEEDS);
     let mut seeds: Vec<u64> = (0..count).collect();
     seeds.extend(REGRESSIONS.iter().filter(|seed| **seed >= count));
     seeds
@@ -118,7 +118,7 @@ async fn act(
                 Outcome::Acked => drop(run.acked.insert(key)),
                 Outcome::Unknown => drop(run.unknown.insert(key)),
                 Outcome::Rejected => {}
-                _ => panic!("an outcome added to kurator-sim: {outcome:?}"),
+                _ => panic!("an outcome added to oleaph-sim: {outcome:?}"),
             }
             format!("write -> {outcome:?}")
         }

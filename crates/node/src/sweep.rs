@@ -6,10 +6,10 @@
 
 use std::time::Duration;
 
-use kurator_client::{Client, Collected, Collector};
-use kurator_consensus::{Duty, Replicated as _};
-use kurator_net::{Quic, Store, Wall};
-use kurator_shard::ShardId;
+use oleaph_client::{Client, Collected, Collector};
+use oleaph_consensus::{Duty, Replicated as _};
+use oleaph_net::{Quic, Store, Wall};
+use oleaph_shard::ShardId;
 
 /// How often the node checks whether to collect.
 pub const EVERY: Duration = Duration::from_secs(60);

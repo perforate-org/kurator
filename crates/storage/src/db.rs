@@ -11,7 +11,7 @@ use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_wal::{Lsn, RecoveryReport};
+use oleaph_wal::{Lsn, RecoveryReport};
 
 use self::commit::GroupCommit;
 use self::core::Core;
@@ -28,7 +28,7 @@ use crate::version::Version;
 #[non_exhaustive]
 pub struct Options {
     /// Layout of the write-ahead log.
-    pub wal: kurator_wal::Options,
+    pub wal: oleaph_wal::Options,
     /// The most writes one group commit takes.
     pub max_batch: NonZeroUsize,
 }
@@ -36,7 +36,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            wal: kurator_wal::Options::default(),
+            wal: oleaph_wal::Options::default(),
             max_batch: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
         }
     }
@@ -96,8 +96,8 @@ impl Db {
     /// Starts a transaction that reads the newest version.
     ///
     /// ```
-    /// # fn main() -> Result<(), kurator_storage::Error> {
-    /// use kurator_storage::{Db, Error, Options};
+    /// # fn main() -> Result<(), oleaph_storage::Error> {
+    /// use oleaph_storage::{Db, Error, Options};
     ///
     /// let dir = tempfile::tempdir()?;
     /// let db = Db::open(dir.path(), Options::default())?;

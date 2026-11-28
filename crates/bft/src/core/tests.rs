@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use kurator_consensus::NodeId;
-use kurator_wal::Options;
+use oleaph_consensus::NodeId;
+use oleaph_wal::Options;
 
 use super::{Config, Core, Event};
 use crate::block::{Block, Proposal};

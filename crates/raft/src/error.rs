@@ -3,9 +3,9 @@
 use std::io;
 use std::path::PathBuf;
 
-use kurator_codec::DecodeError;
-use kurator_shard::{Shard, ShardId};
-use kurator_wal::Lsn;
+use oleaph_codec::DecodeError;
+use oleaph_shard::{Shard, ShardId};
+use oleaph_wal::Lsn;
 
 use crate::types::{NodeId, Progress};
 
@@ -21,11 +21,11 @@ pub enum Error {
     Io(#[from] io::Error),
     /// The Raft log failed.
     #[error(transparent)]
-    Wal(#[from] kurator_wal::Error),
+    Wal(#[from] oleaph_wal::Error),
     /// The command could not be encoded, or a transaction could not read
     /// or commit.
     #[error(transparent)]
-    Storage(#[from] kurator_storage::Error),
+    Storage(#[from] oleaph_storage::Error),
     /// A Raft log record does not decode.
     #[error("Raft log record {lsn} does not decode: {source}")]
     Record {
@@ -127,7 +127,7 @@ impl Error {
 }
 
 /// A Raft error, as the layers above consensus tell the cases apart.
-impl From<Error> for kurator_consensus::Error {
+impl From<Error> for oleaph_consensus::Error {
     fn from(error: Error) -> Self {
         match error {
             Error::NotLeader { leader } => Self::NotLeader { leader },

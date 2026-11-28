@@ -3,8 +3,8 @@
 use std::fmt;
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_storage::Span;
+use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_storage::Span;
 
 use crate::id::{Epoch, ShardId};
 
@@ -198,8 +198,8 @@ impl Halves {
 
 #[cfg(test)]
 mod tests {
-    use kurator_codec::{DecodeError, Reader};
-    use kurator_storage::{End, Span};
+    use oleaph_codec::{DecodeError, Reader};
+    use oleaph_storage::{End, Span};
     use proptest::prelude::*;
 
     use super::{Shard, Split};
@@ -298,7 +298,7 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::Split;
-    use kurator_codec::Reader;
+    use oleaph_codec::Reader;
 
     /// Decoding a split never panics, and a decoded split encodes back to
     /// exactly the bytes it was read from.

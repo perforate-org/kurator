@@ -13,9 +13,9 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
-use kurator_crypto::SigningKey;
-use kurator_metrics::Histogram;
-use kurator_wal::{Integrity, Lsn, Start, Wal};
+use oleaph_crypto::SigningKey;
+use oleaph_metrics::Histogram;
+use oleaph_wal::{Integrity, Lsn, Start, Wal};
 use openraft::storage::{IOFlushed, RaftLogStorage};
 use openraft::{LogState, OptionalSend, RaftLogReader};
 use parking_lot::Mutex;
@@ -65,7 +65,7 @@ impl LogStore {
     /// When the WAL is damaged or was signed with another key, and when a
     /// record does not decode.
     pub fn open(dir: &Path, key: SigningKey) -> Result<Self> {
-        let mut options = kurator_wal::Options::default();
+        let mut options = oleaph_wal::Options::default();
         options.integrity = Integrity::Signed(key);
         let mut replayed = Replayed::default();
         let (wal, _) = Wal::open(dir, options, Start::Oldest, |lsn, payload| {

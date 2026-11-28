@@ -1,11 +1,11 @@
-//! Metrics for Kurator: [`Histogram`]s of latencies that the hot paths
+//! Metrics for OleaphDB: [`Histogram`]s of latencies that the hot paths
 //! record into without locking, and an [`Exposition`] that writes them,
 //! and plain values, in the Prometheus text format (version 0.0.4).
 //!
 //! ```
 //! use std::time::Duration;
 //!
-//! use kurator_metrics::{Exposition, Histogram, Histograms, Label, Values};
+//! use oleaph_metrics::{Exposition, Histogram, Histograms, Label, Values};
 //!
 //! const SYNCS: Histograms = Histograms::new("demo_sync_seconds", "How long a sync took.");
 //! const TERM: Values = Values::gauge("demo_term", "The current term.");

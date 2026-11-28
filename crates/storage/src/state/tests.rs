@@ -15,8 +15,8 @@ use crate::command::Command;
 use crate::outcome::{Abort, Outcome, Unreadable};
 use crate::txn::{KeyRange, ReadSet, Transaction};
 use crate::version::{Retention, Version};
-use kurator_codec::{DecodeError, Reader};
-use kurator_wal::Lsn;
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_wal::Lsn;
 
 fn logged() -> LoggedState {
     let mut state = LoggedState::default();
@@ -313,7 +313,7 @@ fn malformed_states_are_rejected() {
         out.extend_from_slice(&version.to_le_bytes());
         out.extend_from_slice(&u64::try_from(keys.len()).unwrap().to_le_bytes());
         for (key, versions) in keys {
-            kurator_codec::put_bytes(&mut out, key).unwrap();
+            oleaph_codec::put_bytes(&mut out, key).unwrap();
             out.extend_from_slice(&u32::try_from(versions.len()).unwrap().to_le_bytes());
             for (version, tag) in *versions {
                 out.extend_from_slice(&version.to_le_bytes());

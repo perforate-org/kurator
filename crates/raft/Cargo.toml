@@ -1,6 +1,6 @@
 [package]
-name = "kurator-raft"
-description = "Raft replication for Kurator: a signed-WAL log store and a memory-first state machine for OpenRaft"
+name = "oleaph-raft"
+description = "Raft replication for OleaphDB: a signed-WAL log store and a memory-first state machine for OpenRaft"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ categories.workspace = true
 
 [dependencies]
 futures-util.workspace = true
-kurator-codec.workspace = true
-kurator-consensus.workspace = true
-kurator-crypto.workspace = true
-kurator-metrics.workspace = true
-kurator-shard.workspace = true
-kurator-storage.workspace = true
-kurator-wal.workspace = true
+oleaph-codec.workspace = true
+oleaph-consensus.workspace = true
+oleaph-crypto.workspace = true
+oleaph-metrics.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
+oleaph-wal.workspace = true
 openraft.workspace = true
 parking_lot.workspace = true
 tempfile.workspace = true

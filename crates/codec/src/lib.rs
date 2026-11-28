@@ -1,4 +1,4 @@
-//! Little-endian, length-prefixed binary encoding shared by Kurator's log
+//! Little-endian, length-prefixed binary encoding shared by OleaphDB's log
 //! records, snapshots and messages.
 //!
 //! Writers append fixed-width little-endian integers and [`put_bytes`]
@@ -8,7 +8,7 @@
 //! CRC-32C at the end.
 //!
 //! ```
-//! use kurator_codec::{Reader, put_bytes};
+//! use oleaph_codec::{Reader, put_bytes};
 //!
 //! let mut out = vec![7];
 //! put_bytes(&mut out, b"abc")?;
@@ -41,7 +41,7 @@ pub enum DecodeError {
     #[error("checksum does not match")]
     Checksum,
     /// The input does not start with the expected magic bytes.
-    #[error("not a Kurator file")]
+    #[error("not an OleaphDB file")]
     Magic,
     /// The format version is not one this build reads.
     #[error("unknown format version {0}")]

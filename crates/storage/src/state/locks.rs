@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 
 use crate::across::{Deadline, TxnId};
 use crate::batch::{KvOp, WriteBatch};
@@ -276,7 +276,7 @@ fn put_count(out: &mut (impl Write + ?Sized), len: usize) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use kurator_codec::{DecodeError, Reader, put_bytes};
+    use oleaph_codec::{DecodeError, Reader, put_bytes};
 
     use super::{DECIDED_ABORTED, DECIDED_COMMITTED, Locks};
     use crate::across::{Deadline, TxnId};

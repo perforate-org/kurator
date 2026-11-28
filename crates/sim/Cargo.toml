@@ -1,6 +1,6 @@
 [package]
-name = "kurator-sim"
-description = "Deterministic simulation of Kurator clusters: a seeded network with partitions, loss and delay, crashes and restarts"
+name = "oleaph-sim"
+description = "Deterministic simulation of OleaphDB clusters: a seeded network with partitions, loss and delay, crashes and restarts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +12,14 @@ categories.workspace = true
 publish = false
 
 [dependencies]
-kurator-client.workspace = true
-kurator-codec.workspace = true
-kurator-consensus.workspace = true
-kurator-crypto.workspace = true
-kurator-meta.workspace = true
-kurator-raft.workspace = true
-kurator-shard.workspace = true
-kurator-storage.workspace = true
+oleaph-client.workspace = true
+oleaph-codec.workspace = true
+oleaph-consensus.workspace = true
+oleaph-crypto.workspace = true
+oleaph-meta.workspace = true
+oleaph-raft.workspace = true
+oleaph-shard.workspace = true
+oleaph-storage.workspace = true
 openraft-rt-sim.workspace = true
 parking_lot.workspace = true
 tempfile.workspace = true

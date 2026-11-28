@@ -1,7 +1,7 @@
-//! Memory-first storage engine for Kurator.
+//! Memory-first storage engine for OleaphDB.
 //!
 //! The whole state lives in memory; durability comes from the write-ahead
-//! log in [`kurator_wal`] and from snapshots. A [`Db`] is one directory:
+//! log in [`oleaph_wal`] and from snapshots. A [`Db`] is one directory:
 //!
 //! ```text
 //! <dir>/LOCK        held while the database is open
@@ -27,8 +27,8 @@
 //! it covers.
 //!
 //! ```
-//! # fn main() -> Result<(), kurator_storage::Error> {
-//! use kurator_storage::{Db, Options, WriteBatch};
+//! # fn main() -> Result<(), oleaph_storage::Error> {
+//! use oleaph_storage::{Db, Options, WriteBatch};
 //!
 //! let dir = tempfile::tempdir()?;
 //! let db = Db::open(dir.path(), Options::default())?;
@@ -57,8 +57,8 @@ pub use command::{Command, Encoded};
 pub use db::{Db, Options, Txn};
 pub use draft::{Draft, KeyValue};
 pub use error::{Error, Result, SnapshotDamage};
-pub use kurator_codec::DecodeError;
-pub use kurator_wal::{Lsn, RecoveryReport};
+pub use oleaph_codec::DecodeError;
+pub use oleaph_wal::{Lsn, RecoveryReport};
 pub use outcome::{Abort, Outcome, Unreadable};
 pub use span::{End, Span};
 pub use state::{Footprint, KvState, View};

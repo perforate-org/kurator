@@ -1,7 +1,7 @@
 //! Segment files: `<first lsn as 20 digits>.wal`, a header, then frames.
 //!
 //! ```text
-//! header: magic "KRWL" | version u16 | flags u16 | first lsn u64 | anchor?
+//! header: magic "OLWL" | version u16 | flags u16 | first lsn u64 | anchor?
 //! ```
 //!
 //! Flag bit 0 marks a signed segment, whose header ends with the 32-byte
@@ -20,7 +20,7 @@ use crate::seal::{Digest, Protection};
 const BASE_LEN: usize = 16;
 const ANCHOR_LEN: usize = 32;
 
-const MAGIC: [u8; 4] = *b"KRWL";
+const MAGIC: [u8; 4] = *b"OLWL";
 const VERSION: u16 = 1;
 const FLAG_SIGNED: u16 = 1;
 const FILES: LsnFiles = LsnFiles::new(".wal");
@@ -207,7 +207,7 @@ mod tests {
         for format in [Format::Checksummed, SIGNED] {
             let bytes = header(first, format);
             assert_eq!(bytes.len(), format.header_len(), "{format:?} length");
-            assert_eq!(&bytes[..4], b"KRWL", "magic");
+            assert_eq!(&bytes[..4], b"OLWL", "magic");
             assert_eq!(
                 parse_header(&bytes),
                 Some(Header { first, format }),

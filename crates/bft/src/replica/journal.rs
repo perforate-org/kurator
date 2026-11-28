@@ -10,7 +10,7 @@
 //!
 //! # Record format
 //!
-//! Each record is a `kurator_codec` frame, magic `KBJL`, version 1:
+//! Each record is a `oleaph_codec` frame, magic `OBJL`, version 1:
 //!
 //! ```text
 //! 1 block:     a block as messages encode it
@@ -26,15 +26,15 @@
 use std::io;
 use std::path::PathBuf;
 
-use kurator_codec::{DecodeError, Format};
-use kurator_wal::{Lsn, Options, Start, Wal};
+use oleaph_codec::{DecodeError, Format};
+use oleaph_wal::{Lsn, Options, Start, Wal};
 
 use crate::block::Block;
 use crate::step::{Effects, Record, Recovered, Safety, Step};
 use crate::vote::{BlockId, Justify};
 use crate::wire::{put_view, read_view};
 
-const FORMAT: Format = Format::new(*b"KBJL", 1);
+const FORMAT: Format = Format::new(*b"OBJL", 1);
 
 const BLOCK: u8 = 1;
 const SAFETY: u8 = 2;
@@ -93,12 +93,12 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// As [`Wal::open`], with [`kurator_wal::Error::Replay`] for a record
+    /// As [`Wal::open`], with [`oleaph_wal::Error::Replay`] for a record
     /// this build does not read.
     pub fn open(
         dir: impl Into<PathBuf>,
         options: Options,
-    ) -> kurator_wal::Result<(Self, Recovered)> {
+    ) -> oleaph_wal::Result<(Self, Recovered)> {
         let mut recovered = Recovered::default();
         let (wal, _report) = Wal::open(dir, options, Start::After(Lsn::ZERO), |_, bytes| {
             recovered.note(Record::decode(bytes)?);
@@ -114,7 +114,7 @@ impl Journal {
     ///
     /// As [`Wal::append_batch`]. The effects are then lost, as if the
     /// replica had crashed before the event.
-    pub fn persist(&mut self, step: Step) -> kurator_wal::Result<Effects> {
+    pub fn persist(&mut self, step: Step) -> oleaph_wal::Result<Effects> {
         let (records, effects) = step.into_parts();
         let encoded = records
             .iter()

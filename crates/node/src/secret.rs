@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
 
-use kurator_crypto::NodeSecret;
+use oleaph_crypto::NodeSecret;
 
 const FILE: &str = "node.secret";
 

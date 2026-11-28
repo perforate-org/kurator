@@ -8,14 +8,14 @@
 
 use std::path::Path;
 
-use kurator_crypto::{Algorithm, SigningKey};
-use kurator_raft::openraft::storage::{IOFlushed, RaftLogStorage};
-use kurator_raft::openraft::{AsyncRuntime as _, EntryPayload, RaftLogReader};
-use kurator_raft::{Entry, LeaderId, LogId, LogStore, NodeId, Vote};
+use oleaph_crypto::{Algorithm, SigningKey};
+use oleaph_raft::openraft::storage::{IOFlushed, RaftLogStorage};
+use oleaph_raft::openraft::{AsyncRuntime as _, EntryPayload, RaftLogReader};
+use oleaph_raft::{Entry, LeaderId, LogId, LogStore, NodeId, Vote};
 use openraft_rt_sim::SimRuntime;
 use proptest as _;
 
-kurator_raft::declare_config!(
+oleaph_raft::declare_config!(
     /// Replicas on the simulator, for driving the log store.
     Test, SimRuntime
 );

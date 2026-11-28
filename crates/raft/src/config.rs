@@ -4,7 +4,7 @@
 use openraft::RaftTypeConfig;
 use openraft::impls::ChangeMembers;
 
-use kurator_shard::Applied;
+use oleaph_shard::Applied;
 
 use crate::proposal::Proposal;
 use crate::types::{LeaderId, Membership, NodeId, Peer, Vote};
@@ -58,11 +58,11 @@ impl<C> Config for C where
 /// Declares a [`Config`] that runs on `$runtime`.
 ///
 /// ```
-/// kurator_raft::declare_config!(
+/// oleaph_raft::declare_config!(
 ///     /// Replicas on the deterministic simulator.
 ///     pub Simulated, openraft_rt_sim::SimRuntime
 /// );
-/// fn assert_config<C: kurator_raft::Config>() {}
+/// fn assert_config<C: oleaph_raft::Config>() {}
 /// assert_config::<Simulated>();
 /// ```
 #[macro_export]
