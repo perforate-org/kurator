@@ -7,9 +7,11 @@ use oleaph_wal::Options;
 
 use super::{Config, Core, Event};
 use crate::block::{Block, Order, Proposal};
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot};
-use crate::committee::ChangeCertificate;
-use crate::fixture::{DOMAIN, change_to, committee, key};
+use crate::checkpoint::{
+    Boundary, Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot,
+};
+use crate::committee::{ChangeCertificate, Domain};
+use crate::fixture::{DOMAIN, change_to, committee, key, succession_in, succession_to};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::replica::Journal;
@@ -1013,11 +1015,36 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
     // epoch starts afresh.
     let at = |block| {
         let checkpoint =
-            Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]));
+            Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]))
+                .ending(DOMAIN.next(&ends));
         certified(checkpoint)
     };
 
     let core = cores.get_mut(&NodeId::new(3)).unwrap();
+    // Its share of the state at the end says where the epoch ends, and
+    // the domain of the next.
+    let shared = |sharer: &mut Core, block| {
+        let checkpoint =
+            Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]));
+        let reached = sharer.handle(Event::Reached(checkpoint)).persisted();
+        reached.messages().iter().find_map(|outgoing| {
+            if let Message::Checkpoint(share) = outgoing.message() {
+                Some(share.checkpoint().boundary())
+            } else {
+                None
+            }
+        })
+    };
+    assert_eq!(
+        shared(core, last.id()),
+        Some(Boundary::Ends(DOMAIN.next(&ends))),
+        "the end"
+    );
+    assert_eq!(
+        shared(core, BlockId::new([9; 32])),
+        Some(Boundary::Within),
+        "not at the end"
+    );
     assert_eq!(
         core.succeed(&at(BlockId::new([9; 32]))),
         None,
@@ -1025,7 +1052,7 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
     );
     let records = core.succeed(&at(last.id())).unwrap();
     assert!(
-        matches!(records.as_slice(), [Record::Checkpoint(_), Record::Epoch(change, _), ..] if *change == ends),
+        matches!(records.as_slice(), [Record::Checkpoint(_), Record::Epoch(succession), ..] if *succession.change() == ends),
         "the state first, then the epoch: {records:?}"
     );
     assert_eq!(core.epoch(), Epoch::new(1), "the next epoch");
@@ -1050,13 +1077,18 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
             | Message::Certified(_)
             | Message::Want(..)
             | Message::Manifest(..)
-            | Message::Chunk(..) => false,
+            | Message::Chunk(..)
+            | Message::Handoff(_) => false,
         });
     assert!(handed_on, "the command it held goes on: {started:?}");
-    let Some(Record::Epoch(_, domain)) = records.get(1) else {
+    let Some(Record::Epoch(succession)) = records.get(1) else {
         panic!("{records:?}");
     };
-    assert_eq!(*domain, DOMAIN.next(&ends), "a domain of its own");
+    assert_eq!(
+        succession.domain(),
+        DOMAIN.next(&ends),
+        "a domain of its own"
+    );
 }
 
 #[test]
@@ -1089,4 +1121,88 @@ fn a_replica_restarted_at_the_end_of_its_epoch_takes_the_state_there_again() {
             "certified at {block}"
         );
     }
+}
+
+#[test]
+fn a_replica_follows_only_successions_its_committees_made() {
+    let mut behind = core(NodeId::new(4));
+    let first = succession_to(1, &[1, 2, 3], BlockId::new([1; 32]));
+    let second = succession_in(first.domain(), 2, &[1, 2, 3], BlockId::new([2; 32]));
+    assert_eq!(behind.follow(&[]), Ok(None), "nothing to follow");
+    assert_eq!(
+        behind.follow(std::slice::from_ref(&second)),
+        Err(Rejection::OtherEpoch(Epoch::new(2), Epoch::FIRST)),
+        "an epoch after the next"
+    );
+    let unsigned = succession_in(Domain::new([4; 32]), 1, &[1, 2, 3], BlockId::new([1; 32]));
+    assert_eq!(
+        behind.follow(&[unsigned, second.clone()]),
+        Err(Rejection::Forged(NodeId::new(1))),
+        "a change its committee did not make"
+    );
+    assert_eq!(behind.epoch(), Epoch::FIRST, "nothing taken on");
+
+    // Two epochs on: it starts the first, and ends that one at the
+    // second's change, to take the state the second starts from.
+    let end = behind.follow(&[first.clone(), second.clone()]);
+    assert_eq!(end, Ok(Some(second.end().clone())), "the state to take");
+    assert_eq!(behind.epoch(), Epoch::new(1), "the epoch between");
+    assert_eq!(behind.ending(), Some(second.change()), "ended");
+    assert_eq!(behind.follow(&[first]), Ok(None), "none newer");
+}
+
+#[test]
+fn a_replica_shows_one_that_missed_an_epoch_how_it_ended_once_a_timeout() {
+    let first = succession_to(1, &[1, 2, 3], BlockId::new([1; 32]));
+    let mut recovered = Recovered::default();
+    recovered.note(Record::Epoch(first));
+    let mut ahead = Core::recover(config(NodeId::new(1)), recovered);
+    let _started = ahead.handle(Event::Start).persisted();
+    // A timeout signed in the epoch before, by a member and by one the
+    // next committee left out.
+    let stale = |node: u64| Event::Received {
+        from: NodeId::new(node),
+        message: Message::Timeout(Timeout::sign(
+            &key(node),
+            DOMAIN,
+            NodeId::new(node),
+            View::new(3),
+            Justify::Genesis,
+        )),
+    };
+    let handed = |core: &mut Core, event| {
+        let step = core.handle(event).persisted();
+        step.messages()
+            .iter()
+            .filter(|outgoing| matches!(outgoing.message(), Message::Handoff(chain) if chain.len() == 1))
+            .count()
+    };
+    assert_eq!(handed(&mut ahead, stale(2)), 1, "a member");
+    assert_eq!(handed(&mut ahead, stale(2)), 0, "once a timeout");
+    assert_eq!(handed(&mut ahead, stale(4)), 1, "one left out");
+    let view = ahead.view();
+    let _expired = ahead.handle(Event::Expired(view)).persisted();
+    assert_eq!(
+        handed(&mut ahead, stale(2)),
+        1,
+        "again once its timer fires"
+    );
+    let forwarded = Event::Received {
+        from: NodeId::new(3),
+        message: Message::Timeout(Timeout::sign(
+            &key(2),
+            DOMAIN,
+            NodeId::new(2),
+            View::new(3),
+            Justify::Genesis,
+        )),
+    };
+    assert_eq!(handed(&mut ahead, forwarded), 0, "not its sender's");
+
+    let mut charter = started(NodeId::new(1));
+    assert_eq!(
+        handed(&mut charter, stale(2)),
+        0,
+        "no epoch ended, nothing to show"
+    );
 }

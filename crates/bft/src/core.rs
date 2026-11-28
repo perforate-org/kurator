@@ -10,7 +10,7 @@ use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Order, Proposal, prune};
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
+use crate::checkpoint::{Boundary, Checkpoint, CheckpointCertificate, Share, Succession, Tally};
 use crate::committee::{ChangeCertificate, Committee, Domain};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -99,8 +99,9 @@ pub struct Core {
     /// Who it is, and the committee and domain of the epoch it decides
     /// in.
     config: Config,
-    /// The change that started that epoch, unless it is the charter's.
-    era: Option<ChangeCertificate>,
+    /// How each epoch since the charter's succeeded the one before,
+    /// oldest first: the last started the epoch it decides in.
+    eras: Vec<Succession>,
     /// The view this replica is in.
     view: View,
     /// The last view it voted or gave up in.
@@ -139,6 +140,9 @@ pub struct Core {
     /// The change it decided, which ends the epoch at the last decided
     /// block.
     ending: Option<ChangeCertificate>,
+    /// Those it showed how its epochs succeeded, since its view began or
+    /// its timer last fired: once in that time each.
+    handed: BTreeSet<NodeId>,
     /// Blocks the event in hand taught it, to write down.
     learned: Vec<Block>,
     /// What the event in hand asks of the driver.
@@ -158,10 +162,10 @@ impl Core {
     /// proposed in.
     #[must_use]
     pub fn recover(config: Config, recovered: Recovered) -> Self {
-        let (safety, blocks, committed, certified, era) = recovered.into_parts();
+        let (safety, blocks, committed, certified, eras) = recovered.into_parts();
         let mut core = Self {
             config,
-            era: None,
+            eras: Vec::new(),
             view: View::GENESIS,
             voted: safety.voted(),
             lock: safety.lock().clone(),
@@ -179,11 +183,12 @@ impl Core {
             tally: Tally::since(certified),
             shared: None,
             ending: None,
+            handed: BTreeSet::new(),
             learned: Vec::new(),
             effects: Effects::default(),
         };
-        if let Some((change, domain)) = era {
-            core.adopt(change, domain);
+        for succession in eras {
+            core.adopt(succession);
         }
         // The decided chain stops at a change, so only the last decided
         // block can hold one.
@@ -194,11 +199,11 @@ impl Core {
         core
     }
 
-    /// Moves on to the epoch that `change` starts, in `domain`.
-    fn adopt(&mut self, change: ChangeCertificate, domain: Domain) {
-        self.config.committee = change.committee().clone();
-        self.config.domain = domain;
-        self.era = Some(change);
+    /// Moves on to the epoch that `succession` starts.
+    fn adopt(&mut self, succession: Succession) {
+        self.config.committee = succession.change().committee().clone();
+        self.config.domain = succession.domain();
+        self.eras.push(succession);
     }
 
     /// The first change in `block` that the committee can make, if any.
@@ -239,13 +244,9 @@ impl Core {
     pub(crate) fn compact(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
         prune(&mut self.blocks, certificate.block(), certificate.view());
         self.base = Some(certificate.clone());
-        // The epoch first, written again so that the journal can forget
-        // the record that started it.
-        let era = self.era.clone();
-        let mut records: Vec<Record> = era
-            .map(|change| Record::Epoch(change, self.config.domain))
-            .into_iter()
-            .collect();
+        // The epochs first, written again so that the journal can forget
+        // the records that started them.
+        let mut records: Vec<Record> = self.eras.iter().cloned().map(Record::Epoch).collect();
         records.extend(self.blocks.values().cloned().map(Record::Block));
         records.push(Record::Safety(self.safety()));
         records.push(Record::Committed(self.committed.0, self.committed.1));
@@ -263,9 +264,24 @@ impl Core {
         if certificate.block() != self.committed.0 {
             return None;
         }
-        let change = self.ending.take()?;
-        let domain = self.config.domain.next(&change);
-        self.adopt(change, domain);
+        let change = self.ending.clone()?;
+        if certificate.boundary() != Boundary::Ends(self.config.domain.next(&change)) {
+            return None;
+        }
+        let succession = Succession::new(change, certificate.clone())?;
+        self.begin(succession);
+        // The checkpoint first: the state the new epoch starts from must
+        // be on record before the epoch is.
+        let mut records = vec![Record::Checkpoint(certificate.clone())];
+        records.extend(self.compact(certificate));
+        Some(records)
+    }
+
+    /// Starts the epoch `succession` starts: afresh, in the first view of
+    /// a committee of its own, with only the commands it holds kept.
+    fn begin(&mut self, succession: Succession) {
+        self.tally = Tally::since(Some(succession.end().clone()));
+        self.adopt(succession);
         self.view = View::GENESIS;
         self.voted = View::GENESIS;
         self.lock = Justify::Genesis;
@@ -278,13 +294,58 @@ impl Core {
         self.certified.clear();
         self.votes.clear();
         self.timeouts.clear();
-        self.tally = Tally::since(Some(certificate.clone()));
         self.shared = None;
-        // The checkpoint first: the state the new epoch starts from must
-        // be on record before the epoch is.
-        let mut records = vec![Record::Checkpoint(certificate.clone())];
-        records.extend(self.compact(certificate));
-        Some(records)
+        self.ending = None;
+        self.handed.clear();
+    }
+
+    /// Follows `successions` past the epoch it decides in, as a member of
+    /// a later epoch sent them: it checks each against the committee
+    /// before it, starts every epoch but the last, and ends the one it is
+    /// then in at the last one's change, as if it had decided it. It
+    /// returns the checkpoint the last one starts from, whose state the
+    /// replica must take before it moves on, or nothing when none is new.
+    ///
+    /// # Errors
+    ///
+    /// When one does not follow from the committee before it.
+    pub(crate) fn follow(
+        &mut self,
+        successions: &[Succession],
+    ) -> Result<Option<CheckpointCertificate>, Rejection> {
+        let epoch = self.epoch();
+        let new: Vec<&Succession> = successions
+            .iter()
+            .filter(|succession| succession.epoch() > epoch)
+            .collect();
+        let Some((last, before)) = new.split_last() else {
+            return Ok(None);
+        };
+        // Every one checked before any is taken on.
+        let mut committee = self.config.committee.clone();
+        let mut domain = self.config.domain;
+        let mut at = epoch;
+        for succession in &new {
+            succession.verify(&committee, domain, at)?;
+            committee = succession.change().committee().clone();
+            domain = succession.domain();
+            at = succession.epoch();
+        }
+        for succession in before {
+            self.begin((*succession).clone());
+        }
+        self.ending = Some(last.change().clone());
+        Ok(Some(last.end().clone()))
+    }
+
+    /// Shows `to`, who sent what this epoch's committee cannot have
+    /// signed, how its epochs succeeded, once a timeout at most: `to` may
+    /// have missed the end of one.
+    fn hand_off(&mut self, to: NodeId) {
+        if !self.eras.is_empty() && self.handed.insert(to) {
+            self.effects
+                .send(To::One(to), Message::Handoff(self.eras.clone()));
+        }
     }
 
     /// What it must not forget across a crash.
@@ -325,9 +386,7 @@ impl Core {
     /// The epoch it decides in.
     #[must_use]
     pub fn epoch(&self) -> Epoch {
-        self.era
-            .as_ref()
-            .map_or(Epoch::FIRST, ChangeCertificate::epoch)
+        self.eras.last().map_or(Epoch::FIRST, Succession::epoch)
     }
 
     /// The change it decided, which ends its epoch, if it did.
@@ -364,6 +423,10 @@ impl Core {
     pub fn handle(&mut self, event: Event) -> Step {
         let before = (self.voted, self.proposed, self.lock.view());
         let committed = self.committed;
+        let sender = match &event {
+            Event::Received { from, .. } => Some(*from),
+            Event::Start | Event::Expired(_) | Event::Submitted(_) | Event::Reached(_) => None,
+        };
         let handled = match event {
             Event::Start => {
                 self.start();
@@ -380,6 +443,7 @@ impl Core {
                 Ok(())
             }
             Event::Reached(checkpoint) => {
+                let checkpoint = self.bound(checkpoint);
                 let share = Share::sign(
                     &self.config.key,
                     self.config.domain,
@@ -394,6 +458,13 @@ impl Core {
             }
         };
         if let Err(rejection) = handled {
+            // Signed by its sender, but not in this epoch's domain.
+            if let (Some(from), Rejection::Forged(signer) | Rejection::Stranger(signer)) =
+                (sender, rejection)
+                && signer == from
+            {
+                self.hand_off(from);
+            }
             self.effects.reject(rejection);
         }
         // Ancestors first, so that any prefix of the records makes sense.
@@ -476,10 +547,12 @@ impl Core {
                 }
                 Ok(())
             }
-            // The state at a checkpoint is the replica's to send and take.
-            Message::Want(..) | Message::Manifest(..) | Message::Chunk(..) => {
-                Err(Rejection::Unwanted)
-            }
+            // The state at a checkpoint, and the epochs it follows, are the
+            // replica's to send and take.
+            Message::Want(..)
+            | Message::Manifest(..)
+            | Message::Chunk(..)
+            | Message::Handoff(_) => Err(Rejection::Unwanted),
             Message::Deliver(block) => {
                 if !self.wanted.remove(&block.id()) {
                     return Err(Rejection::Unwanted);
@@ -487,6 +560,18 @@ impl Core {
                 self.store(block);
                 Ok(())
             }
+        }
+    }
+
+    /// `checkpoint`, saying whether the epoch ends at its block: it does
+    /// at the block that holds the change the replica decided, and the
+    /// next epoch decides in the domain that change leads to.
+    fn bound(&self, checkpoint: Checkpoint) -> Checkpoint {
+        match &self.ending {
+            Some(change) if checkpoint.block() == self.committed.0 => {
+                checkpoint.ending(self.config.domain.next(change))
+            }
+            _ => checkpoint,
         }
     }
 
@@ -504,6 +589,7 @@ impl Core {
     fn enter(&mut self, view: View) {
         self.view = view;
         self.timeouts.clear();
+        self.handed.clear();
         // Votes of the view before can still certify it; older ones
         // cannot move anything on.
         let before = View::new(view.get().saturating_sub(1));
@@ -572,6 +658,9 @@ impl Core {
         if view != self.view {
             return;
         }
+        // A handoff may have been lost, and a committee that needs the
+        // replica it went to stays in its view.
+        self.handed.clear();
         self.voted = self.voted.max(view);
         let timeout = Timeout::sign(
             &self.config.key,

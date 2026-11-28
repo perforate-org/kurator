@@ -42,8 +42,7 @@ use oleaph_wal::{Lsn, Options, Start, Wal};
 
 use super::states::{Snapshot, States};
 use crate::block::Block;
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest};
-use crate::committee::{ChangeCertificate, Domain};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest, Succession};
 use crate::step::{Effects, Record, Recovered, Safety, Step};
 use crate::vote::{BlockId, Justify};
 use crate::wire::{put_view, read_view};
@@ -78,10 +77,9 @@ impl Record {
                 out.write_all(&[CHECKPOINT])?;
                 certificate.encode(out)
             }
-            Self::Epoch(change, domain) => {
+            Self::Epoch(succession) => {
                 out.write_all(&[EPOCH])?;
-                change.encode(out)?;
-                out.write_all(domain.as_bytes())
+                succession.encode(out)
             }
         })
     }
@@ -100,10 +98,7 @@ impl Record {
                 Self::Committed(block, read_view(&mut reader)?)
             }
             CHECKPOINT => Self::Checkpoint(CheckpointCertificate::decode(&mut reader)?),
-            EPOCH => {
-                let change = ChangeCertificate::decode(&mut reader)?;
-                Self::Epoch(change, Domain::new(reader.read()?))
-            }
+            EPOCH => Self::Epoch(Succession::decode(&mut reader)?),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -230,8 +225,7 @@ mod tests {
     use super::Journal;
     use crate::block::Block;
     use crate::checkpoint::Height;
-    use crate::committee::Domain;
-    use crate::fixture::{certify, change_to};
+    use crate::fixture::{certify, succession_to};
     use crate::step::{Record, Recovered, Safety};
     use crate::view::View;
     use crate::vote::{BlockId, Justify};
@@ -253,7 +247,7 @@ mod tests {
                 .checkpoint()
                 .to_owned(),
             )),
-            Record::Epoch(change_to(1, &[1, 2, 3]), Domain::new([8; 32])),
+            Record::Epoch(succession_to(1, &[1, 2, 3], block.id())),
         ];
         for record in records {
             let bytes = record.encode().unwrap();
@@ -293,7 +287,7 @@ mod tests {
         )
         .unwrap();
         let base = certify(snapshot.checkpoint().to_owned());
-        let epoch = Record::Epoch(change_to(1, &[1, 2, 3]), Domain::new([8; 32]));
+        let epoch = Record::Epoch(succession_to(1, &[1, 2, 3], block.id()));
         let mut recovered = Recovered::default();
         recovered.note(Record::Block(block.clone()));
         recovered.note(Record::Committed(block.id(), block.view()));
@@ -310,10 +304,10 @@ mod tests {
         recovered.note(Record::Committed(later.id(), later.view()));
         recovered.note(epoch);
         assert_eq!(recovered.decided(), vec![&later], "the same epoch again");
-        let Some((change, _)) = recovered.era() else {
-            panic!("an era");
+        let [succession] = recovered.eras() else {
+            panic!("one era");
         };
-        assert_eq!(change.epoch().get(), 1, "the first change");
+        assert_eq!(succession.epoch().get(), 1, "the first change");
     }
 
     /// How many segments the journal in `dir` has.

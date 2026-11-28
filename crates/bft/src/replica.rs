@@ -24,11 +24,13 @@ use oleaph_storage::{Command, Draft, Finished, KeyValue, KvState, Outcome, Versi
 use parking_lot::Mutex;
 
 use crate::block::{Block, Order};
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest, Own, Part, Verdict};
+use crate::checkpoint::{
+    Checkpoint, CheckpointCertificate, Height, Manifest, Own, Part, Succession, Verdict,
+};
 use crate::committee::ChangeCertificate;
 use crate::core::{Core, Event};
 use crate::message::Message;
-use crate::step::{Act, Timer, To};
+use crate::step::{Act, Record, Timer, To};
 use crate::view::Epoch;
 use crate::view::View;
 use crate::vote::BlockId;
@@ -141,20 +143,8 @@ impl Inner {
         match self.own.judge(&certified) {
             Verdict::Unknown => {}
             Verdict::Agrees => {
-                let (records, succeeded) = match self.core.succeed(&certified) {
-                    Some(records) => (records, Some(self.core.epoch())),
-                    None => (self.core.compact(&certified), None),
-                };
-                if self.journal.compact(&certified, &records).is_err() {
-                    self.halt(Health::Stopped);
-                    return;
-                }
-                let node = self.core.node();
-                if let Some(epoch) = succeeded
-                    && self.core.committee().key(node).is_none()
-                {
-                    self.halt(Health::Retired(epoch));
-                }
+                let records = self.core.compact(&certified);
+                self.settle(&certified, records);
             }
             Verdict::Differs(mine) => self.halt(Health::Diverged(mine)),
         }
@@ -281,12 +271,43 @@ impl Inner {
             return;
         }
         let records = self.core.rebase(certificate);
+        self.settle(certificate, records);
+        let _judged = self.own.judge(certificate);
+        self.waiting.clear();
+    }
+
+    /// Writes down that the replica keeps the state `certificate`
+    /// certifies, with `records`, all the core still knows, and moves on
+    /// to the next epoch if the checkpoint ends this one: it retires if
+    /// the next committee leaves it out.
+    fn settle(&mut self, certificate: &CheckpointCertificate, compacted: Vec<Record>) {
+        let (records, succeeded) = match self.core.succeed(certificate) {
+            Some(records) => (records, Some(self.core.epoch())),
+            None => (compacted, None),
+        };
         if self.journal.compact(certificate, &records).is_err() {
             self.halt(Health::Stopped);
             return;
         }
-        let _judged = self.own.judge(certificate);
-        self.waiting.clear();
+        let node = self.core.node();
+        if let Some(epoch) = succeeded
+            && self.core.committee().key(node).is_none()
+        {
+            self.halt(Health::Retired(epoch));
+        }
+    }
+
+    /// Follows `successions`, sent by a member of a later epoch, and
+    /// takes the state the last of them starts from, unless it holds it.
+    fn follow(&mut self, successions: &[Succession]) {
+        let Ok(Some(end)) = self.core.follow(successions) else {
+            return;
+        };
+        self.certified = Some(end);
+        // It decided up to the end itself, and only missed the
+        // certificate, or it takes the state from the others.
+        self.judge();
+        self.catch_up();
     }
 
     /// Answers a replica catching up with `part` of the state kept at
@@ -447,6 +468,7 @@ impl<H: Host> Replica<H> {
                 self.handle(inner, Event::Received { from, message });
                 inner.catch_up();
             }
+            Message::Handoff(successions) => inner.follow(&successions),
             message @ (Message::Proposal(_)
             | Message::Vote(_)
             | Message::Timeout(_)

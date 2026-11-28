@@ -5,10 +5,10 @@ use std::io;
 use oleaph_codec::{DecodeError, Format, Reader, put_bytes};
 
 use crate::block::{Block, Proposal};
-use crate::checkpoint::{CheckpointCertificate, Height, Manifest, Part, Share};
+use crate::checkpoint::{CheckpointCertificate, Height, Manifest, Part, Share, Succession};
 use crate::timeout::{Timeout, TimeoutCertificate};
 use crate::vote::{BlockId, Vote};
-use crate::wire::{put_commands, read_commands};
+use crate::wire::{put_commands, put_count, read_commands, read_count};
 
 /// Every message: magic `OBFT`, version 1, a tag, the body, a CRC-32C.
 const FORMAT: Format = Format::new(*b"OBFT", 1);
@@ -25,6 +25,7 @@ const CERTIFIED: u8 = 9;
 const WANT: u8 = 10;
 const MANIFEST: u8 = 11;
 const CHUNK: u8 = 12;
+const HANDOFF: u8 = 13;
 
 /// How [`Part`]s are tagged.
 const PART_MANIFEST: u8 = 0;
@@ -62,6 +63,9 @@ pub enum Message {
     /// A chunk of the state at the checkpoint of this height: its index
     /// and its bytes.
     Chunk(Height, u32, Vec<u8>),
+    /// How each epoch since the charter's succeeded the one before, for a
+    /// replica that sent what only an epoch the sender left can check.
+    Handoff(Vec<Succession>),
 }
 
 impl Message {
@@ -130,6 +134,13 @@ impl Message {
                 out.write_all(&index.to_le_bytes())?;
                 put_bytes(out, bytes)
             }
+            Self::Handoff(successions) => {
+                out.write_all(&[HANDOFF])?;
+                put_count(out, successions.len())?;
+                successions
+                    .iter()
+                    .try_for_each(|succession| succession.encode(out))
+            }
         })
     }
 
@@ -175,6 +186,13 @@ impl Message {
                 let index = reader.read()?;
                 Ok(Self::Chunk(height, index, reader.bytes()?.to_vec()))
             }
+            HANDOFF => {
+                let count = read_count(reader)?;
+                let successions = (0..count)
+                    .map(|_| Succession::decode(reader))
+                    .collect::<Result<_, _>>()?;
+                Ok(Self::Handoff(successions))
+            }
             other => Err(DecodeError::Tag(other)),
         }
     }
@@ -182,7 +200,7 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
-    use crate::fixture::{DOMAIN, certify, key};
+    use crate::fixture::{DOMAIN, certify, key, succession_to};
     use std::collections::BTreeMap;
 
     use oleaph_codec::DecodeError;
@@ -328,6 +346,14 @@ mod tests {
                     index,
                     bytes
                 )),
+            proptest::collection::vec(any::<[u8; 32]>(), 0..3).prop_map(|blocks| {
+                Message::Handoff(
+                    (1..)
+                        .zip(blocks)
+                        .map(|(epoch, block)| succession_to(epoch, &[1, 2, 3], BlockId::new(block)))
+                        .collect(),
+                )
+            }),
         ]
     }
 
@@ -364,8 +390,8 @@ mod tests {
     #[test]
     fn unknown_tags_and_unordered_sets_are_refused() {
         assert_eq!(
-            Message::decode(&framed(&[13])),
-            Err(DecodeError::Tag(13)),
+            Message::decode(&framed(&[14])),
+            Err(DecodeError::Tag(14)),
             "message tag"
         );
         let mut want = vec![super::WANT];

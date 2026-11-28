@@ -401,6 +401,21 @@ module bft {
     settle(r, restarted, now, Set())
   }
 
+  /// `Core::follow`, then `Replica::install`: a correct replica that
+  /// missed the end of the epoch is shown it by one in the next epoch,
+  /// and takes the state there, which the committee certified: the
+  /// blocks the replica `from`, which ended the epoch, decided. It votes
+  /// and proposes no more.
+  action handOff(r: str, from: str): bool = {
+    val s = replicas.get(r)
+    val theirs = replicas.get(from)
+    all {
+      ended(theirs),
+      not(ended(s)),
+      settle(r, { ...s, decided: theirs.decided }, now, Set()),
+    }
+  }
+
   // ------------------------------------------------------------------
   // Actions of the faulty replicas: anything their keys can sign
   // ------------------------------------------------------------------
@@ -504,6 +519,7 @@ module bft {
       all { tcs != Set(), nondet tc = tcs.oneOf() collectTimeouts(r, tc) },
       all { tcs != Set(), nondet tc = tcs.oneOf() receiveSkip(r, tc) },
       crash(r),
+      nondet from = Correct.oneOf() handOff(r, from),
     }
   }
 
@@ -749,6 +765,17 @@ module n4f1 {
 
   /// Once n1 decided block 4, which ends the epoch, it votes for nothing:
   /// view 3's block extends block 4, and its certificate decides it.
+  /// n3 missed the end that n1 decided: shown it, it takes the state
+  /// there, and votes no more. A replica in the epoch has nothing to show.
+  run aReplicaThatMissedTheEndIsHandedOnTest =
+    aChangeEndsTheChainTest
+      .expect(not(ended(replicas.get("n3"))))
+      .then(handOff("n3", "n1"))
+      .expect(replicas.get("n3").decided == Set(2, 4) and ended(replicas.get("n3")) and safety)
+
+  run nothingToHandOnBeforeTheEndTest =
+    init.then(handOff("n1", "n2")).fail()
+
   run anEndedReplicaVotesNoMoreTest =
     init
       .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
