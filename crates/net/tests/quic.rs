@@ -395,7 +395,9 @@ async fn a_trusted_client_writes_and_reads_through_the_leader() {
 }
 
 /// Asks node `target` for `call` on the first shard, following the leader
-/// each node names, until one answers otherwise.
+/// each node names, until one answers otherwise. A call that a leader
+/// dropped when it lost its term is asked again: the calls here write the
+/// same value again or only read, so applying one twice changes nothing.
 async fn on_leader(
     client: &Quic,
     peers: &BTreeMap<NodeId, Peer>,
@@ -408,7 +410,7 @@ async fn on_leader(
             .reach(target, &peers[&target], &request)
             .await
             .unwrap();
-        let Reply::NotLeader(hint) = reply else {
+        let (Reply::NotLeader(hint) | Reply::Discarded(hint)) = reply else {
             return reply;
         };
         match hint {
@@ -458,9 +460,9 @@ async fn client_requests() {
 
     // A write goes to the leader, and reads see it at its version.
     let put = ClientCall::Propose(Command::Kv(WriteBatch::new().put("k", "v")));
-    let Reply::Applied(Outcome::Committed(at)) = on_leader(&client, &peers, first, &put).await
-    else {
-        panic!("the write did not commit");
+    let reply = on_leader(&client, &peers, first, &put).await;
+    let Reply::Applied(Outcome::Committed(at)) = reply else {
+        panic!("the write did not commit: {reply:?}");
     };
     let Reply::Begun { at: begun, .. } =
         on_leader(&client, &peers, first, &ClientCall::Begin).await
