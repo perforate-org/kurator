@@ -1,7 +1,7 @@
 //! The operations on the meta shard, each run on its leader.
 
-use kurator_consensus::{Replicated, Transaction as _};
-use kurator_shard::ShardId;
+use oleaph_consensus::{Replicated, Transaction as _};
+use oleaph_shard::ShardId;
 
 use crate::error::{MetaError, Result};
 use crate::placement::{Placement, Reported};

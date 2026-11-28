@@ -4,8 +4,8 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_crypto::{Algorithm, VerifyingKey};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_crypto::{Algorithm, VerifyingKey};
 
 const V4: u8 = 4;
 const V6: u8 = 6;

@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_consensus::NodeId;
-use kurator_crypto::{Signature, SigningKey};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Signature, SigningKey};
 
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
@@ -16,7 +16,7 @@ use crate::wire::{
 };
 
 /// What a vote's signature is over, after the domain.
-const VOTE: &[u8] = b"kurator-bft vote";
+const VOTE: &[u8] = b"oleaph-bft vote";
 
 /// Names a block: the BLAKE3 hash of its view, its certificate's view and
 /// block, and its commands.
@@ -303,7 +303,7 @@ fn read_signatures(reader: &mut Reader<'_>) -> Result<BTreeMap<NodeId, Signature
 mod tests {
     use std::collections::BTreeMap;
 
-    use kurator_consensus::NodeId;
+    use oleaph_consensus::NodeId;
 
     use super::{BlockId, Certificate, Vote};
     use crate::committee::Domain;

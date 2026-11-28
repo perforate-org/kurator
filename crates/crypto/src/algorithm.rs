@@ -1,4 +1,4 @@
-//! The signature algorithms Kurator knows, and their fixed parameters.
+//! The signature algorithms OleaphDB knows, and their fixed parameters.
 
 use std::fmt;
 

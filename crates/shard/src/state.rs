@@ -2,8 +2,8 @@
 
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_storage::{Command, KvState, Outcome, Version};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_storage::{Command, KvState, Outcome, Version};
 
 use crate::shard::{Halves, Shard, Split};
 
@@ -146,8 +146,8 @@ impl ShardState {
 
 #[cfg(test)]
 mod tests {
-    use kurator_codec::{DecodeError, Reader};
-    use kurator_storage::{
+    use oleaph_codec::{DecodeError, Reader};
+    use oleaph_storage::{
         Command, Deadline, Decide, Decision, Draft, End, KvState, Outcome, Span, TxnId, Version,
         WriteBatch,
     };

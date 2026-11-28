@@ -26,11 +26,11 @@
 //!
 //! `vote`, `log id`, `option`, `flag`, `entry` and `meta` are as in the
 //! Raft log (see `crate::codec`); `bytes(x)` is `x` behind a `u32` length,
-//! as `kurator_codec::put_bytes` writes it.
+//! as `oleaph_codec::put_bytes` writes it.
 
 use std::fmt;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 use openraft::raft::{
     AppendEntriesRequest, AppendError, AppendResult, ConflictHint, SnapshotResponse, VoteRequest,
     VoteResponse,
@@ -43,7 +43,7 @@ use crate::codec::{
 use crate::config::Config;
 use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{LogId, NodeId, Vote};
-use kurator_shard::ShardId;
+use oleaph_shard::ShardId;
 
 const REFUSED: u8 = 0;
 const APPEND: u8 = 1;
@@ -413,9 +413,9 @@ fn append_result<C: Config>(reader: &mut Reader<'_>) -> Result<AppendResult<C>, 
 
 #[cfg(test)]
 mod tests {
-    use kurator_codec::DecodeError;
-    use kurator_shard::ShardState;
-    use kurator_storage::{Command, WriteBatch};
+    use oleaph_codec::DecodeError;
+    use oleaph_shard::ShardState;
+    use oleaph_storage::{Command, WriteBatch};
     use openraft::EntryPayload;
     use openraft::raft::{
         AppendEntriesRequest, AppendError, ConflictHint, SnapshotResponse, VoteRequest,
@@ -429,7 +429,7 @@ mod tests {
     use crate::snapshot::{Snapshot, SnapshotBytes};
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, SnapshotMeta, StoredMembership, Vote};
-    use kurator_shard::ShardId;
+    use oleaph_shard::ShardId;
 
     crate::declare_config!(Test, openraft_rt_sim::SimRuntime);
 
@@ -506,7 +506,7 @@ mod tests {
             };
             let mut state = ShardState::default();
             let _committed = state.apply(
-                kurator_storage::Version::new(1),
+                oleaph_storage::Version::new(1),
                 Command::Kv(WriteBatch::new().put("k", "v")),
             );
             let snapshot = SnapshotBytes::encode(&meta, &state).unwrap();

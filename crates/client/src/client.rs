@@ -7,10 +7,10 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use kurator_consensus::{NodeId, Peer};
-use kurator_meta::Registry;
-use kurator_shard::{Shard, ShardId, ShardMap};
-use kurator_storage::{Deadline, TxnId};
+use oleaph_consensus::{NodeId, Peer};
+use oleaph_meta::Registry;
+use oleaph_shard::{Shard, ShardId, ShardMap};
+use oleaph_storage::{Deadline, TxnId};
 use parking_lot::Mutex;
 
 use crate::remote::{Call, Reach, Reply, Request};
@@ -240,12 +240,12 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::FutureExt as _;
-    use kurator_codec::{Reader, put_bytes};
-    use kurator_consensus::{NodeId, Peer};
-    use kurator_crypto::{Algorithm, SigningKey};
-    use kurator_meta::{Placement, Registry};
-    use kurator_shard::{Epoch, Shard, ShardId};
-    use kurator_storage::{Deadline, End, Span, TxnId, Version};
+    use oleaph_codec::{Reader, put_bytes};
+    use oleaph_consensus::{NodeId, Peer};
+    use oleaph_crypto::{Algorithm, SigningKey};
+    use oleaph_meta::{Placement, Registry};
+    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_storage::{Deadline, End, Span, TxnId, Version};
     use parking_lot::Mutex;
 
     use super::{Client, ROUTE_TRIES, Time};

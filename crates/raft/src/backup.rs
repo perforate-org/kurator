@@ -2,9 +2,9 @@
 //! node, and planted again as the first state of a new cluster.
 //!
 //! ```text
-//! <backup>/<id>    kurator_codec::Format "KRBK", version 1, around
+//! <backup>/<id>    oleaph_codec::Format "OLBK", version 1, around
 //!                  applied u64: the index of the last entry the replica
-//!                  applied, then kurator_shard::ShardState::encode
+//!                  applied, then oleaph_shard::ShardState::encode
 //! ```
 //!
 //! A backup is written to a temporary directory beside its target and
@@ -33,10 +33,10 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
 
-use kurator_codec::{DecodeError, Format};
-use kurator_shard::{ShardId, ShardState};
-use kurator_storage::{Command, Decide, Decided, Decision, TxnId, Version};
-use kurator_wal::sync_dir;
+use oleaph_codec::{DecodeError, Format};
+use oleaph_shard::{ShardId, ShardState};
+use oleaph_storage::{Command, Decide, Decided, Decision, TxnId, Version};
+use oleaph_wal::sync_dir;
 
 use crate::error::{Error, Result, SnapshotDamage};
 use crate::layout::Layout;
@@ -44,7 +44,7 @@ use crate::snapshot::SnapshotBytes;
 use crate::state_machine::SEED_LEADER;
 use crate::types::{LogId, Membership, NodeId, Peer, SnapshotMeta, StoredMembership};
 
-const FORMAT: Format = Format::new(*b"KRBK", 1);
+const FORMAT: Format = Format::new(*b"OLBK", 1);
 const TEMP_PREFIX: &str = ".backup-";
 
 /// The states of the shards one node held, each as of the last entry its
@@ -237,8 +237,8 @@ fn decode(framed: &[u8]) -> Result<Held, DecodeError> {
 mod tests {
     use std::fs;
 
-    use kurator_shard::{Epoch, ShardId, ShardState, Split};
-    use kurator_storage::{
+    use oleaph_shard::{Epoch, ShardId, ShardState, Split};
+    use oleaph_storage::{
         Command, Deadline, Decide, Decided, Decision, Draft, TxnId, Version, WriteBatch,
     };
 
@@ -363,7 +363,7 @@ mod tests {
         let pending: Vec<TxnId> = settled_left
             .kv()
             .pending()
-            .map(kurator_storage::Prepare::id)
+            .map(oleaph_storage::Prepare::id)
             .collect();
         assert_eq!(pending, [TxnId::new(3)], "undecided stays prepared");
         assert_eq!(settled_right.kv().pending().count(), 1, "on both");

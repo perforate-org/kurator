@@ -29,12 +29,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kurator_client::Collected;
-use kurator_consensus::{Members, NodeId, Peer, Replicated as _};
-use kurator_meta::Meta;
-use kurator_net::{Quic, Replica, Store};
-use kurator_shard::ShardId;
-use kurator_storage::WriteBatch;
+use oleaph_client::Collected;
+use oleaph_consensus::{Members, NodeId, Peer, Replicated as _};
+use oleaph_meta::Meta;
+use oleaph_net::{Quic, Replica, Store};
+use oleaph_shard::ShardId;
+use oleaph_storage::WriteBatch;
 
 use crate::args::{addr, key, node_id};
 use crate::report;
@@ -266,7 +266,7 @@ fn by_shard(store: &Store, show: impl Fn(&Replica) -> String) -> String {
 }
 
 /// `ok` with every shard that took a change, or the first refusal.
-fn everywhere<T>(outcomes: Vec<(ShardId, kurator_raft::Result<T>)>) -> String {
+fn everywhere<T>(outcomes: Vec<(ShardId, oleaph_raft::Result<T>)>) -> String {
     let mut shards = Vec::new();
     for (shard, outcome) in outcomes {
         match outcome {
@@ -277,7 +277,7 @@ fn everywhere<T>(outcomes: Vec<(ShardId, kurator_raft::Result<T>)>) -> String {
     format!("ok on {}", shards.join(", "))
 }
 
-fn logged<T: std::fmt::Display>(result: kurator_raft::Result<T>) -> String {
+fn logged<T: std::fmt::Display>(result: oleaph_raft::Result<T>) -> String {
     match result {
         Ok(log_id) => format!("ok at {log_id}"),
         Err(error) => format!("error: {error}"),
@@ -305,8 +305,8 @@ fn members(members: &Members) -> String {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use kurator_consensus::{Members, NodeId, Peer};
-    use kurator_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_consensus::{Members, NodeId, Peer};
+    use oleaph_crypto::{KeyPurpose, NodeSecret};
 
     use super::{Command, members};
 

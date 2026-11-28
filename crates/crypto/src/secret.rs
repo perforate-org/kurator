@@ -2,7 +2,7 @@
 //! derived from it.
 //!
 //! ICP gives a node separate keys for separate purposes, so that a key
-//! leaked or misused in one protocol proves nothing in another. Kurator
+//! leaked or misused in one protocol proves nothing in another. OleaphDB
 //! does the same, but derives every key from one 32-byte [`NodeSecret`]
 //! with BLAKE3's key derivation, so an operator keeps one file. Each
 //! [`KeyPurpose`] has its own derivation context for each algorithm, and
@@ -22,13 +22,13 @@ pub struct NodeSecret([u8; 32]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum KeyPurpose {
-    /// Signs the node's own Raft logs (`kurator_wal::Integrity::Signed`).
+    /// Signs the node's own Raft logs (`oleaph_wal::Integrity::Signed`).
     WalSigning,
     /// Authenticates the node to other nodes in the transport's handshake.
     /// Its public half is the key in the node's `Peer`.
     Transport,
     /// Signs the node's proposals, votes and timeouts in Byzantine fault
-    /// tolerant shards (`kurator_bft`). Its public half is what the
+    /// tolerant shards (`oleaph_bft`). Its public half is what the
     /// committee checks them with.
     Consensus,
 }
@@ -51,9 +51,9 @@ impl KeyPurpose {
     /// Fixed forever: see the module docs.
     const fn context(self, algorithm: Algorithm) -> &'static str {
         match (self, algorithm) {
-            (Self::WalSigning, Algorithm::Ed25519) => "kurator 2026-11 replica WAL signing key",
-            (Self::Transport, Algorithm::Ed25519) => "kurator 2026-11 replica transport key",
-            (Self::Consensus, Algorithm::Ed25519) => "kurator 2026-11 replica consensus key",
+            (Self::WalSigning, Algorithm::Ed25519) => "oleaph 2026-11 replica WAL signing key",
+            (Self::Transport, Algorithm::Ed25519) => "oleaph 2026-11 replica transport key",
+            (Self::Consensus, Algorithm::Ed25519) => "oleaph 2026-11 replica consensus key",
         }
     }
 }
@@ -167,9 +167,9 @@ mod tests {
     }
 
     const TRANSPORT_KEY_OF_ZERO_SEED: &str =
-        "ed25519:1143ed0efdb8425791bfc3fd92e758ed6f627e48c5800b080376b1a8f78b8940";
+        "ed25519:1773822247ce58520144ecc85a4190bde926a8bd25c7e17048912c4fa8d83fca";
     const WAL_KEY_OF_ZERO_SEED: &str =
-        "ed25519:9a708b2b2d9f535bdeebf1f3f67fb62ee51a706aa49b67849c22347158dc87a9";
+        "ed25519:670dd6f300a52516da98edd757e4f313381f35dc8ef36e4885673358a1a19f69";
     const CONSENSUS_KEY_OF_ZERO_SEED: &str =
-        "ed25519:777483e09d11455320bc17c3e691e7c3045f4a571a5c5498c46d3ff246a7a5d2";
+        "ed25519:dd4d6c3b29e46b13c462729d70ae3741246c0877c71ffec9fb93803f850dd2bd";
 }

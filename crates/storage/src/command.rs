@@ -1,6 +1,6 @@
 //! Commands, and how they are encoded as log records.
 
-use kurator_codec::{DecodeError, Reader};
+use oleaph_codec::{DecodeError, Reader};
 
 use crate::batch::WriteBatch;
 use crate::error::{Error, Result};
@@ -127,7 +127,7 @@ impl Command {
                 step.encode(&mut payload);
             }
         }
-        if payload.len() > kurator_wal::MAX_PAYLOAD_LEN {
+        if payload.len() > oleaph_wal::MAX_PAYLOAD_LEN {
             return Err(Error::BatchTooLarge);
         }
         Ok(Encoded {
@@ -183,7 +183,7 @@ mod tests {
     use crate::two_phase::{Collect, Decide, Decision, Prepare};
     use crate::txn::{KeyRange, ReadSet, Transaction};
     use crate::version::Version;
-    use kurator_codec::DecodeError;
+    use oleaph_codec::DecodeError;
 
     fn bytes() -> impl Strategy<Value = Vec<u8>> {
         proptest::collection::vec(any::<u8>(), 0..16)
@@ -306,20 +306,20 @@ mod tests {
     fn a_batch_may_fill_a_whole_record() {
         // version, kind, count, op tag, key length, "k", value length
         let overhead = 1 + 1 + 4 + 1 + 4 + 1 + 4;
-        let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - overhead];
+        let value = vec![0; oleaph_wal::MAX_PAYLOAD_LEN - overhead];
         let encoded = Command::Kv(WriteBatch::new().put("k", value))
             .encode()
             .unwrap();
         assert_eq!(
             encoded.payload().len(),
-            kurator_wal::MAX_PAYLOAD_LEN,
+            oleaph_wal::MAX_PAYLOAD_LEN,
             "exactly full"
         );
     }
 
     #[test]
     fn oversized_batches_are_rejected() {
-        let value = vec![0; kurator_wal::MAX_PAYLOAD_LEN - 15];
+        let value = vec![0; oleaph_wal::MAX_PAYLOAD_LEN - 15];
         assert!(
             matches!(
                 Command::Kv(WriteBatch::new().put("k", value)).encode(),

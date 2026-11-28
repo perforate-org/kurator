@@ -9,11 +9,11 @@
 
 use std::time::Duration;
 
-use kurator_client::{Collected, Collector, Coordinator, Transacted};
-use kurator_consensus::Transaction as _;
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_sim::{Cluster, Faults, Holdings, Outcome};
-use kurator_storage::WriteBatch;
+use oleaph_client::{Collected, Collector, Coordinator, Transacted};
+use oleaph_consensus::Transaction as _;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_sim::{Cluster, Faults, Holdings, Outcome};
+use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 /// Longer than a coordinator means to take over a transaction.

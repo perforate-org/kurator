@@ -11,22 +11,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_client::{
+use oleaph_client::{
     Call as ClientCall, Client, Collected, Collector, Coordinator, Reach as _, Reply,
     Request as ClientRequest, Transacted,
 };
-use kurator_consensus::Replicated as _;
-use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
-use kurator_meta::{Answer, Ask as _, Call, Meta, Placement, Registry, Reported};
-use kurator_net::{Endpoint, Quic, Replica, Server, Store, Tokio, Wall};
-use kurator_raft::openraft::raft::VoteRequest;
-use kurator_raft::openraft::{self, SnapshotPolicy};
-use kurator_raft::{
+use oleaph_consensus::Replicated as _;
+use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_meta::{Answer, Ask as _, Call, Meta, Placement, Registry, Reported};
+use oleaph_net::{Endpoint, Quic, Replica, Server, Store, Tokio, Wall};
+use oleaph_raft::openraft::raft::VoteRequest;
+use oleaph_raft::openraft::{self, SnapshotPolicy};
+use oleaph_raft::{
     Connection as _, Failure, Member, Message, NodeId, Peer, Progress, Refusal, Request, Response,
     Role, Transport as _, Vote,
 };
-use kurator_shard::ShardId;
-use kurator_storage::{Command, Outcome, Version, WriteBatch};
+use oleaph_shard::ShardId;
+use oleaph_storage::{Command, Outcome, Version, WriteBatch};
 
 const LOOPBACK: &str = "127.0.0.1:0";
 
@@ -198,7 +198,7 @@ async fn membership_changes() {
     let peer = newcomer.peer.clone();
     drop(nodes.insert(4, newcomer));
     let four = NodeId::new(4);
-    let _: kurator_raft::LogId = leader(&nodes)
+    let _: oleaph_raft::LogId = leader(&nodes)
         .unwrap()
         .add_learner(four, peer)
         .await
@@ -207,7 +207,7 @@ async fn membership_changes() {
         leader(&nodes).is_some_and(|replica| replica.progress(four) == Progress::CaughtUp)
     })
     .await;
-    let _: kurator_raft::LogId = leader(&nodes).unwrap().promote(four).await.unwrap();
+    let _: oleaph_raft::LogId = leader(&nodes).unwrap().promote(four).await.unwrap();
     let status = nodes[&4].replica().status();
     assert!(
         status.snapshot().is_some(),
@@ -226,7 +226,7 @@ async fn membership_changes() {
         .find(|(id, node)| **id != 4 && node.replica().status().role() != Role::Leader)
         .map(|(id, _)| *id)
         .unwrap();
-    let _: kurator_raft::LogId = leader(&nodes)
+    let _: oleaph_raft::LogId = leader(&nodes)
         .unwrap()
         .remove(NodeId::new(leaving))
         .await

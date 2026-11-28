@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
-use kurator_storage::End;
+use oleaph_storage::End;
 
 use crate::id::ShardId;
 use crate::shard::{Halves, Shard};
@@ -14,7 +14,7 @@ use crate::shard::{Halves, Shard};
 /// overlap: [`ShardMap::locate`] always finds a shard.
 ///
 /// ```
-/// use kurator_shard::{Epoch, Shard, ShardId, ShardMap, Split};
+/// use oleaph_shard::{Epoch, Shard, ShardId, ShardMap, Split};
 ///
 /// let mut map = ShardMap::new();
 /// let halves = Shard::first()
@@ -168,7 +168,7 @@ mod tests {
     use super::ShardMap;
     use crate::id::{Epoch, ShardId};
     use crate::shard::{Shard, Split};
-    use kurator_storage::Span;
+    use oleaph_storage::Span;
 
     /// A map split at each of `keys` in turn, where it can be.
     fn split_at(keys: &[Vec<u8>]) -> ShardMap {

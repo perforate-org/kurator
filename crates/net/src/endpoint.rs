@@ -6,11 +6,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurator_client::{Reply, Request};
-use kurator_crypto::{NodeSecret, VerifyingKey};
-use kurator_meta::{Answer, Call, Meta};
-use kurator_raft::{Message, NodeId, Refusal, Response};
-use kurator_shard::ShardId;
+use oleaph_client::{Reply, Request};
+use oleaph_crypto::{NodeSecret, VerifyingKey};
+use oleaph_meta::{Answer, Call, Meta};
+use oleaph_raft::{Message, NodeId, Refusal, Response};
+use oleaph_shard::ShardId;
 use quinn::crypto::rustls::QuicServerConfig;
 
 #[cfg(feature = "bft")]
@@ -276,7 +276,7 @@ async fn raft(sender: NodeId, bytes: &[u8], inbox: &Inbox) -> Vec<u8> {
 /// and encodes the answer. An answer too long to encode is none.
 async fn meta(bytes: &[u8], inbox: &Inbox) -> Vec<u8> {
     let answer = match (Call::decode(bytes), inbox.replica(ShardId::META)) {
-        (Ok(call), Some(replica)) => kurator_meta::answer(&replica, &call).await,
+        (Ok(call), Some(replica)) => oleaph_meta::answer(&replica, &call).await,
         (Ok(_), None) => Answer::Failed("no replica of the meta shard here".to_owned()),
         (Err(error), _) => Answer::Failed(format!("the call does not decode: {error}")),
     };
@@ -289,7 +289,7 @@ async fn client(bytes: &[u8], serving: &Serving) -> Vec<u8> {
     let reply = match Request::decode(bytes) {
         Ok(Request::Map) => map(serving).await,
         Ok(Request::Shard(shard, call)) => match serving.inbox.replica(shard) {
-            Some(replica) => kurator_client::answer(&replica, call).await,
+            Some(replica) => oleaph_client::answer(&replica, call).await,
             #[cfg(feature = "bft")]
             None => serving
                 .committees

@@ -1,10 +1,10 @@
-//! Raft replication for Kurator, on [`OpenRaft`](openraft).
+//! Raft replication for OleaphDB, on [`OpenRaft`](openraft).
 //!
 //! A cluster is one shard replicated on a few [`Replica`]s, usually three.
 //! Each replica keeps:
 //!
 //! ```text
-//! <dir>/log/        the Raft log: a signed WAL (kurator_wal::Integrity::Signed)
+//! <dir>/log/        the Raft log: a signed WAL (oleaph_wal::Integrity::Signed)
 //! <dir>/snapshot/   the latest snapshot of the state machine
 //! ```
 //!
@@ -16,11 +16,11 @@
 //!   record before it and the replica's signature, so a changed,
 //!   removed or reordered record is found when the log is opened.
 //! - **Memory-first state.** The [`StateMachine`] holds the whole
-//!   [`KvState`](kurator_storage::KvState) in memory. A restart loads the
+//!   [`KvState`](oleaph_storage::KvState) in memory. A restart loads the
 //!   snapshot and replays the log after it; a follower that fell behind
 //!   the purged log receives the leader's snapshot instead.
 //!
-//! - **Transactions.** [`Replicated::begin`](kurator_consensus::Replicated::begin) starts a [`Txn`] that reads one
+//! - **Transactions.** [`Replicated::begin`](oleaph_consensus::Replicated::begin) starts a [`Txn`] that reads one
 //!   version of the state and commits its writes as one log entry. Each
 //!   replica checks, as it applies that entry, whether a write after the
 //!   read version touched what the transaction read, so every replica
@@ -58,10 +58,10 @@ mod types;
 pub use backup::Backup;
 pub use config::{Config, Entry, MembershipEdit, Payload};
 pub use error::{BoxedError, Error, Result, SnapshotDamage};
-pub use kurator_consensus::Role;
-pub use kurator_shard::Applied;
 pub use log_store::LogStore;
 pub use network::{Connection, Failure, Link, Transport};
+pub use oleaph_consensus::Role;
+pub use oleaph_shard::Applied;
 pub use openraft;
 pub use proposal::Proposal;
 pub use replica::{Member, Replica, Status, Txn};

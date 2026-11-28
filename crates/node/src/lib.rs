@@ -1,4 +1,4 @@
-//! A Kurator node as a process: [`run`] opens the node's store in a
+//! An OleaphDB node as a process: [`run`] opens the node's store in a
 //! directory, serves it over QUIC, and takes commands from a console.
 //!
 //! ```text
@@ -24,10 +24,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
-use kurator_net::{BftReplica, Endpoint, NetError, Quic, Server, Store};
-use kurator_raft::{Backup, Member, NodeId, Peer};
-use kurator_shard::ShardId;
+use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+use oleaph_net::{BftReplica, Endpoint, NetError, Quic, Server, Store};
+use oleaph_raft::{Backup, Member, NodeId, Peer};
+use oleaph_shard::ShardId;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::args::{Settings, Start};
@@ -46,16 +46,16 @@ pub enum NodeError {
     Net(#[from] NetError),
     /// A replica failed.
     #[error(transparent)]
-    Raft(#[from] kurator_raft::Error),
+    Raft(#[from] oleaph_raft::Error),
     /// The Raft configuration is invalid.
     #[error(transparent)]
-    Config(#[from] kurator_raft::openraft::ConfigError),
+    Config(#[from] oleaph_raft::openraft::ConfigError),
     /// No node told the client where the shards are.
     #[error("no node answered")]
     Unreached,
     /// A client's operation failed.
     #[error(transparent)]
-    Client(#[from] kurator_client::Error),
+    Client(#[from] oleaph_client::Error),
     /// A BFT shard's charter is wrong.
     #[error("{}: {error}", path.display())]
     Charter {
@@ -66,7 +66,7 @@ pub enum NodeError {
     },
     /// A BFT replica's journal failed.
     #[error(transparent)]
-    Journal(#[from] kurator_wal::Error),
+    Journal(#[from] oleaph_wal::Error),
 }
 
 /// The public key for `purpose` of the node whose secret is in `dir`,
@@ -111,7 +111,7 @@ pub async fn run(settings: Settings) -> Result<(), NodeError> {
             }
             _ = sweeps.tick() => {
                 // A sweep that did not finish is made again on the next one.
-                let _swept: Option<kurator_client::Collected> = sweep::sweep(&store, &quic).await;
+                let _swept: Option<oleaph_client::Collected> = sweep::sweep(&store, &quic).await;
                 continue;
             }
             connection = scrapes.accept() => {
@@ -158,7 +158,7 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
         .collect::<Result<_, _>>()?;
     let endpoint = endpoint.with_bft(bft);
     let me = member.peer(endpoint.local_addr()?);
-    let config = Arc::new(kurator_raft::openraft::Config::default().validate()?);
+    let config = Arc::new(oleaph_raft::openraft::Config::default().validate()?);
     if let Start::Restore(from) = settings.start() {
         restore(from, settings.dir(), settings.id(), me.clone())?;
     }
@@ -174,7 +174,7 @@ async fn open(settings: &Settings, secret: NodeSecret) -> Result<(Store, Quic, S
                 .chain([(settings.id(), me)]);
             // A node that founded the cluster before holds a shard already.
             match store.found(voters).await {
-                Ok(()) | Err(kurator_raft::Error::Initialized) => {}
+                Ok(()) | Err(oleaph_raft::Error::Initialized) => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -208,7 +208,7 @@ fn bft(
 /// restored before holds its shards already, and goes on from them.
 fn restore(from: &Path, dir: &Path, node: NodeId, peer: Peer) -> Result<(), NodeError> {
     match Backup::read(from)?.plant(dir, node, peer) {
-        Ok(()) | Err(kurator_raft::Error::Initialized) => Ok(()),
+        Ok(()) | Err(oleaph_raft::Error::Initialized) => Ok(()),
         Err(error) => Err(error.into()),
     }
 }

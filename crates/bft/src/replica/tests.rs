@@ -8,10 +8,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::task::noop_waker_ref;
-use kurator_consensus::{Duty, NodeId, Reads, Replicated, Route, Transaction as _};
-use kurator_shard::ShardState;
-use kurator_storage::{Command, KvState, Outcome, WriteBatch};
-use kurator_wal::Options;
+use oleaph_consensus::{Duty, NodeId, Reads, Replicated, Route, Transaction as _};
+use oleaph_shard::ShardState;
+use oleaph_storage::{Command, KvState, Outcome, WriteBatch};
+use oleaph_wal::Options;
 use parking_lot::Mutex;
 use tempfile::TempDir;
 
@@ -302,7 +302,7 @@ fn a_replica_whose_state_differs_stops() {
         |node| {
             let mut state = ShardState::default();
             if node == odd {
-                let _applied = state.apply(kurator_storage::Version::new(1), put("x", "y"));
+                let _applied = state.apply(oleaph_storage::Version::new(1), put("x", "y"));
             }
             state
         },

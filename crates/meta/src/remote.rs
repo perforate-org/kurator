@@ -22,9 +22,9 @@
 use std::future::Future;
 use std::io;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_consensus::{NodeId, Peer, Replicated};
-use kurator_shard::ShardId;
+use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_consensus::{NodeId, Peer, Replicated};
+use oleaph_shard::ShardId;
 
 use crate::client::{allocate, registry, report};
 use crate::error::{MetaError, Result};
@@ -199,7 +199,7 @@ pub async fn answer(meta: &impl Replicated, call: &Call) -> Answer {
         Call::Registry => registry(meta).await.map(Answer::Registry),
     };
     answered.unwrap_or_else(|error| {
-        if let MetaError::Consensus(kurator_consensus::Error::NotLeader { leader }) = &error {
+        if let MetaError::Consensus(oleaph_consensus::Error::NotLeader { leader }) = &error {
             return Answer::NotLeader(*leader);
         }
         Answer::Failed(error.to_string())
@@ -341,9 +341,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use futures_util::FutureExt as _;
-    use kurator_codec::{DecodeError, Reader, put_bytes};
-    use kurator_consensus::NodeId;
-    use kurator_shard::ShardId;
+    use oleaph_codec::{DecodeError, Reader, put_bytes};
+    use oleaph_consensus::NodeId;
+    use oleaph_shard::ShardId;
     use proptest::prelude::*;
 
     use super::{Answer, Call, HOPS, follow};
@@ -468,7 +468,7 @@ mod tests {
         };
         assert_eq!(registry.next(), ShardId::new(5), "next");
         let mut placement = Vec::new();
-        crate::Placement::new(kurator_shard::Shard::first(), BTreeSet::new(), 0)
+        crate::Placement::new(oleaph_shard::Shard::first(), BTreeSet::new(), 0)
             .encode(&mut placement)
             .unwrap();
         let mut out = 5_u64.to_le_bytes().to_vec();

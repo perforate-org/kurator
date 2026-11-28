@@ -24,11 +24,11 @@ use std::future::Future;
 use std::io;
 use std::ops::Bound;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_consensus::{NodeId, Peer, Replicated};
-use kurator_meta::Registry;
-use kurator_shard::{Shard, ShardId};
-use kurator_storage::{Abort, Command, End, KeyValue, Outcome, Span, Unreadable, Version};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_consensus::{NodeId, Peer, Replicated};
+use oleaph_meta::Registry;
+use oleaph_shard::{Shard, ShardId};
+use oleaph_storage::{Abort, Command, End, KeyValue, Outcome, Span, Unreadable, Version};
 
 const MAP: u8 = 1;
 const SHARD: u8 = 2;
@@ -391,7 +391,7 @@ pub trait Reach: Sync {
 /// shrinks, so a key still in it afterwards was in it while it was read.
 pub async fn answer(replica: &impl Replicated, call: Call) -> Reply {
     match call {
-        Call::Begin => match replica.read(kurator_storage::KvState::version).await {
+        Call::Begin => match replica.read(oleaph_storage::KvState::version).await {
             Ok(at) => Reply::Begun {
                 shard: replica.shard(),
                 at,
@@ -430,7 +430,7 @@ pub async fn answer(replica: &impl Replicated, call: Call) -> Reply {
 fn held<T>(
     replica: &impl Replicated,
     holds: impl FnOnce(&Span) -> bool,
-    read: kurator_consensus::Result<Result<T, Unreadable>>,
+    read: oleaph_consensus::Result<Result<T, Unreadable>>,
     reply: impl FnOnce(T) -> Reply,
 ) -> Reply {
     match read {
@@ -457,13 +457,12 @@ fn bounds(span: &Span) -> (Bound<&[u8]>, Bound<&[u8]>) {
 }
 
 /// The reply for a call that failed with `error`.
-fn failed(error: kurator_consensus::Error) -> Reply {
+fn failed(error: oleaph_consensus::Error) -> Reply {
     match error {
-        kurator_consensus::Error::NotLeader { leader } => Reply::NotLeader(leader),
-        kurator_consensus::Error::Discarded { leader } => Reply::Discarded(leader),
-        kurator_consensus::Error::Misrouted { shard } => Reply::Misrouted(*shard),
-        other
-        @ (kurator_consensus::Error::Storage(_) | kurator_consensus::Error::Failed(_) | _) => {
+        oleaph_consensus::Error::NotLeader { leader } => Reply::NotLeader(leader),
+        oleaph_consensus::Error::Discarded { leader } => Reply::Discarded(leader),
+        oleaph_consensus::Error::Misrouted { shard } => Reply::Misrouted(*shard),
+        other @ (oleaph_consensus::Error::Storage(_) | oleaph_consensus::Error::Failed(_) | _) => {
             Reply::Failed(other.to_string())
         }
     }
@@ -476,11 +475,11 @@ mod tests {
     use std::ops::Bound;
 
     use futures_util::FutureExt as _;
-    use kurator_consensus::{Duty, Members, NodeId, Peer, Reads, Replicated, Route, Transaction};
-    use kurator_crypto::{Algorithm, SigningKey};
-    use kurator_meta::Registry;
-    use kurator_shard::{Epoch, Shard, ShardId};
-    use kurator_storage::{
+    use oleaph_consensus::{Duty, Members, NodeId, Peer, Reads, Replicated, Route, Transaction};
+    use oleaph_crypto::{Algorithm, SigningKey};
+    use oleaph_meta::Registry;
+    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_storage::{
         Abort, Command, End, KeyValue, KvState, Outcome, Span, Unreadable, Version, WriteBatch,
     };
     use proptest::prelude::*;
@@ -500,7 +499,7 @@ mod tests {
     struct None_;
 
     impl Transaction for None_ {
-        fn get(&mut self, _key: &[u8]) -> kurator_consensus::Result<Option<Vec<u8>>> {
+        fn get(&mut self, _key: &[u8]) -> oleaph_consensus::Result<Option<Vec<u8>>> {
             Ok(None)
         }
 
@@ -508,7 +507,7 @@ mod tests {
             &mut self,
             _start: Bound<&[u8]>,
             _end: Bound<&[u8]>,
-        ) -> kurator_consensus::Result<Vec<KeyValue>> {
+        ) -> oleaph_consensus::Result<Vec<KeyValue>> {
             Ok(Vec::new())
         }
 
@@ -516,7 +515,7 @@ mod tests {
 
         fn delete(&mut self, _key: impl Into<Vec<u8>>) {}
 
-        async fn commit(self) -> kurator_consensus::Result<Version> {
+        async fn commit(self) -> oleaph_consensus::Result<Version> {
             Ok(Version::ZERO)
         }
     }
@@ -534,13 +533,13 @@ mod tests {
             }
         }
 
-        fn leads(&self) -> kurator_consensus::Result<()> {
+        fn leads(&self) -> oleaph_consensus::Result<()> {
             match self.route {
                 Route::Here => Ok(()),
-                Route::Leader(leader) => Err(kurator_consensus::Error::NotLeader {
+                Route::Leader(leader) => Err(oleaph_consensus::Error::NotLeader {
                     leader: Some(leader),
                 }),
-                Route::Unknown | _ => Err(kurator_consensus::Error::NotLeader { leader: None }),
+                Route::Unknown | _ => Err(oleaph_consensus::Error::NotLeader { leader: None }),
             }
         }
     }
@@ -570,22 +569,22 @@ mod tests {
             Members::new(BTreeSet::default(), BTreeMap::new(), 0)
         }
 
-        async fn begin(&self) -> kurator_consensus::Result<None_> {
+        async fn begin(&self) -> oleaph_consensus::Result<None_> {
             Ok(None_)
         }
 
         async fn read<R: Send>(
             &self,
             read: impl FnOnce(&KvState) -> R + Send,
-        ) -> kurator_consensus::Result<R> {
+        ) -> oleaph_consensus::Result<R> {
             self.leads()?;
             Ok(read(&self.state.lock().unwrap()))
         }
 
-        async fn propose(&self, command: Command) -> kurator_consensus::Result<Outcome> {
+        async fn propose(&self, command: Command) -> oleaph_consensus::Result<Outcome> {
             self.leads()?;
             if !command.fits(left().span()) {
-                return Err(kurator_consensus::Error::Misrouted {
+                return Err(oleaph_consensus::Error::Misrouted {
                     shard: Box::new(left()),
                 });
             }
@@ -733,7 +732,7 @@ mod tests {
             node.prop_map(Reply::Discarded),
             Just(Reply::Misrouted(left())),
             any::<u128>()
-                .prop_map(|id| Reply::Refused(Abort::RolledBack(kurator_storage::TxnId::new(id)))),
+                .prop_map(|id| Reply::Refused(Abort::RolledBack(oleaph_storage::TxnId::new(id)))),
             Just(Reply::NoReplica),
             ".{0,8}".prop_map(Reply::Failed),
         ]

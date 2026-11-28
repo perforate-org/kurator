@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::ops::Bound;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 
 const END_UNBOUNDED: u8 = 0;
 const END_BEFORE: u8 = 1;
@@ -34,7 +34,7 @@ impl End {
 /// `start` on, up to but not including `end`.
 ///
 /// ```
-/// use kurator_storage::{End, Span};
+/// use oleaph_storage::{End, Span};
 ///
 /// let span = Span::new("b", End::Before(b"m".to_vec())).expect("not empty");
 /// assert!(span.contains(b"b") && span.contains(b"lemon"));
@@ -198,7 +198,7 @@ mod tests {
 
     use super::{End, Span};
     use crate::txn::KeyRange;
-    use kurator_codec::{DecodeError, Reader};
+    use oleaph_codec::{DecodeError, Reader};
 
     fn span(start: &[u8], end: Option<&[u8]>) -> Span {
         let end = end.map_or(End::Unbounded, |end| End::Before(end.to_vec()));
@@ -380,7 +380,7 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::Span;
-    use kurator_codec::Reader;
+    use oleaph_codec::Reader;
 
     /// Decoding a span never panics, and a decoded span encodes back to
     /// exactly the bytes it was read from.

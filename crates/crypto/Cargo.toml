@@ -1,6 +1,6 @@
 [package]
-name = "kurator-crypto"
-description = "Kurator's signature keys, each tagged with its algorithm so a node can move to another one, such as a post-quantum scheme"
+name = "oleaph-crypto"
+description = "OleaphDB's signature keys, each tagged with its algorithm so a node can move to another one, such as a post-quantum scheme"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

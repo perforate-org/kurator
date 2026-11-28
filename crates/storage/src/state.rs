@@ -6,8 +6,8 @@ use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::ops::Bound;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_wal::Lsn;
+use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_wal::Lsn;
 
 use crate::across::TxnId;
 use crate::batch::{KvOp, WriteBatch};

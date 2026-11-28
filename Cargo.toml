@@ -7,25 +7,25 @@ version = "0.0.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/perforate-org/kurator"
+repository = "https://github.com/perforate-org/oleaph"
 readme = "../../README.md"
 keywords = ["database", "storage", "wal", "p2p"]
 categories = ["database-implementations"]
 
 [workspace.dependencies]
-kurator-crypto = { path = "crates/crypto" }
-kurator-wal = { path = "crates/wal" }
-kurator-codec = { path = "crates/codec" }
-kurator-metrics = { path = "crates/metrics" }
-kurator-storage = { path = "crates/storage" }
-kurator-shard = { path = "crates/shard" }
-kurator-consensus = { path = "crates/consensus" }
-kurator-bft = { path = "crates/bft" }
-kurator-client = { path = "crates/client" }
-kurator-raft = { path = "crates/raft" }
-kurator-meta = { path = "crates/meta" }
-kurator-sim = { path = "crates/sim" }
-kurator-net = { path = "crates/net" }
+oleaph-crypto = { path = "crates/crypto" }
+oleaph-wal = { path = "crates/wal" }
+oleaph-codec = { path = "crates/codec" }
+oleaph-metrics = { path = "crates/metrics" }
+oleaph-storage = { path = "crates/storage" }
+oleaph-shard = { path = "crates/shard" }
+oleaph-consensus = { path = "crates/consensus" }
+oleaph-bft = { path = "crates/bft" }
+oleaph-client = { path = "crates/client" }
+oleaph-raft = { path = "crates/raft" }
+oleaph-meta = { path = "crates/meta" }
+oleaph-sim = { path = "crates/sim" }
+oleaph-net = { path = "crates/net" }
 crc32c = "0.6.9"
 blake3 = "1.8.7"
 ed25519-dalek = "3.0.0"

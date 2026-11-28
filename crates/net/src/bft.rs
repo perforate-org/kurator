@@ -16,12 +16,12 @@ use std::io;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use kurator_bft::{Core, Host, Journal, Ledger, Message, View};
-use kurator_client::{Call, Reply};
-use kurator_consensus::{NodeId, Peer, Replicated as _};
-use kurator_crypto::VerifyingKey;
-use kurator_raft::Transport as _;
-use kurator_shard::ShardId;
+use oleaph_bft::{Core, Host, Journal, Ledger, Message, View};
+use oleaph_client::{Call, Reply};
+use oleaph_consensus::{NodeId, Peer, Replicated as _};
+use oleaph_crypto::VerifyingKey;
+use oleaph_raft::Transport as _;
+use oleaph_shard::ShardId;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -30,7 +30,7 @@ use tokio::task::AbortHandle;
 use crate::connection::{Channel, Quic, QuicLink};
 
 /// A BFT replica whose host is QUIC.
-pub type BftReplica = kurator_bft::Replica<Wire>;
+pub type BftReplica = oleaph_bft::Replica<Wire>;
 
 /// How many messages wait for one peer before more are dropped.
 const QUEUE: usize = 1024;
@@ -91,7 +91,7 @@ impl Wiring {
                 replica: Weak::clone(replica),
                 runtime: self.runtime,
             };
-            kurator_bft::Replica::start(core, journal, ledger, peers, wire)
+            oleaph_bft::Replica::start(core, journal, ledger, peers, wire)
         })
     }
 }
@@ -204,7 +204,7 @@ impl Committees {
     /// Answers `call` from the replica of `shard`, if this node holds one.
     pub(crate) async fn answer(&self, shard: ShardId, call: Call) -> Result<Reply, Call> {
         match self.replicas.get(&shard) {
-            Some(replica) => Ok(kurator_client::answer(&**replica, call).await),
+            Some(replica) => Ok(oleaph_client::answer(&**replica, call).await),
             None => Err(call),
         }
     }
@@ -212,8 +212,8 @@ impl Committees {
 
 #[cfg(test)]
 mod tests {
-    use kurator_bft::{BlockId, Message};
-    use kurator_shard::ShardId;
+    use oleaph_bft::{BlockId, Message};
+    use oleaph_shard::ShardId;
 
     use super::{frame, unframe};
 

@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::time::Duration;
 
-use kurator_shard::{Shard, ShardId};
-use kurator_storage::{
+use oleaph_shard::{Shard, ShardId};
+use oleaph_storage::{
     Abort, Command, Deadline, Decide, Decided, Decision, Draft, Outcome, Prepare, Version,
 };
 
@@ -270,8 +270,8 @@ fn primary(parts: &[(ShardId, Shard, Draft)]) -> Option<(ShardId, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
-    use kurator_shard::{Epoch, Shard, ShardId};
-    use kurator_storage::{
+    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_storage::{
         Abort, Command, Deadline, Decision, End, KvOp, Outcome, Span, TxnId, Version,
     };
     use parking_lot::Mutex;

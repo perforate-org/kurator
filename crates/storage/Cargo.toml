@@ -1,5 +1,5 @@
 [package]
-name = "kurator-storage"
+name = "oleaph-storage"
 description = "Memory-first storage engine: in-memory state, WAL durability, snapshot recovery"
 version.workspace = true
 edition.workspace = true
@@ -11,15 +11,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-kurator-wal.workspace = true
-kurator-codec.workspace = true
+oleaph-wal.workspace = true
+oleaph-codec.workspace = true
 parking_lot.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-kurator-crypto.workspace = true
+oleaph-crypto.workspace = true
 proptest.workspace = true
 
 [[bench]]

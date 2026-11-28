@@ -3,7 +3,7 @@
 use std::fmt;
 use std::num::NonZeroU64;
 
-use kurator_storage::{Footprint, KvState};
+use oleaph_storage::{Footprint, KvState};
 
 /// The largest [`Footprint`] a shard keeps before it splits in two.
 ///
@@ -62,7 +62,7 @@ impl fmt::Display for Ceiling {
 mod tests {
     use std::num::NonZeroU64;
 
-    use kurator_storage::{Command, KvState, Version, WriteBatch};
+    use oleaph_storage::{Command, KvState, Version, WriteBatch};
 
     use super::Ceiling;
 

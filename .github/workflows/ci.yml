@@ -33,7 +33,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked
       - name: The transport without BFT, as a Raft-only build uses it
-        run: cargo clippy -p kurator-net --all-targets --locked
+        run: cargo clippy -p oleaph-net --all-targets --locked
       - run: cargo test --workspace --locked
       - run: cargo doc --workspace --no-deps --locked
       - uses: taiki-e/install-action@v2
@@ -96,9 +96,9 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p kurator-sim --release --locked
+      - run: cargo test -p oleaph-sim --release --locked
         env:
-          KURATOR_SIM_SEEDS: 500
+          OLEAPH_SIM_SEEDS: 500
 
   mutants:
     name: mutation testing (${{ matrix.shard }}/4)

@@ -1,4 +1,4 @@
-//! Signature keys for Kurator, each tagged with its [`Algorithm`].
+//! Signature keys for OleaphDB, each tagged with its [`Algorithm`].
 //!
 //! Every key and signature knows which algorithm made it, and every
 //! encoding of one names that algorithm first, so a cluster can move to
@@ -16,14 +16,14 @@
 //! [`KeyPurpose`].
 //!
 //! ```
-//! use kurator_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
+//! use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
 //!
 //! let secret = NodeSecret::from_seed([7; 32]);
 //! let key = secret.signing_key(KeyPurpose::WalSigning);
 //! let signature = key.sign(b"record");
 //! let public: VerifyingKey = key.verifying_key().to_string().parse()?;
 //! assert!(public.verify(b"record", &signature));
-//! # Ok::<(), kurator_crypto::InvalidKey>(())
+//! # Ok::<(), oleaph_crypto::InvalidKey>(())
 //! ```
 
 mod algorithm;

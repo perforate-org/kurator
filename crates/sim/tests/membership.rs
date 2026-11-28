@@ -9,10 +9,10 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_raft::{NodeId, Progress};
-use kurator_sim::{Cluster, Faults, Outcome};
-use kurator_storage::WriteBatch;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_raft::{NodeId, Progress};
+use oleaph_sim::{Cluster, Faults, Outcome};
+use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 const fn id(raw: u64) -> NodeId {

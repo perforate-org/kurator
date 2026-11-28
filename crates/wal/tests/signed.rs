@@ -12,8 +12,8 @@ use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kurator_crypto::{Algorithm, SigningKey};
-use kurator_wal::{
+use oleaph_crypto::{Algorithm, SigningKey};
+use oleaph_wal::{
     Corruption, Digest, Error, Integrity, Lsn, Options, Protection, SealDamage, Start, TailDamage,
     Wal,
 };

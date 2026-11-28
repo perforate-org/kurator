@@ -1,6 +1,6 @@
 //! Writes: changes to the key-value model, applied together.
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 
 use crate::error::{Error, Result};
 use crate::span::Span;
@@ -39,7 +39,7 @@ impl KvOp {
 /// Changes that are applied together or not at all, in order.
 ///
 /// ```
-/// use kurator_storage::WriteBatch;
+/// use oleaph_storage::WriteBatch;
 ///
 /// let batch = WriteBatch::new().put("a", "1").delete("b");
 /// assert_eq!(batch.ops().len(), 2);

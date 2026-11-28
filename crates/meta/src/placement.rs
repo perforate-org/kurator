@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_consensus::{NodeId, Replicated};
-use kurator_shard::{Epoch, Shard, ShardId};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_consensus::{NodeId, Replicated};
+use oleaph_shard::{Epoch, Shard, ShardId};
 
 /// A shard as the registry records it: the shard, the nodes in its
 /// membership, and the log entry of that membership in the shard's own
@@ -136,10 +136,10 @@ impl fmt::Display for Placement {
 pub(crate) mod tests {
     use std::collections::BTreeSet;
 
-    use kurator_codec::DecodeError;
-    use kurator_consensus::NodeId;
-    use kurator_shard::{Epoch, Shard, ShardId};
-    use kurator_storage::{End, Span};
+    use oleaph_codec::DecodeError;
+    use oleaph_consensus::NodeId;
+    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_storage::{End, Span};
     use proptest::prelude::*;
 
     use super::Placement;

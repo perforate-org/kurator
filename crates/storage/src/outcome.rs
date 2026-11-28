@@ -15,7 +15,7 @@
 
 use std::io;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader, put_bytes};
 
 use crate::across::{Deadline, TxnId};
 use crate::version::Version;
@@ -279,7 +279,7 @@ pub enum Unreadable {
 
 #[cfg(test)]
 mod tests {
-    use kurator_codec::Reader;
+    use oleaph_codec::Reader;
     use proptest::prelude::*;
 
     use super::{Abort, Outcome, Unreadable};

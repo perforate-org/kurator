@@ -2,9 +2,9 @@
 
 use std::io::{self, Write};
 
-use kurator_codec::{DecodeError, Reader};
-use kurator_consensus::NodeId;
-use kurator_crypto::{Signature, SigningKey};
+use oleaph_codec::{DecodeError, Reader};
+use oleaph_consensus::NodeId;
+use oleaph_crypto::{Signature, SigningKey};
 
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
@@ -17,10 +17,10 @@ use crate::wire::{
 };
 
 /// The key derivation context of block ids. Fixed forever.
-const ID_CONTEXT: &str = "kurator 2026-11 bft block id";
+const ID_CONTEXT: &str = "oleaph 2026-11 bft block id";
 
 /// What a proposal's signature is over, after the domain.
-const PROPOSAL: &[u8] = b"kurator-bft proposal";
+const PROPOSAL: &[u8] = b"oleaph-bft proposal";
 
 /// Commands proposed in a view, on top of the block its certificate
 /// certifies: the parent. Blocks chain by their parents back to genesis.

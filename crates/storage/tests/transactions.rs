@@ -9,7 +9,7 @@
 use std::ops::Bound::{Included, Unbounded};
 
 use criterion as _;
-use kurator_storage::{Abort, Db, Error, Options, Version};
+use oleaph_storage::{Abort, Db, Error, Options, Version};
 use proptest as _;
 
 fn open(dir: &std::path::Path) -> Db {

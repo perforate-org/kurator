@@ -1,6 +1,6 @@
 [package]
-name = "kurator-codec"
-description = "Little-endian, length-prefixed binary encoding shared by Kurator's on-disk and wire formats"
+name = "oleaph-codec"
+description = "Little-endian, length-prefixed binary encoding shared by OleaphDB's on-disk and wire formats"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

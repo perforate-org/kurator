@@ -44,7 +44,7 @@ pub enum To {
     /// Every other member.
     Others,
     /// One other member.
-    One(kurator_consensus::NodeId),
+    One(oleaph_consensus::NodeId),
 }
 
 /// A message to send.

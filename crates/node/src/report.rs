@@ -8,10 +8,10 @@
 
 use std::time::Duration;
 
-use kurator_consensus::{Duty, Replicated as _};
-use kurator_meta::{Meta, MetaError, Placement};
-use kurator_net::{Quic, Store};
-use kurator_shard::ShardId;
+use oleaph_consensus::{Duty, Replicated as _};
+use oleaph_meta::{Meta, MetaError, Placement};
+use oleaph_net::{Quic, Store};
+use oleaph_shard::ShardId;
 
 /// How often a node reports the shards whose chores are its own.
 pub const EVERY: Duration = Duration::from_secs(2);

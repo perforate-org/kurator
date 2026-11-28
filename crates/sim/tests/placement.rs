@@ -8,11 +8,11 @@
 
 use std::collections::BTreeSet;
 
-use kurator_raft::NodeId;
-use kurator_raft::openraft::AsyncRuntime as _;
-use kurator_shard::ShardId;
-use kurator_sim::{Cluster, Faults, Outcome};
-use kurator_storage::WriteBatch;
+use oleaph_raft::NodeId;
+use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_shard::ShardId;
+use oleaph_sim::{Cluster, Faults, Outcome};
+use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
 
 fn ids(ids: impl IntoIterator<Item = u64>) -> BTreeSet<NodeId> {

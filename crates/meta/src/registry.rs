@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::ops::Bound;
 
-use kurator_codec::{DecodeError, Reader, put_bytes};
-use kurator_shard::{Shard, ShardId, ShardMap};
-use kurator_storage::KvState;
+use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_shard::{Shard, ShardId, ShardMap};
+use oleaph_storage::KvState;
 
 use crate::placement::Placement;
 
@@ -150,10 +150,10 @@ impl Registry {
 mod tests {
     use std::collections::BTreeSet;
 
-    use kurator_codec::DecodeError;
-    use kurator_consensus::NodeId;
-    use kurator_shard::{Epoch, Shard, ShardId, ShardMap, Split};
-    use kurator_storage::{Command, KvState, Version, WriteBatch};
+    use oleaph_codec::DecodeError;
+    use oleaph_consensus::NodeId;
+    use oleaph_shard::{Epoch, Shard, ShardId, ShardMap, Split};
+    use oleaph_storage::{Command, KvState, Version, WriteBatch};
 
     use super::{NEXT, Registry, shard_key};
     use crate::placement::Placement;
