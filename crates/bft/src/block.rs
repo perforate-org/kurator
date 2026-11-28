@@ -263,7 +263,7 @@ mod tests {
     use crate::fixture::{DOMAIN, committee, key};
     use std::collections::BTreeMap;
 
-    use super::{Block, Proposal};
+    use super::{Block, Proposal, prune};
     use crate::committee::Domain;
     use crate::rejection::Rejection;
     use crate::timeout::TimeoutCertificate;
@@ -363,5 +363,29 @@ mod tests {
             Ok((valid, None)),
             "opened"
         );
+    }
+
+    #[test]
+    fn a_decided_block_leaves_its_view_and_those_before_behind() {
+        let block = |view, command: &[u8]| {
+            Block::new(View::new(view), Justify::Genesis, vec![command.to_vec()])
+        };
+        let earlier = block(1, b"a");
+        let through = block(2, b"b");
+        let rival = block(2, b"c");
+        let later = block(3, b"d");
+        let all: BTreeMap<BlockId, Block> = [&earlier, &through, &rival, &later]
+            .into_iter()
+            .map(|each| (each.id(), each.clone()))
+            .collect();
+        let mut blocks = all.clone();
+        prune(&mut blocks, through.id());
+        let kept: Vec<BlockId> = blocks.into_keys().collect();
+        let mut expected = vec![through.id(), later.id()];
+        expected.sort_unstable();
+        assert_eq!(kept, expected, "it and what came after");
+        let mut unknown = all.clone();
+        prune(&mut unknown, BlockId::new([9; 32]));
+        assert_eq!(unknown, all, "nothing to go by");
     }
 }
