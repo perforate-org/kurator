@@ -728,3 +728,5 @@ impl Core {
 mod sim;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trace;

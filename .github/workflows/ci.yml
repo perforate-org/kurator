@@ -93,6 +93,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # The trace validation replays the model's runs against crates/bft.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
