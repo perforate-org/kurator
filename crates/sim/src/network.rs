@@ -57,6 +57,9 @@ struct Shared {
     cut: BTreeSet<(NodeId, NodeId)>,
     /// The first message that did not decode: a bug, never a fault.
     garbled: Option<Garbled>,
+    /// How many snapshot chunks were kept before the last of their
+    /// snapshot: how many transfers took more than one request.
+    chunks_kept: u64,
 }
 
 /// A message that did not decode on the other side of a [`Wire`]. The
@@ -88,6 +91,7 @@ impl Network {
                 inboxes: BTreeMap::new(),
                 cut: BTreeSet::new(),
                 garbled: None,
+                chunks_kept: 0,
             })),
         }
     }
@@ -120,6 +124,22 @@ impl Network {
     #[must_use]
     pub fn garbled(&self) -> Option<Garbled> {
         self.shared.lock().garbled
+    }
+
+    /// How many snapshot chunks receivers kept before the last of their
+    /// snapshot.
+    #[must_use]
+    pub fn chunks_kept(&self) -> u64 {
+        self.shared.lock().chunks_kept
+    }
+
+    /// Counts `response` if it keeps a snapshot chunk, and passes it on.
+    fn note(&self, response: Response<Sim>) -> Response<Sim> {
+        if matches!(response, Response::Received) {
+            let mut shared = self.shared.lock();
+            shared.chunks_kept = shared.chunks_kept.saturating_add(1);
+        }
+        response
     }
 
     fn garble(&self, from: NodeId, to: NodeId, error: DecodeError) {
@@ -227,7 +247,7 @@ impl Connection<Sim> for Wire {
         let (from, to, network) = (self.from, self.to, self.network.clone());
         let carried = self.network.carry(from, to, |inbox| async move {
             let response = match Message::decode(&bytes) {
-                Ok(decoded) => inbox.handle(decoded).await,
+                Ok(decoded) => network.note(inbox.handle(decoded).await),
                 Err(error) => {
                     network.garble(from, to, error);
                     Response::Refused(Refusal::Malformed)

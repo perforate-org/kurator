@@ -21,7 +21,8 @@ use quinn::crypto::rustls::QuicClientConfig;
 use crate::Tokio;
 use crate::tls::Identity;
 
-/// The largest message either side reads, a whole snapshot included.
+/// The largest message either side reads. Snapshots go in chunks far
+/// smaller than this, so it bounds a batch of log entries.
 pub(crate) const MAX_MESSAGE: usize = 1 << 30;
 
 /// What a stream carries, as its first byte says.

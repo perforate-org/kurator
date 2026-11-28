@@ -13,19 +13,21 @@
 //!             | count u32 bytes(entry)*
 //! vote      = vote | option(log id) last | option(vote) transfer from
 //! pre-vote  = as vote
-//! snapshot  = vote | meta | bytes(snapshot)
+//! snapshot  = vote | chunk
 //!
 //! response  = 0 refusal | 1 appended | 2 voted | 3 pre-voted | 4 installed
-//! refusal   = 1 stopped | 2 forged | 3 malformed
+//!           | 5 received
+//! refusal   = 1 stopped | 2 forged | 3 malformed | 4 out of order
 //! appended  = 0 option(log id) accepted
 //!           | 1 log id conflict | option(count u32 log id*) hint
 //!           | 2 vote higher vote
 //! voted     = vote | flag granted | option(log id) last
 //! installed = vote
+//! received  = (nothing)
 //! ```
 //!
 //! `vote`, `log id`, `option`, `flag`, `entry` and `meta` are as in the
-//! Raft log (see `crate::codec`); `bytes(x)` is `x` behind a `u32` length,
+//! Raft log (see `crate::codec`), `chunk` as in [`SnapshotChunk`]; `bytes(x)` is `x` behind a `u32` length,
 //! as `oleaph_codec::put_bytes` writes it.
 
 use std::fmt;
@@ -36,12 +38,11 @@ use openraft::raft::{
     VoteResponse,
 };
 
+use super::chunk::SnapshotChunk;
 use crate::codec::{
-    entry, flag, log_id, meta, option, put_entry, put_len, put_log_id, put_meta, put_option,
-    put_vote, vote,
+    entry, flag, log_id, option, put_entry, put_len, put_log_id, put_option, put_vote, vote,
 };
 use crate::config::Config;
-use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{LogId, NodeId, Vote};
 use oleaph_shard::ShardId;
 
@@ -50,6 +51,7 @@ const APPEND: u8 = 1;
 const VOTE: u8 = 2;
 const PRE_VOTE: u8 = 3;
 const SNAPSHOT: u8 = 4;
+const RECEIVED: u8 = 5;
 
 const ACCEPTED: u8 = 0;
 const CONFLICT: u8 = 1;
@@ -68,13 +70,14 @@ pub enum Request<C: Config> {
     Vote(VoteRequest<C>),
     /// A would-be candidate asks whether it would get a vote.
     PreVote(VoteRequest<C>),
-    /// The leader sends its snapshot to a replica that is too far behind
-    /// for its log.
+    /// The leader sends a chunk of its snapshot to a replica that is too
+    /// far behind for its log. The replica installs the snapshot when the
+    /// last chunk is in.
     InstallSnapshot {
         /// The leader's vote.
         vote: Vote,
-        /// The snapshot.
-        snapshot: Snapshot,
+        /// The chunk.
+        chunk: SnapshotChunk,
     },
 }
 
@@ -90,8 +93,12 @@ pub enum Response<C: Config> {
     Vote(VoteResponse<C>),
     /// The answer to [`Request::PreVote`].
     PreVote(VoteResponse<C>),
-    /// The answer to [`Request::InstallSnapshot`].
+    /// The answer to the last chunk of a snapshot in
+    /// [`Request::InstallSnapshot`], or to any chunk when the receiver
+    /// holds a higher vote than the sender's.
     InstallSnapshot(SnapshotResponse<C>),
+    /// The answer to a chunk of a snapshot before the last: it was kept.
+    Received,
 }
 
 /// Why a replica did not handle a request.
@@ -105,6 +112,8 @@ pub enum Refusal {
     Forged,
     /// The request does not decode.
     Malformed,
+    /// The snapshot chunk continues no snapshot the replica is receiving.
+    OutOfOrder,
 }
 
 impl fmt::Display for Refusal {
@@ -113,6 +122,7 @@ impl fmt::Display for Refusal {
             Self::Stopped => "the replica has stopped",
             Self::Forged => "the request claims another sender",
             Self::Malformed => "the request does not decode",
+            Self::OutOfOrder => "the snapshot chunk continues no snapshot being received",
         })
     }
 }
@@ -154,11 +164,10 @@ impl<C: Config> Request<C> {
                 out.push(PRE_VOTE);
                 put_vote_request(out, request);
             }
-            Self::InstallSnapshot { vote, snapshot } => {
+            Self::InstallSnapshot { vote, chunk } => {
                 out.push(SNAPSHOT);
                 put_vote(out, vote);
-                put_meta(out, &snapshot.meta);
-                put_bytes(out, snapshot.snapshot.as_slice())?;
+                chunk.put(out)?;
             }
         }
         Ok(())
@@ -186,15 +195,10 @@ impl<C: Config> Request<C> {
             }
             VOTE => Self::Vote(vote_request(reader)?),
             PRE_VOTE => Self::PreVote(vote_request(reader)?),
-            SNAPSHOT => {
-                let vote = vote(reader)?;
-                let meta = meta(reader)?;
-                let snapshot = SnapshotBytes::from_vec(reader.bytes()?.to_vec());
-                Self::InstallSnapshot {
-                    vote,
-                    snapshot: Snapshot { meta, snapshot },
-                }
-            }
+            SNAPSHOT => Self::InstallSnapshot {
+                vote: vote(reader)?,
+                chunk: SnapshotChunk::read(reader)?,
+            },
             other => return Err(DecodeError::Tag(other)),
         };
         Ok(request)
@@ -270,6 +274,7 @@ impl<C: Config> Response<C> {
                     Refusal::Stopped => 1,
                     Refusal::Forged => 2,
                     Refusal::Malformed => 3,
+                    Refusal::OutOfOrder => 4,
                 });
             }
             Self::AppendEntries(result) => {
@@ -288,6 +293,7 @@ impl<C: Config> Response<C> {
                 out.push(SNAPSHOT);
                 put_vote(&mut out, &response.vote);
             }
+            Self::Received => out.push(RECEIVED),
         }
         out
     }
@@ -304,12 +310,14 @@ impl<C: Config> Response<C> {
                 1 => Refusal::Stopped,
                 2 => Refusal::Forged,
                 3 => Refusal::Malformed,
+                4 => Refusal::OutOfOrder,
                 other => return Err(DecodeError::Tag(other)),
             }),
             APPEND => Self::AppendEntries(append_result(&mut reader)?),
             VOTE => Self::Vote(vote_response(&mut reader)?),
             PRE_VOTE => Self::PreVote(vote_response(&mut reader)?),
             SNAPSHOT => Self::InstallSnapshot(SnapshotResponse::new(vote(&mut reader)?)),
+            RECEIVED => Self::Received,
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -426,6 +434,9 @@ mod tests {
     use super::{Message, Refusal, Request, Response};
     use crate::config::Entry;
     use crate::proposal::Proposal;
+    use std::num::NonZeroUsize;
+
+    use crate::network::chunk::{SnapshotChunk, chunks};
     use crate::snapshot::{Snapshot, SnapshotBytes};
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, SnapshotMeta, StoredMembership, Vote};
@@ -498,6 +509,16 @@ mod tests {
         )
     }
 
+    fn chunk() -> impl Strategy<Value = SnapshotChunk> {
+        (snapshot(), 1_usize..64, any::<prop::sample::Index>()).prop_map(
+            |(snapshot, size, pick)| {
+                let size = NonZeroUsize::new(size).unwrap();
+                let parts: Vec<_> = chunks(&snapshot, size).collect();
+                parts[pick.index(parts.len())].clone()
+            },
+        )
+    }
+
     fn snapshot() -> impl Strategy<Value = Snapshot> {
         (proptest::option::of(log_id()), log_id()).prop_map(|(last_log_id, membership_id)| {
             let meta = SnapshotMeta {
@@ -532,8 +553,7 @@ mod tests {
                 }),
             vote_request().prop_map(Request::Vote),
             vote_request().prop_map(Request::PreVote),
-            (vote(), snapshot())
-                .prop_map(|(vote, snapshot)| Request::InstallSnapshot { vote, snapshot }),
+            (vote(), chunk()).prop_map(|(vote, chunk)| Request::InstallSnapshot { vote, chunk }),
         ]
     }
 
@@ -542,7 +562,8 @@ mod tests {
             prop_oneof![
                 Just(Refusal::Stopped),
                 Just(Refusal::Forged),
-                Just(Refusal::Malformed)
+                Just(Refusal::Malformed),
+                Just(Refusal::OutOfOrder)
             ]
             .prop_map(Response::Refused),
             proptest::option::of(log_id())
@@ -561,6 +582,7 @@ mod tests {
             vote_response().prop_map(Response::Vote),
             vote_response().prop_map(Response::PreVote),
             vote().prop_map(|vote| Response::InstallSnapshot(SnapshotResponse::new(vote))),
+            Just(()).prop_map(|()| Response::Received),
         ]
     }
 
@@ -576,6 +598,10 @@ mod tests {
             (Refusal::Stopped, "the replica has stopped"),
             (Refusal::Forged, "the request claims another sender"),
             (Refusal::Malformed, "the request does not decode"),
+            (
+                Refusal::OutOfOrder,
+                "the snapshot chunk continues no snapshot being received",
+            ),
         ] {
             assert_eq!(refusal.to_string(), text, "{refusal:?}");
         }
@@ -583,7 +609,7 @@ mod tests {
 
     #[test]
     fn unknown_tags_and_trailing_bytes_are_rejected() {
-        for bytes in [vec![9], vec![0, 4]] {
+        for bytes in [vec![9], vec![0, 5]] {
             assert!(
                 matches!(Response::<Test>::decode(&bytes), Err(DecodeError::Tag(_))),
                 "{bytes:?}"

@@ -85,6 +85,11 @@ fn a_new_node_votes_only_after_it_caught_up_and_then_counts_in_the_quorum() {
             joined.snapshot().is_some(),
             "caught up from a snapshot: {joined:?}"
         );
+        assert!(
+            cluster.chunks_kept() > 10,
+            "the snapshot went in many chunks: {}",
+            cluster.chunks_kept()
+        );
 
         // With one old voter gone and another down, the quorum needs node 4.
         let leader = cluster.leader().unwrap();
