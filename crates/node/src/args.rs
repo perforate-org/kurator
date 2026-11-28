@@ -3,12 +3,17 @@
 //! ```text
 //! oleaph key <dir> [--consensus]
 //! oleaph run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--bft <charter>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
-//! oleaph client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... [--namespace <name>] (get <key> | put <key> <value> | del <key>)...
+//! oleaph client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... [--namespace <name>] ((get <key> | put <key> <value> | del <key>) [in <name>])...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
-//! touch, on the keys of one namespace: `--namespace`, or `default`. A node splits a shard it leads once the shard's state takes more
-//! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
+//! touch. Each names a key of the namespace its `in` names, or else of
+//! `--namespace`, or else of `default`. Namespaces of different
+//! assurances mix only where the meta shard gives them leave (the
+//! console's `mix`).
+//!
+//! A node splits a shard it leads once the shard's state takes more than
+//! `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
 //!
 //! `oleaph key` prints the node's transport key, or with `--consensus`
 //! the key it signs BFT votes with.
@@ -50,7 +55,7 @@ pub struct Session {
     dir: PathBuf,
     peers: Vec<(NodeId, Peer)>,
     namespace: NamespaceName,
-    ops: Vec<Op>,
+    ops: Vec<(Op, Option<NamespaceName>)>,
 }
 
 impl Session {
@@ -66,16 +71,19 @@ impl Session {
         &self.peers
     }
 
-    /// The namespace whose keys the operations name.
+    /// The namespace whose keys the operations name, unless one names
+    /// its own.
     #[must_use]
     pub const fn namespace(&self) -> &NamespaceName {
         &self.namespace
     }
 
-    /// The operations, in order.
-    #[must_use]
-    pub fn ops(&self) -> &[Op] {
-        &self.ops
+    /// The operations, in order, each with the namespace whose key it
+    /// names.
+    pub fn ops(&self) -> impl Iterator<Item = (&NamespaceName, &Op)> {
+        self.ops
+            .iter()
+            .map(|(op, within)| (within.as_ref().unwrap_or(&self.namespace), op))
     }
 }
 
@@ -270,29 +278,41 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
     })
 }
 
-fn client(mut args: impl Iterator<Item = String>) -> Result<Session, UsageError> {
+fn client(args: impl Iterator<Item = String>) -> Result<Session, UsageError> {
+    let mut args = args.peekable();
     let mut dir = None;
     let mut peers = Vec::new();
     let mut namespace = NamespaceName::default_name();
     let mut ops = Vec::new();
+    let name = |option, text: &str| read(option, text, |name| name.parse().ok());
     while let Some(arg) = args.next() {
         let mut value = |option: &'static str| args.next().ok_or(UsageError::Missing(option));
-        match arg.as_str() {
-            "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
-            "--peer" => peers.push(read("--peer", &value("--peer")?, peer)?),
-            "--namespace" => {
-                namespace = read("--namespace", &value("--namespace")?, |name| {
-                    name.parse().ok()
-                })?;
+        let op = match arg.as_str() {
+            "--dir" => {
+                dir = Some(PathBuf::from(value("--dir")?));
+                continue;
             }
-            "get" => ops.push(Op::Get(value("get")?.into_bytes())),
+            "--peer" => {
+                peers.push(read("--peer", &value("--peer")?, peer)?);
+                continue;
+            }
+            "--namespace" => {
+                namespace = name("--namespace", &value("--namespace")?)?;
+                continue;
+            }
+            "get" => Op::Get(value("get")?.into_bytes()),
             "put" => {
                 let key = value("put")?.into_bytes();
-                ops.push(Op::Put(key, value("put")?.into_bytes()));
+                Op::Put(key, value("put")?.into_bytes())
             }
-            "del" => ops.push(Op::Delete(value("del")?.into_bytes())),
+            "del" => Op::Delete(value("del")?.into_bytes()),
             _ => return Err(UsageError::Option(arg)),
-        }
+        };
+        let within = match args.next_if(|next| next == "in") {
+            Some(_) => Some(name("in", &args.next().ok_or(UsageError::Missing("in"))?)?),
+            None => None,
+        };
+        ops.push((op, within));
     }
     if peers.is_empty() {
         return Err(UsageError::Missing("--peer"));
@@ -441,13 +461,16 @@ mod tests {
         };
         assert_eq!(session.dir().to_str(), Some("c"), "dir");
         assert_eq!(session.peers().len(), 1, "peer");
+        let default = NamespaceName::default_name();
         let ops = [
             Op::Get(b"a".to_vec()),
             Op::Put(b"b".to_vec(), b"1".to_vec()),
             Op::Delete(b"c".to_vec()),
         ];
-        assert_eq!(session.ops(), ops, "ops in order");
-        let default = NamespaceName::default_name();
+        assert!(
+            session.ops().eq(ops.iter().map(|op| (&default, op))),
+            "ops in order"
+        );
         assert_eq!(session.namespace(), &default, "the default namespace");
         let named =
             format!("client --dir c --peer 2=127.0.0.1:7002,{peer_key} --namespace payments get a");
@@ -455,6 +478,23 @@ mod tests {
             panic!("parses");
         };
         assert_eq!(named.namespace().as_str(), "payments", "a namespace");
+        let within = format!(
+            "client --dir c --peer 2=127.0.0.1:7002,{peer_key} --namespace payments get a in ledger put b 1"
+        );
+        let Ok(Invocation::Client(within)) = parse(args(&within)) else {
+            panic!("parses");
+        };
+        let routed: Vec<_> = within
+            .ops()
+            .map(|(namespace, op)| (namespace.as_str(), op))
+            .collect();
+        let get = Op::Get(b"a".to_vec());
+        let put = Op::Put(b"b".to_vec(), b"1".to_vec());
+        assert_eq!(
+            routed,
+            [("ledger", &get), ("payments", &put)],
+            "its own, then the session's"
+        );
         let peer = format!("--peer 2=127.0.0.1:7002,{peer_key}");
         for (bad, error) in [
             (format!("client --dir c {peer}"), UsageError::Nothing),
@@ -484,6 +524,17 @@ mod tests {
                 UsageError::Value {
                     option: "--namespace",
                     value: "Payments".to_owned(),
+                },
+            ),
+            (
+                format!("client --dir c {peer} get a in"),
+                UsageError::Missing("in"),
+            ),
+            (
+                format!("client --dir c {peer} get a in Ledger"),
+                UsageError::Value {
+                    option: "in",
+                    value: "Ledger".to_owned(),
                 },
             ),
         ] {

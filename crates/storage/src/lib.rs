@@ -51,7 +51,7 @@ mod two_phase;
 mod txn;
 mod version;
 
-pub use across::{Deadline, TxnId};
+pub use across::{Deadline, Primary, TxnId};
 pub use batch::{KvOp, WriteBatch};
 pub use command::{Command, Encoded};
 pub use db::{Db, Options, Txn};
@@ -60,7 +60,7 @@ pub use error::{Error, Result, SnapshotDamage};
 pub use oleaph_codec::DecodeError;
 pub use oleaph_wal::{Lsn, RecoveryReport};
 pub use outcome::{Abort, Outcome, Unreadable};
-pub use span::{End, Span};
+pub use span::{End, NamespaceId, Span};
 pub use state::{Footprint, KvState, View};
 pub use two_phase::{Collect, Decide, Decided, Decision, Prepare};
 pub use txn::{ReadOnly, Transaction};

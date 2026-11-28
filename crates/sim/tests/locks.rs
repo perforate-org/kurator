@@ -15,7 +15,9 @@ use oleaph_consensus::Transaction as _;
 use oleaph_raft::openraft::AsyncRuntime as _;
 use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_sim::{Cluster, Faults, Holdings, Outcome};
-use oleaph_storage::{Command, Deadline, Decide, Decision, Draft, Outcome as Applied, WriteBatch};
+use oleaph_storage::{
+    Command, Deadline, Decide, Decision, Draft, Outcome as Applied, Primary, WriteBatch,
+};
 use openraft_rt_sim::SimRuntime;
 
 /// Longer than a coordinator means to take over a transaction.
@@ -225,11 +227,16 @@ async fn commit_on_the_primary_only(cluster: &Cluster) {
         };
         let mut draft = Draft::new(at);
         draft.put(key, "2");
-        let prepare = draft.into_prepare(id, b"a".to_vec(), deadline);
+        let prepare = draft.into_prepare(id, Primary::new(NamespaceId::DEFAULT, "a"), deadline);
         let prepared = propose(cluster, shard, Command::Prepare(prepare)).await;
         assert!(matches!(prepared, Applied::Prepared(_)), "{prepared:?}");
     }
-    let decide = Decide::new(id, b"a".to_vec(), deadline, Decision::Commit);
+    let decide = Decide::new(
+        id,
+        Primary::new(NamespaceId::DEFAULT, "a"),
+        deadline,
+        Decision::Commit,
+    );
     let committed = propose(cluster, ShardId::FIRST, Command::Decide(decide)).await;
     assert!(matches!(committed, Applied::Committed(_)), "{committed:?}");
 }

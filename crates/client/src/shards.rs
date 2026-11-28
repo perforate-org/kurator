@@ -3,6 +3,7 @@
 
 use std::future::Future;
 
+use oleaph_meta::{Assurance, Mix};
 use oleaph_shard::{NamespaceId, Shard, ShardId};
 use oleaph_storage::{Abort, Deadline, TxnId};
 
@@ -15,6 +16,10 @@ pub trait Shards: Sync {
     /// The shard that holds `key` of `namespace`, as far as this client
     /// knows, or `None` when it knows no shards of the namespace.
     fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId>;
+
+    /// How `namespace` is kept, as far as this client knows, or `None`
+    /// when it knows no such namespace.
+    fn assurance(&self, namespace: NamespaceId) -> Option<Assurance>;
 
     /// Every shard of every namespace, learned afresh.
     fn refresh(&self) -> impl Future<Output = Vec<Shard>> + Send;
@@ -42,6 +47,10 @@ pub enum Error {
     /// namespace, or not yet.
     #[error("no shards of {0} are known")]
     Unmapped(NamespaceId),
+    /// The transaction would span two namespaces of different assurances
+    /// that have no leave to mix.
+    #[error("{0} are not given leave to mix in one transaction")]
+    Unmixed(Mix),
     /// The shard does not hold the key: it split.
     #[error("shard {} does not hold the key", .0.id())]
     Misrouted(Box<Shard>),

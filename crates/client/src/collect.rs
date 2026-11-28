@@ -134,8 +134,11 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::FutureExt as _;
+    use oleaph_meta::Assurance;
     use oleaph_shard::{NamespaceId, Shard, ShardId};
-    use oleaph_storage::{Abort, Collect, Command, Deadline, Decision, Outcome, TxnId, Version};
+    use oleaph_storage::{
+        Abort, Collect, Command, Deadline, Decision, Outcome, Primary, TxnId, Version,
+    };
     use parking_lot::Mutex;
 
     use super::{Collected, Collector, FENCE_TRIES};
@@ -190,6 +193,10 @@ mod tests {
             Some(ShardId::FIRST)
         }
 
+        fn assurance(&self, _namespace: NamespaceId) -> Option<Assurance> {
+            Some(Assurance::Cft)
+        }
+
         async fn refresh(&self) -> Vec<Shard> {
             let first = {
                 let mut looks = self.looks.lock();
@@ -210,7 +217,7 @@ mod tests {
                 Command::Collect(Collect::Fence(at)) if self.holds(shard) => {
                     let held = Abort::Held {
                         by: TxnId::new(4),
-                        primary: b"a".to_vec(),
+                        primary: Primary::new(NamespaceId::DEFAULT, "a"),
                         deadline: Deadline::new(1),
                     };
                     (

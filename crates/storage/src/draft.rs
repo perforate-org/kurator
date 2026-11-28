@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
-use crate::across::{Deadline, TxnId};
+use crate::across::{Deadline, Primary, TxnId};
 use crate::batch::WriteBatch;
 use crate::outcome::Unreadable;
 use crate::state::KvState;
@@ -139,7 +139,7 @@ impl Draft {
     /// may be nothing written. Its reads must be checked even then, since
     /// the other shards read at other versions.
     #[must_use]
-    pub fn into_prepare(self, id: TxnId, primary: Vec<u8>, deadline: Deadline) -> Prepare {
+    pub fn into_prepare(self, id: TxnId, primary: Primary, deadline: Deadline) -> Prepare {
         let Self {
             read_at,
             reads,

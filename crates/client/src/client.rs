@@ -2,17 +2,18 @@
 //! node, and finds each shard's leader by following the leaders replicas
 //! name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oleaph_consensus::{NodeId, Peer};
-use oleaph_meta::{NamespaceName, Registry};
+use oleaph_meta::{Assurance, Mix, Namespace, NamespaceName, Registry};
 use oleaph_shard::{NamespaceId, Shard, ShardId, ShardMap};
 use oleaph_storage::{Deadline, TxnId};
 use parking_lot::Mutex;
 
+use crate::across::Mixed;
 use crate::remote::{Call, Reach, Reply, Request};
 use crate::shards::Shards;
 
@@ -60,8 +61,10 @@ pub struct Client<R, T> {
 /// What a client knows of the cluster.
 #[derive(Debug)]
 struct Known {
-    /// The id of each namespace, by name.
-    namespaces: BTreeMap<NamespaceName, NamespaceId>,
+    /// Each namespace, by name.
+    namespaces: BTreeMap<NamespaceName, Namespace>,
+    /// The pairs of namespaces given leave to mix.
+    mixes: BTreeSet<Mix>,
     /// The map of each namespace whose shards this client knows.
     maps: BTreeMap<NamespaceId, ShardMap>,
     peers: BTreeMap<NodeId, Peer>,
@@ -81,7 +84,11 @@ impl<R: Reach, T: Time> Client<R, T> {
             reach,
             time,
             known: Mutex::new(Known {
-                namespaces: BTreeMap::from([(NamespaceName::default_name(), NamespaceId::DEFAULT)]),
+                namespaces: BTreeMap::from([(
+                    NamespaceName::default_name(),
+                    Namespace::founding(),
+                )]),
+                mixes: BTreeSet::new(),
                 maps: BTreeMap::from([(NamespaceId::DEFAULT, ShardMap::new())]),
                 peers: entry,
                 leaders: BTreeMap::new(),
@@ -108,7 +115,20 @@ impl<R: Reach, T: Time> Client<R, T> {
     /// namespaces; see [`Client::learn`].
     #[must_use]
     pub fn namespace(&self, name: &NamespaceName) -> Option<NamespaceId> {
-        self.known.lock().namespaces.get(name).copied()
+        Some(self.known.lock().namespaces.get(name)?.id())
+    }
+
+    /// Leave for one transaction to span `one` and `other`, as this client
+    /// last learned the leaves the registry gives; see
+    /// [`Across::admit`](crate::Across::admit).
+    #[must_use]
+    pub fn mixed(&self, one: NamespaceId, other: NamespaceId) -> Option<Mixed> {
+        let mix = Mix::new(one, other)?;
+        self.known
+            .lock()
+            .mixes
+            .contains(&mix)
+            .then(|| Mixed::given(mix))
     }
 
     /// Asks one node after another where the shards are and which
@@ -144,8 +164,9 @@ impl<R: Reach, T: Time> Client<R, T> {
         let mut known = self.known.lock();
         known.namespaces = registry
             .namespaces()
-            .map(|(name, namespace)| (name.clone(), namespace.id()))
+            .map(|(name, namespace)| (name.clone(), *namespace))
             .collect();
+        known.mixes = registry.mixed().copied().collect();
         for (_, namespace) in registry.namespaces() {
             if let Some(map) = registry.map(namespace.id()) {
                 drop(known.maps.insert(namespace.id(), map));
@@ -226,6 +247,15 @@ impl<R: Reach, T: Time> Shards for Client<R, T> {
         Some(known.maps.get(&namespace)?.locate(key).id())
     }
 
+    fn assurance(&self, namespace: NamespaceId) -> Option<Assurance> {
+        let known = self.known.lock();
+        known
+            .namespaces
+            .values()
+            .find(|named| named.id() == namespace)
+            .map(Namespace::assurance)
+    }
+
     async fn refresh(&self) -> Vec<Shard> {
         let _learned: bool = self.learn().await;
         self.shards()
@@ -270,7 +300,7 @@ mod tests {
     use oleaph_codec::{Reader, put_bytes};
     use oleaph_consensus::{NodeId, Peer};
     use oleaph_crypto::{Algorithm, SigningKey};
-    use oleaph_meta::{Assurance, Namespace, NamespaceName, Placement, Registry};
+    use oleaph_meta::{Assurance, Mix, Namespace, NamespaceName, Placement, Registry};
     use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{Deadline, End, Span, TxnId, Version};
     use parking_lot::Mutex;
@@ -304,12 +334,17 @@ mod tests {
 
     /// A registry that places each of `shards` on nodes 1, 2 and 3.
     fn registry(shards: &[Shard]) -> Registry {
-        named(shards, &[])
+        named(shards, &[], &[])
     }
 
     /// A registry that places each of `shards` on nodes 1, 2 and 3, and
-    /// records `namespaces` besides the default.
-    fn named(shards: &[Shard], namespaces: &[(NamespaceName, Namespace)]) -> Registry {
+    /// records `namespaces` besides the default, and the leave `mixes`
+    /// gives.
+    fn named(
+        shards: &[Shard],
+        namespaces: &[(NamespaceName, Namespace)],
+        mixes: &[Mix],
+    ) -> Registry {
         let mut out = 3_u64.to_le_bytes().to_vec();
         out.extend_from_slice(&u32::try_from(shards.len()).unwrap().to_le_bytes());
         for shard in shards {
@@ -326,6 +361,12 @@ mod tests {
             let mut encoded = Vec::new();
             namespace.encode(&mut encoded).unwrap();
             put_bytes(&mut out, &encoded).unwrap();
+        }
+        out.extend_from_slice(&u32::try_from(mixes.len()).unwrap().to_le_bytes());
+        for mix in mixes {
+            let (low, high) = mix.namespaces();
+            out.extend_from_slice(&low.get().to_le_bytes());
+            out.extend_from_slice(&high.get().to_le_bytes());
         }
         Registry::decode(&mut Reader::new(&out)).unwrap()
     }
@@ -447,9 +488,21 @@ mod tests {
         let own = Shard::whole(id, ShardId::new(3));
         let mut shards = halves().to_vec();
         shards.push(own.clone());
-        let nodes = Nodes::new(&[(1, Node::Leads)], named(&shards, &[namespace]));
+        let ledger = NamespaceId::new(2);
+        let chartered = (
+            "ledger".parse().unwrap(),
+            Namespace::new(ledger, Assurance::Bft),
+        );
+        let mix = Mix::new(ledger, NamespaceId::DEFAULT).unwrap();
+        let registry = named(&shards, &[chartered, namespace], &[mix]);
+        let nodes = Nodes::new(&[(1, Node::Leads)], registry);
         let client = client(nodes, &[1]);
         assert_eq!(client.namespace(&payments), None, "not learned yet");
+        assert_eq!(
+            client.mixed(NamespaceId::DEFAULT, ledger),
+            None,
+            "no leave yet"
+        );
         assert_eq!(client.locate(id, b"a"), None, "no shards known");
         assert!(client.learn().now_or_never().unwrap(), "learned");
         assert_eq!(client.namespace(&payments), Some(id), "by name");
@@ -466,6 +519,15 @@ mod tests {
             "the same key elsewhere"
         );
         assert_eq!(client.shards(), shards, "every shard, by namespace");
+        assert_eq!(client.assurance(id), Some(Assurance::Cft), "cft");
+        assert_eq!(client.assurance(ledger), Some(Assurance::Bft), "bft");
+        assert_eq!(client.assurance(NamespaceId::new(9)), None, "unknown");
+        assert!(
+            client.mixed(ledger, NamespaceId::DEFAULT).is_some(),
+            "leave"
+        );
+        assert_eq!(client.mixed(ledger, id), None, "no leave");
+        assert_eq!(client.mixed(ledger, ledger), None, "not with itself");
     }
 
     #[test]

@@ -12,7 +12,9 @@ use std::time::Duration;
 use oleaph_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
 use oleaph_consensus::{Duty, Replicated as _, Route, Transaction as _};
 use oleaph_crypto::NodeSecret;
-use oleaph_meta::{Created, MetaError, NamespaceName, Placement, Registry, Reported, allocate};
+use oleaph_meta::{
+    Assurance, Created, MetaError, NamespaceName, Placement, Registry, Reported, allocate,
+};
 use oleaph_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
 use oleaph_raft::{
     Error, Member, Membership, NodeId, Peer, Progress, Replica, Role, Status, Store, Txn,
@@ -142,6 +144,8 @@ pub struct Cluster {
     up: BTreeMap<NodeId, SimStore>,
     /// Where the client thinks each key of each namespace is.
     maps: Mutex<BTreeMap<NamespaceId, ShardMap>>,
+    /// How the client thinks each namespace is kept.
+    assurances: Mutex<BTreeMap<NamespaceId, Assurance>>,
     /// The id of the last transaction across shards it coordinated.
     txns: Mutex<u128>,
 }
@@ -192,6 +196,7 @@ impl Cluster {
             members,
             up: BTreeMap::new(),
             maps: Mutex::new(BTreeMap::from([(NamespaceId::DEFAULT, ShardMap::new())])),
+            assurances: Mutex::new(BTreeMap::from([(NamespaceId::DEFAULT, Assurance::Cft)])),
             txns: Mutex::new(0),
         };
         for id in cluster.ids() {
@@ -883,6 +888,11 @@ impl Cluster {
                 drop(maps.insert(namespace.id(), map));
             }
         }
+        drop(maps);
+        *self.assurances.lock() = registry
+            .namespaces()
+            .map(|(_, namespace)| (namespace.id(), namespace.assurance()))
+            .collect();
     }
 
     /// Where each shard is, as each replica of it knows from what it
@@ -1211,6 +1221,11 @@ impl Shards for Cluster {
     /// As the client's map of the namespace has it.
     fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId> {
         Some(self.maps.lock().get(&namespace)?.locate(key).id())
+    }
+
+    /// As the registry the client last read has it.
+    fn assurance(&self, namespace: NamespaceId) -> Option<Assurance> {
+        self.assurances.lock().get(&namespace).copied()
     }
 
     async fn refresh(&self) -> Vec<Shard> {

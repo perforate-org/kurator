@@ -12,6 +12,8 @@
 //!                   entry of the membership they come from
 //! next-namespace    the id the next namespace gets, u32
 //! namespace/<name>  a Namespace: its id and its Assurance
+//! mix/<low u32 BE><high u32 BE>
+//!                   leave for one transaction to span the two namespaces
 //! ```
 //!
 //! - **Namespaces.** A [`Namespace`] is a key space of its own, split into
@@ -36,13 +38,15 @@
 
 mod client;
 mod error;
+mod mix;
 mod namespace;
 mod placement;
 mod registry;
 mod remote;
 
-pub use client::{Created, allocate, charter, create, registry, report};
+pub use client::{Created, Mixing, allocate, charter, create, mix, registry, report};
 pub use error::{MetaError, Result};
+pub use mix::Mix;
 pub use namespace::{Assurance, BadAssurance, BadName, Namespace, NamespaceName};
 pub use placement::{Placement, Reported};
 pub use registry::Registry;

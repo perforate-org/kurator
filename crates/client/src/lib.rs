@@ -23,7 +23,7 @@ mod remote;
 mod resolve;
 mod shards;
 
-pub use across::{Across, Coordinator, LOCK_TTL, Transacted};
+pub use across::{Across, Coordinator, LOCK_TTL, Mixed, Transacted};
 pub use client::{Client, Time};
 pub use collect::{Collected, Collector};
 pub use remote::{Call, Reach, Reply, Request, answer};

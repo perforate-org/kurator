@@ -29,7 +29,7 @@ use oleaph_history::{Checked, Dependency, Element, Fate, History, Key, Txn, chec
 use oleaph_raft::openraft::AsyncRuntime as _;
 use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_sim::{Cluster, Faults, Outcome, Rng};
-use oleaph_storage::{Command, Deadline, Decide, Decision, Draft, Outcome as Applied};
+use oleaph_storage::{Command, Deadline, Decide, Decision, Draft, Outcome as Applied, Primary};
 use openraft_rt_sim::SimRuntime;
 
 const DEFAULT_SEEDS: u64 = 8;
@@ -230,10 +230,10 @@ async fn stranded(cluster: &Cluster, steps: &[Step]) -> (Txn, Fate) {
             draft.put(key(index), encode(&list));
         }
     }
-    let Some((primary, primary_key)) = parts
-        .iter()
-        .find_map(|(shard, draft)| Some((*shard, draft.first_write()?.to_vec())))
-    else {
+    let Some((primary, primary_key)) = parts.iter().find_map(|(shard, draft)| {
+        let key = draft.first_write()?;
+        Some((*shard, Primary::new(NamespaceId::DEFAULT, key)))
+    }) else {
         return (seen, Fate::Aborted);
     };
     let id = cluster.next_txn();

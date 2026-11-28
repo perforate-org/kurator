@@ -8,14 +8,22 @@
 //! told after it. A transaction whose coordinator gave up half way leaves
 //! its locks behind; whoever runs into them past their deadline resolves
 //! them ([`Lock::resolve`](crate::Lock::resolve)).
+//!
+//! A transaction may span namespaces. Namespaces alike in assurance mix
+//! freely; a crash fault tolerant one and a Byzantine fault tolerant one
+//! mix only with the leave the registry gives that pair, a [`Mixed`]. The
+//! transaction is then decided on the Byzantine fault tolerant side, but
+//! is only as safe as its crash fault tolerant side, whose operator it
+//! trusts.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use oleaph_meta::{Assurance, Mix, Registry};
 use oleaph_shard::{NamespaceId, Shard, ShardId};
 use oleaph_storage::{
-    Abort, Command, Deadline, Decide, Decided, Decision, Draft, Outcome, Prepare, Version,
+    Abort, Command, Deadline, Decide, Decided, Decision, Draft, Outcome, Prepare, Primary, Version,
 };
 
 use crate::remote::{Call, Reply};
@@ -44,6 +52,26 @@ pub enum Transacted {
     Unknown,
 }
 
+/// Leave for one transaction to span two namespaces of different
+/// assurances, as the registry gives it: see [`Across::admit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mixed(Mix);
+
+impl Mixed {
+    /// Leave to mix `one` and `other`, if `registry` gives it.
+    #[must_use]
+    pub fn of(registry: &Registry, one: NamespaceId, other: NamespaceId) -> Option<Self> {
+        Mix::new(one, other)
+            .filter(|_| registry.mixes(one, other))
+            .map(Self)
+    }
+
+    /// The leave the registry gave as `mix`.
+    pub(crate) const fn given(mix: Mix) -> Self {
+        Self(mix)
+    }
+}
+
 /// The client as the coordinator of transactions across shards.
 #[derive(Debug)]
 pub struct Coordinator<'shards, S> {
@@ -65,13 +93,14 @@ impl<'shards, S: Shards> Coordinator<'shards, S> {
         Self { shards }
     }
 
-    /// Starts a transaction across every shard of `namespace` it will
-    /// touch. Its keys are all keys of that namespace.
+    /// Starts a transaction across every shard it will touch, whose keys
+    /// are keys of `namespace` unless named in another.
     #[must_use]
     pub const fn begin(self, namespace: NamespaceId) -> Across<'shards, S> {
         Across {
             coordinator: self,
-            namespace,
+            home: namespace,
+            mixes: BTreeSet::new(),
             parts: BTreeMap::new(),
         }
     }
@@ -99,21 +128,24 @@ impl<'shards, S: Shards> Coordinator<'shards, S> {
     }
 }
 
-/// A transaction across shards of one namespace being built: what it
-/// read and writes on each shard it touched so far. Dropping it writes
-/// nothing.
+/// A transaction across shards being built: what it read and writes on
+/// each shard it touched so far, and the namespaces it may mix. Dropping
+/// it writes nothing.
 #[derive(Debug)]
 pub struct Across<'shards, S> {
     coordinator: Coordinator<'shards, S>,
-    namespace: NamespaceId,
+    home: NamespaceId,
+    mixes: BTreeSet<Mix>,
     parts: BTreeMap<ShardId, Part>,
 }
 
 /// One shard's part: the shard as its leader held it when the transaction
-/// first touched it, and what the transaction read and writes there.
+/// first touched it, its namespace's assurance, and what the transaction
+/// read and writes there.
 #[derive(Debug)]
 struct Part {
     shard: Shard,
+    assurance: Assurance,
     draft: Draft,
 }
 
@@ -133,17 +165,57 @@ enum Prepared {
 }
 
 impl<S: Shards> Across<'_, S> {
+    /// Lets the transaction span the two namespaces `mixed` names, of
+    /// different assurances.
+    pub fn admit(&mut self, mixed: Mixed) {
+        let _new: bool = self.mixes.insert(mixed.0);
+    }
+
     /// The value of `key`, with the transaction's own writes applied.
     ///
     /// # Errors
     ///
-    /// [`Error::Unmapped`] when the client knows no shards of the
-    /// transaction's namespace, [`Error::Unanswered`] when the key's shard
-    /// has no leader up, [`Error::Misrouted`] when it does not hold the
-    /// key, and [`Error::Refused`] when it cannot read the version.
+    /// As [`Across::get_in`].
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.get_in(self.home, key).await
+    }
+
+    /// Sets `key` to `value` when the transaction commits.
+    ///
+    /// # Errors
+    ///
+    /// As [`Across::get_in`].
+    pub async fn put(&mut self, key: &[u8], value: impl Into<Vec<u8>>) -> Result<(), Error> {
+        self.put_in(self.home, key, value).await
+    }
+
+    /// Removes `key` when the transaction commits.
+    ///
+    /// # Errors
+    ///
+    /// As [`Across::get_in`].
+    pub async fn delete(&mut self, key: &[u8]) -> Result<(), Error> {
+        self.delete_in(self.home, key).await
+    }
+
+    /// The value of `key` of `namespace`, with the transaction's own
+    /// writes applied.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unmapped`] when the client knows no shards of
+    /// `namespace`, [`Error::Unmixed`] when the transaction touched a
+    /// namespace of another assurance without leave to mix the two,
+    /// [`Error::Unanswered`] when the key's shard has no leader up,
+    /// [`Error::Misrouted`] when it does not hold the key, and
+    /// [`Error::Refused`] when it cannot read the version.
+    pub async fn get_in(
+        &mut self,
+        namespace: NamespaceId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Error> {
         let shards = self.coordinator.shards;
-        let part = self.part(key).await?;
+        let part = self.part(namespace, key).await?;
         if let Some(written) = part.draft.written(key) {
             return Ok(written.map(<[u8]>::to_vec));
         }
@@ -161,23 +233,28 @@ impl<S: Shards> Across<'_, S> {
         }
     }
 
-    /// Sets `key` to `value` when the transaction commits.
+    /// Sets `key` of `namespace` to `value` when the transaction commits.
     ///
     /// # Errors
     ///
-    /// As [`Across::get`].
-    pub async fn put(&mut self, key: &[u8], value: impl Into<Vec<u8>>) -> Result<(), Error> {
-        self.part(key).await?.draft.put(key, value);
+    /// As [`Across::get_in`].
+    pub async fn put_in(
+        &mut self,
+        namespace: NamespaceId,
+        key: &[u8],
+        value: impl Into<Vec<u8>>,
+    ) -> Result<(), Error> {
+        self.part(namespace, key).await?.draft.put(key, value);
         Ok(())
     }
 
-    /// Removes `key` when the transaction commits.
+    /// Removes `key` of `namespace` when the transaction commits.
     ///
     /// # Errors
     ///
-    /// As [`Across::get`].
-    pub async fn delete(&mut self, key: &[u8]) -> Result<(), Error> {
-        self.part(key).await?.draft.delete(key);
+    /// As [`Across::get_in`].
+    pub async fn delete_in(&mut self, namespace: NamespaceId, key: &[u8]) -> Result<(), Error> {
+        self.part(namespace, key).await?.draft.delete(key);
         Ok(())
     }
 
@@ -188,10 +265,7 @@ impl<S: Shards> Across<'_, S> {
         let Self {
             coordinator, parts, ..
         } = self;
-        let parts: Vec<(ShardId, Shard, Draft)> = parts
-            .into_iter()
-            .map(|(id, part)| (id, part.shard, part.draft))
-            .collect();
+        let parts: Vec<(ShardId, Part)> = parts.into_iter().collect();
         let Some((primary_shard, primary_key)) = primary(&parts) else {
             return Transacted::Committed(Version::ZERO);
         };
@@ -199,7 +273,13 @@ impl<S: Shards> Across<'_, S> {
         let deadline = coordinator.deadline();
         let mut proposed = Decision::Commit;
         let mut told = Vec::new();
-        for (shard, held, draft) in parts {
+        for (
+            shard,
+            Part {
+                shard: held, draft, ..
+            },
+        ) in parts
+        {
             let prepare = draft.into_prepare(id, primary_key.clone(), deadline);
             let prepared = coordinator.prepare(&held, prepare).await;
             if prepared != Prepared::Refused {
@@ -225,14 +305,14 @@ impl<S: Shards> Across<'_, S> {
         }
     }
 
-    /// The part of the shard that holds `key`, started when the
-    /// transaction first touches the shard.
-    async fn part(&mut self, key: &[u8]) -> Result<&mut Part, Error> {
+    /// The part of the shard that holds `key` of `namespace`, started
+    /// when the transaction first touches the shard.
+    async fn part(&mut self, namespace: NamespaceId, key: &[u8]) -> Result<&mut Part, Error> {
         let shards = self.coordinator.shards;
-        let namespace = self.namespace;
-        let shard = shards
-            .locate(namespace, key)
-            .ok_or(Error::Unmapped(namespace))?;
+        let unmapped = || Error::Unmapped(namespace);
+        let assurance = shards.assurance(namespace).ok_or_else(unmapped)?;
+        let shard = shards.locate(namespace, key).ok_or_else(unmapped)?;
+        self.admits(namespace, assurance)?;
         let part = match self.parts.entry(shard) {
             Entry::Occupied(part) => part.into_mut(),
             Entry::Vacant(vacant) => {
@@ -243,6 +323,7 @@ impl<S: Shards> Across<'_, S> {
                 };
                 vacant.insert(Part {
                     shard: held,
+                    assurance,
                     draft: Draft::new(read_at),
                 })
             }
@@ -251,6 +332,18 @@ impl<S: Shards> Across<'_, S> {
             return Err(Error::Misrouted(Box::new(part.shard.clone())));
         }
         Ok(part)
+    }
+
+    /// Whether the transaction may touch `namespace`, kept as `assurance`
+    /// says: each namespace it touched of another assurance must have
+    /// leave to mix with it.
+    fn admits(&self, namespace: NamespaceId, assurance: Assurance) -> Result<(), Error> {
+        let unmixed = self.parts.values().find_map(|part| {
+            let mix = Mix::new(part.shard.namespace(), namespace)?;
+            let mixes = part.assurance != assurance;
+            (mixes && !self.mixes.contains(&mix)).then_some(mix)
+        });
+        unmixed.map_or(Ok(()), |mix| Err(Error::Unmixed(mix)))
     }
 }
 
@@ -266,27 +359,47 @@ fn prepared(reply: Option<Reply>) -> Prepared {
 
 /// The primary of a transaction with `parts`: the shard and the first key
 /// it writes, or, when it writes nothing, the start of the first shard it
-/// read. `None` when it touched no shard.
-fn primary(parts: &[(ShardId, Shard, Draft)]) -> Option<(ShardId, Vec<u8>)> {
-    let written = parts
+/// read. When it touched a Byzantine fault tolerant namespace, it is
+/// decided there, so only its parts are looked at. `None` when it touched
+/// no shard.
+fn primary(parts: &[(ShardId, Part)]) -> Option<(ShardId, Primary)> {
+    let trusted: Vec<&(ShardId, Part)> = parts
         .iter()
-        .find_map(|(id, _, draft)| Some((*id, draft.first_write()?.to_vec())));
+        .filter(|(_, part)| part.assurance == Assurance::Bft)
+        .collect();
+    if trusted.is_empty() {
+        first(&parts.iter().collect::<Vec<_>>())
+    } else {
+        first(&trusted)
+    }
+}
+
+/// The first key that `parts` write, with its shard, or, when they write
+/// nothing, the start of the first of them.
+fn first(parts: &[&(ShardId, Part)]) -> Option<(ShardId, Primary)> {
+    let at =
+        |(id, part): &(ShardId, Part), key: &[u8]| (*id, Primary::new(part.shard.namespace(), key));
+    let written = parts.iter().find_map(|entry| {
+        let key = entry.1.draft.first_write()?;
+        Some(at(entry, key))
+    });
     written.or_else(|| {
-        let (id, shard, _) = parts.first()?;
-        Some((*id, shard.span().start().to_vec()))
+        let entry = parts.first()?;
+        Some(at(entry, entry.1.shard.span().start()))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
+    use oleaph_meta::{Assurance, Mix};
     use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{
-        Abort, Command, Deadline, Decision, End, KvOp, Outcome, Span, TxnId, Version,
+        Abort, Command, Deadline, Decision, End, KvOp, Outcome, Primary, Span, TxnId, Version,
     };
     use parking_lot::Mutex;
 
-    use super::{Coordinator, Transacted};
+    use super::{Coordinator, Mixed, Transacted};
     use crate::remote::{Call, Reply};
     use crate::shards::{Error, Shards};
 
@@ -334,6 +447,10 @@ mod tests {
             } else {
                 ShardId::new(2)
             })
+        }
+
+        fn assurance(&self, namespace: NamespaceId) -> Option<Assurance> {
+            (namespace == NamespaceId::DEFAULT).then_some(Assurance::Cft)
         }
 
         async fn refresh(&self) -> Vec<Shard> {
@@ -486,6 +603,10 @@ mod tests {
             Some(ShardId::FIRST)
         }
 
+        fn assurance(&self, _namespace: NamespaceId) -> Option<Assurance> {
+            Some(Assurance::Cft)
+        }
+
         async fn refresh(&self) -> Vec<Shard> {
             Vec::new()
         }
@@ -514,5 +635,175 @@ mod tests {
         let decided = shards.decided.lock().clone();
         let abort = Decision::Abort;
         assert_eq!(decided, [(ShardId::FIRST, abort), (second, abort)], "both");
+    }
+
+    /// The default namespace and `ns1`, crash fault tolerant, and `ns2`,
+    /// Byzantine fault tolerant, each one shard: shards 1, 3 and 4. It
+    /// records where each decision was told, and the primary it named.
+    #[derive(Default)]
+    struct Spaces {
+        decided: Mutex<Vec<(ShardId, Decision, Primary)>>,
+    }
+
+    const CFT: NamespaceId = NamespaceId::new(1);
+    const BFT: NamespaceId = NamespaceId::new(2);
+
+    fn shard_of(namespace: NamespaceId) -> Option<Shard> {
+        let id = match namespace.get() {
+            0 => ShardId::FIRST,
+            1 => ShardId::new(3),
+            2 => ShardId::new(4),
+            _ => return None,
+        };
+        Some(Shard::whole(namespace, id))
+    }
+
+    impl Shards for Spaces {
+        fn locate(&self, namespace: NamespaceId, _key: &[u8]) -> Option<ShardId> {
+            Some(shard_of(namespace)?.id())
+        }
+
+        fn assurance(&self, namespace: NamespaceId) -> Option<Assurance> {
+            let _known: Shard = shard_of(namespace)?;
+            Some(if namespace == BFT {
+                Assurance::Bft
+            } else {
+                Assurance::Cft
+            })
+        }
+
+        async fn refresh(&self) -> Vec<Shard> {
+            Vec::new()
+        }
+
+        async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {
+            let namespace = NamespaceId::new(match shard.get() {
+                1 => 0,
+                3 => 1,
+                _ => 2,
+            });
+            Some(match call {
+                Call::Begin => Reply::Begun {
+                    shard: shard_of(namespace)?,
+                    at: Version::new(1),
+                },
+                Call::Get { .. } => Reply::Value(None),
+                Call::Propose(Command::Prepare(_)) => {
+                    Reply::Applied(Outcome::Prepared(Version::new(2)))
+                }
+                Call::Propose(Command::Decide(decide)) => {
+                    let told = (shard, decide.decision(), decide.primary().clone());
+                    self.decided.lock().push(told);
+                    Reply::Applied(Outcome::Committed(Version::new(3)))
+                }
+                other @ (Call::Scan { .. } | Call::Propose(_)) => {
+                    Reply::Failed(format!("{other:?}"))
+                }
+            })
+        }
+
+        fn now(&self) -> Deadline {
+            Deadline::new(0)
+        }
+
+        fn next_txn(&self) -> TxnId {
+            TxnId::new(1)
+        }
+    }
+
+    /// Where `shards` were told the decision on a transaction, in turn.
+    fn told(shards: &Spaces) -> Vec<ShardId> {
+        shards.decided.lock().iter().map(|(id, _, _)| *id).collect()
+    }
+
+    /// The primary the first decision named.
+    fn primary_of(shards: &Spaces) -> Primary {
+        shards.decided.lock().first().unwrap().2.clone()
+    }
+
+    #[test]
+    fn namespaces_alike_mix_freely() {
+        let shards = Spaces::default();
+        let committed = async {
+            let mut txn = Coordinator::new(&shards).begin(NamespaceId::DEFAULT);
+            txn.put(b"a", "1").await.unwrap();
+            txn.put_in(CFT, b"b", "2").await.unwrap();
+            txn.commit().await
+        }
+        .now_or_never()
+        .unwrap();
+        assert_eq!(committed, Transacted::Committed(Version::new(3)), "commits");
+        assert_eq!(told(&shards), [ShardId::FIRST, ShardId::new(3)], "both");
+        let primary = Primary::new(NamespaceId::DEFAULT, "a");
+        assert_eq!(primary_of(&shards), primary, "the first write");
+    }
+
+    #[test]
+    fn assurances_mix_only_with_leave() {
+        let shards = Spaces::default();
+        let refused = async {
+            let mut txn = Coordinator::new(&shards).begin(NamespaceId::DEFAULT);
+            txn.put(b"a", "1").await.unwrap();
+            txn.put_in(BFT, b"b", "2").await
+        }
+        .now_or_never()
+        .unwrap();
+        let mix = Mix::new(NamespaceId::DEFAULT, BFT).unwrap();
+        assert_eq!(refused, Err(Error::Unmixed(mix)), "no leave");
+        let from_bft = async {
+            let mut txn = Coordinator::new(&shards).begin(BFT);
+            let _value = txn.get(b"b").await.unwrap();
+            txn.delete_in(CFT, b"c").await
+        }
+        .now_or_never()
+        .unwrap();
+        let other = Mix::new(CFT, BFT).unwrap();
+        assert_eq!(from_bft, Err(Error::Unmixed(other)), "either way");
+        let wrong = async {
+            let mut txn = Coordinator::new(&shards).begin(NamespaceId::DEFAULT);
+            txn.admit(Mixed::given(other));
+            txn.put(b"a", "1").await.unwrap();
+            txn.put_in(BFT, b"b", "2").await
+        }
+        .now_or_never()
+        .unwrap();
+        assert_eq!(wrong, Err(Error::Unmixed(mix)), "leave for another pair");
+        assert!(shards.decided.lock().is_empty(), "nothing told");
+    }
+
+    #[test]
+    fn a_mixed_transaction_is_decided_on_the_bft_side() {
+        let shards = Spaces::default();
+        let mixed = Mixed::given(Mix::new(NamespaceId::DEFAULT, BFT).unwrap());
+        let committed = async {
+            let mut txn = Coordinator::new(&shards).begin(NamespaceId::DEFAULT);
+            txn.admit(mixed);
+            txn.put(b"a", "1").await.unwrap();
+            txn.put_in(BFT, b"b", "2").await.unwrap();
+            txn.commit().await
+        }
+        .now_or_never()
+        .unwrap();
+        assert_eq!(committed, Transacted::Committed(Version::new(3)), "commits");
+        assert_eq!(
+            told(&shards),
+            [ShardId::new(4), ShardId::FIRST],
+            "bft first"
+        );
+        assert_eq!(primary_of(&shards), Primary::new(BFT, "b"), "its write");
+
+        let read = Spaces::default();
+        let reading = async {
+            let mut txn = Coordinator::new(&read).begin(NamespaceId::DEFAULT);
+            txn.admit(mixed);
+            txn.put(b"a", "1").await.unwrap();
+            let _value = txn.get_in(BFT, b"b").await.unwrap();
+            txn.commit().await
+        }
+        .now_or_never()
+        .unwrap();
+        assert_eq!(reading, Transacted::Committed(Version::new(3)), "commits");
+        assert_eq!(told(&read), [ShardId::new(4), ShardId::FIRST], "bft first");
+        assert_eq!(primary_of(&read), Primary::new(BFT, ""), "where it read");
     }
 }
