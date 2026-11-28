@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use oleaph_metrics::Exposition;
-use oleaph_shard::{Halves, ShardId};
+use oleaph_shard::{Halves, Shard, ShardId, ShardState};
+use oleaph_storage::KvState;
 use openraft::async_runtime::Mutex as _;
 use openraft::{AsyncRuntime, RaftTypeConfig};
 use parking_lot::Mutex;
@@ -20,7 +21,8 @@ use crate::network::{Network, Transport};
 use crate::replica::{Member, Replica};
 use crate::rpc::{Message, Refusal, Response};
 use crate::snapshot::{SnapshotBytes, SnapshotDir};
-use crate::types::{NodeId, Peer};
+use crate::state_machine::SEED_LEADER;
+use crate::types::{LogId, Membership, NodeId, Peer, SnapshotMeta, StoredMembership};
 
 /// The async mutex of `C`'s runtime.
 type AsyncMutex<C, T> = <<C as RaftTypeConfig>::AsyncRuntime as AsyncRuntime>::Mutex<T>;
@@ -121,6 +123,46 @@ impl<C: Config, T: Transport<C>> Store<C, T> {
             replica.initialize(voters.clone()).await?;
         }
         Ok(())
+    }
+
+    /// Starts `shard`, the first shard of a new namespace, holding no key
+    /// yet, with `voters` as its first membership. Call it on one of the
+    /// voters, once: like [`Store::found`], it seeds this node's replica,
+    /// which then campaigns, and the other voters receive the shard from
+    /// its leader.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Initialized`] when the node holds `shard` already, and
+    /// [`Error::NoVoters`] when `voters` is empty.
+    pub async fn found_shard(
+        &self,
+        shard: Shard,
+        voters: impl IntoIterator<Item = (NodeId, Peer)>,
+    ) -> Result<()> {
+        let nodes: BTreeMap<NodeId, Peer> = voters.into_iter().collect();
+        if nodes.is_empty() {
+            return Err(Error::NoVoters);
+        }
+        let ids = nodes.keys().copied().collect();
+        let membership =
+            Membership::new(vec![ids], nodes).map_err(|error| Error::Raft(Box::new(error)))?;
+        let seeded = LogId::new(SEED_LEADER, 0);
+        let meta = SnapshotMeta {
+            last_log_id: Some(seeded),
+            last_membership: StoredMembership::new(Some(seeded), membership),
+        };
+        let id = shard.id();
+        let seed = SnapshotBytes::encode(&meta, &ShardState::new(shard, KvState::default()))?;
+        {
+            let _opening = self.shared.opening.lock().await;
+            let held = self.shared.replicas.lock().get(&id).cloned();
+            if held.is_some_and(|replica| replica.is_initialized()) {
+                return Err(Error::Initialized);
+            }
+            self.shared.layout.sow(id, &seed)?;
+        }
+        self.shared.plant().await
     }
 
     /// The node's replica of `shard`, if it holds one.
@@ -394,12 +436,13 @@ mod tests {
     use std::time::Duration;
 
     use oleaph_consensus::{Replicated as _, Route};
-    use oleaph_shard::{Epoch, Shard, ShardId, ShardState, Split};
+    use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId, ShardState, Split};
     use openraft::AsyncRuntime as _;
     use openraft::raft::VoteRequest;
     use openraft_rt_sim::SimRuntime;
 
     use super::Store;
+    use crate::error::Error;
     use crate::network::{Connection, Failure, Transport};
     use crate::replica::Member;
     use crate::rpc::{Message, Request, Response};
@@ -460,6 +503,42 @@ mod tests {
     fn vote(shard: ShardId) -> Message<Test> {
         let request = Request::Vote(VoteRequest::new(Vote::new(1, NodeId::new(2)), None));
         Message::new(shard, request)
+    }
+
+    #[test]
+    fn a_namespace_shard_starts_from_its_seed_once() {
+        SimRuntime::with_seed(3).block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let store = open(root.path()).await;
+            let shard = Shard::whole(NamespaceId::new(4), ShardId::new(9));
+            let me = membership(&[1], &[]);
+            let voters: Vec<(NodeId, Peer)> =
+                me.nodes().map(|(id, peer)| (*id, peer.clone())).collect();
+            store
+                .found_shard(shard.clone(), voters.clone())
+                .await
+                .unwrap();
+            let started = store.replica(shard.id()).await.unwrap().unwrap();
+            assert!(started.is_initialized(), "from its seed");
+            assert_eq!(started.shard(), shard, "the namespace's shard");
+            assert!(
+                matches!(
+                    store.found_shard(shard.clone(), voters).await,
+                    Err(Error::Initialized)
+                ),
+                "once"
+            );
+            assert!(
+                matches!(
+                    store
+                        .found_shard(Shard::whole(NamespaceId::new(4), ShardId::new(10)), [])
+                        .await,
+                    Err(Error::NoVoters)
+                ),
+                "on no voters"
+            );
+            store.shutdown().await.unwrap();
+        });
     }
 
     #[test]
@@ -532,7 +611,12 @@ mod tests {
 
             // A second seed for a shard that holds a state already is dropped.
             let other = ShardState::new(
-                Shard::new(shard, oleaph_storage::Span::FULL, Epoch::ZERO),
+                Shard::new(
+                    NamespaceId::DEFAULT,
+                    shard,
+                    oleaph_storage::Span::FULL,
+                    Epoch::ZERO,
+                ),
                 oleaph_storage::KvState::default(),
             );
             let meta = SnapshotMeta::default();

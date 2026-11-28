@@ -11,38 +11,49 @@
 //!
 //! ```text
 //! call   = 1 allocate | 2 report bytes(placement) | 3 registry
+//!        | 4 create bytes(name) assurance u8 membership u64 count u32 u64*
 //! answer = 1 allocated u64 | 2 reported u8 | 3 registry registry
 //!        | 4 not-leader option(u64) | 5 failed bytes(utf-8)
+//!        | 6 created created
 //! reported = 1 recorded | 2 stale
+//! created  = 1 founded shard | 2 taken bytes(namespace)
 //! ```
 //!
-//! `placement` and `registry` are as [`Placement::encode`] and
-//! [`Registry::encode`] write them.
+//! `placement`, `registry`, `shard` and `namespace` are as
+//! [`Placement::encode`], [`Registry::encode`], [`Shard::encode`] and
+//! [`Namespace::encode`] write them.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::io;
 
 use oleaph_codec::{DecodeError, Reader, put_bytes};
 use oleaph_consensus::{NodeId, Peer, Replicated};
-use oleaph_shard::ShardId;
+use oleaph_shard::{Shard, ShardId};
 
-use crate::client::{allocate, registry, report};
+use crate::client::{Created, allocate, create, registry, report};
 use crate::error::{MetaError, Result};
+use crate::namespace::{Assurance, Namespace, NamespaceName};
 use crate::placement::{Placement, Reported};
 use crate::registry::Registry;
 
 const ALLOCATE: u8 = 1;
 const REPORT: u8 = 2;
 const REGISTRY: u8 = 3;
+const CREATE: u8 = 4;
 
 const ALLOCATED: u8 = 1;
 const REPORTED: u8 = 2;
 const REGISTERED: u8 = 3;
 const NOT_LEADER: u8 = 4;
 const FAILED: u8 = 5;
+const CREATED: u8 = 6;
 
 const RECORDED: u8 = 1;
 const STALE: u8 = 2;
+
+const FOUNDED: u8 = 1;
+const TAKEN: u8 = 2;
 
 const NONE: u8 = 0;
 const SOME: u8 = 1;
@@ -61,6 +72,68 @@ pub enum Call {
     Report(Placement),
     /// Read the [`registry`].
     Registry,
+    /// [`create`] a namespace.
+    Create(Creation),
+}
+
+/// What [`create`] is asked to make: a namespace's name and assurance,
+/// and where its first shard is to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Creation {
+    name: NamespaceName,
+    assurance: Assurance,
+    replicas: BTreeSet<NodeId>,
+    membership: u64,
+}
+
+impl Creation {
+    /// A namespace called `name`, kept as `assurance` says, whose first
+    /// shard is on `replicas` at membership `membership`.
+    #[must_use]
+    pub const fn new(
+        name: NamespaceName,
+        assurance: Assurance,
+        replicas: BTreeSet<NodeId>,
+        membership: u64,
+    ) -> Self {
+        Self {
+            name,
+            assurance,
+            replicas,
+            membership,
+        }
+    }
+
+    /// Writes it as the module documentation lays a create call out,
+    /// after its tag.
+    fn encode(&self, out: &mut Vec<u8>) -> io::Result<()> {
+        put_bytes(out, self.name.as_str().as_bytes())?;
+        self.assurance.encode(out)?;
+        out.extend_from_slice(&self.membership.to_le_bytes());
+        let count = u32::try_from(self.replicas.len()).map_err(io::Error::other)?;
+        out.extend_from_slice(&count.to_le_bytes());
+        for id in &self.replicas {
+            out.extend_from_slice(&id.get().to_le_bytes());
+        }
+        Ok(())
+    }
+
+    /// Reads what [`Creation::encode`] wrote off the front of `reader`.
+    fn decode(reader: &mut Reader<'_>) -> std::result::Result<Self, DecodeError> {
+        let name = NamespaceName::from_bytes(reader.bytes()?)?;
+        let assurance = Assurance::decode(reader)?;
+        let membership = reader.read()?;
+        let mut replicas = BTreeSet::new();
+        for _ in 0..reader.read::<u32>()? {
+            let id = NodeId::new(reader.read()?);
+            // Strictly ascending, so no id comes twice.
+            if replicas.last().is_some_and(|last| *last >= id) {
+                return Err(DecodeError::Invalid);
+            }
+            let _new: bool = replicas.insert(id);
+        }
+        Ok(Self::new(name, assurance, replicas, membership))
+    }
 }
 
 /// How the node a [`Call`] was sent to answered it.
@@ -77,6 +150,8 @@ pub enum Answer {
     NotLeader(Option<NodeId>),
     /// The call failed on the leader, for this reason.
     Failed(String),
+    /// What [`Call::Create`] did.
+    Created(Created),
 }
 
 impl Call {
@@ -96,6 +171,10 @@ impl Call {
                 put_bytes(&mut out, &encoded)?;
             }
             Self::Registry => out.push(REGISTRY),
+            Self::Create(creation) => {
+                out.push(CREATE);
+                creation.encode(&mut out)?;
+            }
         }
         Ok(out)
     }
@@ -111,6 +190,7 @@ impl Call {
             ALLOCATE => Self::Allocate,
             REPORT => Self::Report(Placement::decode(reader.bytes()?)?),
             REGISTRY => Self::Registry,
+            CREATE => Self::Create(Creation::decode(&mut reader)?),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -156,6 +236,16 @@ impl Answer {
                 out.push(FAILED);
                 put_bytes(&mut out, reason.as_bytes())?;
             }
+            Self::Created(Created::Founded(shard)) => {
+                out.extend_from_slice(&[CREATED, FOUNDED]);
+                shard.encode(&mut out)?;
+            }
+            Self::Created(Created::Taken(namespace)) => {
+                out.extend_from_slice(&[CREATED, TAKEN]);
+                let mut encoded = Vec::new();
+                namespace.encode(&mut encoded)?;
+                put_bytes(&mut out, &encoded)?;
+            }
         }
         Ok(out)
     }
@@ -183,6 +273,11 @@ impl Answer {
             FAILED => Self::Failed(
                 String::from_utf8(reader.bytes()?.to_vec()).map_err(|_| DecodeError::Invalid)?,
             ),
+            CREATED => Self::Created(match reader.read::<u8>()? {
+                FOUNDED => Created::Founded(Shard::decode(&mut reader)?),
+                TAKEN => Created::Taken(Namespace::decode(reader.bytes()?)?),
+                other => return Err(DecodeError::Tag(other)),
+            }),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -197,6 +292,15 @@ pub async fn answer(meta: &impl Replicated, call: &Call) -> Answer {
         Call::Allocate => allocate(meta).await.map(Answer::Allocated),
         Call::Report(placement) => report(meta, placement).await.map(Answer::Reported),
         Call::Registry => registry(meta).await.map(Answer::Registry),
+        Call::Create(creation) => create(
+            meta,
+            &creation.name,
+            creation.assurance,
+            &creation.replicas,
+            creation.membership,
+        )
+        .await
+        .map(Answer::Created),
     };
     answered.unwrap_or_else(|error| {
         if let MetaError::Consensus(oleaph_consensus::Error::NotLeader { leader }) = &error {
@@ -274,6 +378,19 @@ impl<'node, R: Replicated, A: Ask> Meta<'node, R, A> {
         Ok(registry)
     }
 
+    /// [`create`] on the meta shard's leader.
+    ///
+    /// # Errors
+    ///
+    /// As [`create`], and as [`Meta::call`].
+    pub async fn create(&self, creation: Creation) -> Result<Created> {
+        let answer = self.call(Call::Create(creation)).await?;
+        let Answer::Created(created) = answer else {
+            return Err(unanswered(answer));
+        };
+        Ok(created)
+    }
+
     /// Runs `call` where this node's replica routes writes, following the
     /// leader each node it asks names, and returns the last answer.
     ///
@@ -332,7 +449,9 @@ fn unanswered(answer: Answer) -> MetaError {
     match answer {
         Answer::NotLeader(_) => MetaError::NoLeader,
         Answer::Failed(reason) => MetaError::Remote(reason),
-        Answer::Allocated(_) | Answer::Reported(_) | Answer::Registry(_) => MetaError::Mismatch,
+        Answer::Allocated(_) | Answer::Reported(_) | Answer::Registry(_) | Answer::Created(_) => {
+            MetaError::Mismatch
+        }
     }
 }
 
@@ -346,9 +465,12 @@ mod tests {
     use oleaph_shard::ShardId;
     use proptest::prelude::*;
 
-    use super::{Answer, Call, HOPS, follow};
+    use super::{Answer, Call, Creation, HOPS, follow};
+    use crate::client::Created;
+    use crate::namespace::Assurance;
+    use crate::namespace::tests::{names, namespaces};
     use crate::placement::Reported;
-    use crate::placement::tests::placements;
+    use crate::placement::tests::{placements, shards};
     use crate::registry::Registry;
 
     /// A registry of `placements`, one per shard but the meta shard, and
@@ -366,7 +488,20 @@ mod tests {
             placement.encode(&mut encoded).unwrap();
             put_bytes(&mut out, &encoded).unwrap();
         }
+        out.extend_from_slice(&0_u32.to_le_bytes());
         Registry::decode(&mut Reader::new(&out)).unwrap()
+    }
+
+    fn creations() -> impl Strategy<Value = Creation> {
+        (
+            names(),
+            proptest::collection::btree_set(any::<u64>(), 0..4),
+            any::<u64>(),
+        )
+            .prop_map(|(name, replicas, membership)| {
+                let replicas = replicas.into_iter().map(NodeId::new).collect();
+                Creation::new(name, Assurance::Cft, replicas, membership)
+            })
     }
 
     fn calls() -> impl Strategy<Value = Call> {
@@ -374,6 +509,7 @@ mod tests {
             Just(Call::Allocate),
             Just(Call::Registry),
             placements().prop_map(Call::Report),
+            creations().prop_map(Call::Create),
         ]
     }
 
@@ -387,6 +523,8 @@ mod tests {
             proptest::option::of(any::<u64>())
                 .prop_map(|leader| Answer::NotLeader(leader.map(NodeId::new))),
             ".{0,8}".prop_map(Answer::Failed),
+            shards().prop_map(|shard| Answer::Created(Created::Founded(shard))),
+            namespaces().prop_map(|namespace| Answer::Created(Created::Taken(namespace))),
         ]
     }
 
@@ -452,6 +590,16 @@ mod tests {
             "reported"
         );
         assert_eq!(Answer::decode(&[4, 9]), Err(DecodeError::Tag(9)), "leader");
+        assert_eq!(Answer::decode(&[6, 9]), Err(DecodeError::Tag(9)), "created");
+        let mut twice = vec![4, 1, 0, 0, 0, b'a', 1];
+        twice.extend_from_slice(&0_u64.to_le_bytes());
+        twice.extend_from_slice(&2_u32.to_le_bytes());
+        twice.extend_from_slice(&[7_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat());
+        assert_eq!(
+            Call::decode(&twice),
+            Err(DecodeError::Invalid),
+            "a replica twice"
+        );
         assert_eq!(
             Answer::decode(&[5, 1, 0, 0, 0, 0xFF]),
             Err(DecodeError::Invalid),
@@ -476,6 +624,7 @@ mod tests {
         for _ in 0..2 {
             put_bytes(&mut out, &placement).unwrap();
         }
+        out.extend_from_slice(&0_u32.to_le_bytes());
         assert_eq!(
             Registry::decode(&mut Reader::new(&out)),
             Err(DecodeError::Invalid),

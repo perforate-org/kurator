@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::time::Duration;
 
-use oleaph_shard::{Shard, ShardId};
+use oleaph_shard::{NamespaceId, Shard, ShardId};
 use oleaph_storage::{
     Abort, Command, Deadline, Decide, Decided, Decision, Draft, Outcome, Prepare, Version,
 };
@@ -65,21 +65,23 @@ impl<'shards, S: Shards> Coordinator<'shards, S> {
         Self { shards }
     }
 
-    /// Starts a transaction across every shard it will touch.
+    /// Starts a transaction across every shard of `namespace` it will
+    /// touch. Its keys are all keys of that namespace.
     #[must_use]
-    pub const fn begin(self) -> Across<'shards, S> {
+    pub const fn begin(self, namespace: NamespaceId) -> Across<'shards, S> {
         Across {
             coordinator: self,
+            namespace,
             parts: BTreeMap::new(),
         }
     }
 
     /// Prepares `prepare` on `shard`'s leader. A lock in the way whose
     /// deadline passed is resolved, for a later transaction to pass.
-    async fn prepare(self, shard: ShardId, prepare: Prepare) -> Prepared {
+    async fn prepare(self, shard: &Shard, prepare: Prepare) -> Prepared {
         let reply = self
             .shards
-            .call(shard, Call::Propose(Command::Prepare(prepare)))
+            .call(shard.id(), Call::Propose(Command::Prepare(prepare)))
             .await;
         match prepared(reply) {
             Prepared::Aborted(abort) => {
@@ -97,11 +99,13 @@ impl<'shards, S: Shards> Coordinator<'shards, S> {
     }
 }
 
-/// A transaction across shards being built: what it read and writes on
-/// each shard it touched so far. Dropping it writes nothing.
+/// A transaction across shards of one namespace being built: what it
+/// read and writes on each shard it touched so far. Dropping it writes
+/// nothing.
 #[derive(Debug)]
 pub struct Across<'shards, S> {
     coordinator: Coordinator<'shards, S>,
+    namespace: NamespaceId,
     parts: BTreeMap<ShardId, Part>,
 }
 
@@ -133,9 +137,10 @@ impl<S: Shards> Across<'_, S> {
     ///
     /// # Errors
     ///
-    /// [`Error::Unanswered`] when the key's shard has no leader up,
-    /// [`Error::Misrouted`] when it does not hold the key, and
-    /// [`Error::Refused`] when it cannot read the version.
+    /// [`Error::Unmapped`] when the client knows no shards of the
+    /// transaction's namespace, [`Error::Unanswered`] when the key's shard
+    /// has no leader up, [`Error::Misrouted`] when it does not hold the
+    /// key, and [`Error::Refused`] when it cannot read the version.
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let shards = self.coordinator.shards;
         let part = self.part(key).await?;
@@ -180,7 +185,9 @@ impl<S: Shards> Across<'_, S> {
     /// coordinator. `Committed` carries the version of the commit on the
     /// primary.
     pub async fn commit(self) -> Transacted {
-        let Self { coordinator, parts } = self;
+        let Self {
+            coordinator, parts, ..
+        } = self;
         let parts: Vec<(ShardId, Shard, Draft)> = parts
             .into_iter()
             .map(|(id, part)| (id, part.shard, part.draft))
@@ -192,9 +199,9 @@ impl<S: Shards> Across<'_, S> {
         let deadline = coordinator.deadline();
         let mut proposed = Decision::Commit;
         let mut told = Vec::new();
-        for (shard, _, draft) in parts {
+        for (shard, held, draft) in parts {
             let prepare = draft.into_prepare(id, primary_key.clone(), deadline);
-            let prepared = coordinator.prepare(shard, prepare).await;
+            let prepared = coordinator.prepare(&held, prepare).await;
             if prepared != Prepared::Refused {
                 told.push(shard);
             }
@@ -222,7 +229,10 @@ impl<S: Shards> Across<'_, S> {
     /// transaction first touches the shard.
     async fn part(&mut self, key: &[u8]) -> Result<&mut Part, Error> {
         let shards = self.coordinator.shards;
-        let shard = shards.locate(key);
+        let namespace = self.namespace;
+        let shard = shards
+            .locate(namespace, key)
+            .ok_or(Error::Unmapped(namespace))?;
         let part = match self.parts.entry(shard) {
             Entry::Occupied(part) => part.into_mut(),
             Entry::Vacant(vacant) => {
@@ -237,7 +247,7 @@ impl<S: Shards> Across<'_, S> {
                 })
             }
         };
-        if !part.shard.span().contains(key) {
+        if part.shard.namespace() != namespace || !part.shard.span().contains(key) {
             return Err(Error::Misrouted(Box::new(part.shard.clone())));
         }
         Ok(part)
@@ -270,7 +280,7 @@ fn primary(parts: &[(ShardId, Shard, Draft)]) -> Option<(ShardId, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
-    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{
         Abort, Command, Deadline, Decision, End, KvOp, Outcome, Span, TxnId, Version,
     };
@@ -278,7 +288,7 @@ mod tests {
 
     use super::{Coordinator, Transacted};
     use crate::remote::{Call, Reply};
-    use crate::shards::Shards;
+    use crate::shards::{Error, Shards};
 
     /// Keys before `m` on the first shard, the rest on shard 2.
     fn held(id: ShardId) -> Shard {
@@ -287,7 +297,7 @@ mod tests {
         } else {
             Span::new("m", End::Unbounded)
         };
-        Shard::new(id, span.unwrap(), Epoch::new(1))
+        Shard::new(NamespaceId::DEFAULT, id, span.unwrap(), Epoch::new(1))
     }
 
     /// Two shards that begin at version 1 and decide as told; `refusing`
@@ -315,16 +325,19 @@ mod tests {
     }
 
     impl Shards for Two {
-        fn locate(&self, key: &[u8]) -> ShardId {
-            if key < b"m".as_slice() {
+        fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId> {
+            if namespace != NamespaceId::DEFAULT {
+                return None;
+            }
+            Some(if key < b"m".as_slice() {
                 ShardId::FIRST
             } else {
                 ShardId::new(2)
-            }
+            })
         }
 
-        async fn refresh(&self) -> Vec<ShardId> {
-            vec![ShardId::FIRST, ShardId::new(2)]
+        async fn refresh(&self) -> Vec<Shard> {
+            vec![held(ShardId::FIRST), held(ShardId::new(2))]
         }
 
         async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {
@@ -369,7 +382,7 @@ mod tests {
 
     fn put_a_and_z(shards: &Two) -> Transacted {
         async {
-            let mut txn = Coordinator::new(shards).begin();
+            let mut txn = Coordinator::new(shards).begin(NamespaceId::DEFAULT);
             txn.put(b"a", "1").await.unwrap();
             txn.put(b"z", "1").await.unwrap();
             txn.commit().await
@@ -382,7 +395,7 @@ mod tests {
     fn reads_see_the_shard_and_then_the_writes() {
         let shards = Two::new(None);
         let committed = async {
-            let mut txn = Coordinator::new(&shards).begin();
+            let mut txn = Coordinator::new(&shards).begin(NamespaceId::DEFAULT);
             let old = Some(b"old".to_vec());
             assert_eq!(txn.get(b"a").await.unwrap(), old, "the shard");
             txn.put(b"a", "1").await.unwrap();
@@ -432,6 +445,64 @@ mod tests {
             let decided = shards.decided.lock().clone();
             let primary = [(ShardId::FIRST, Decision::Abort)];
             assert_eq!(decided, primary, "only the primary: {refusal:?}");
+        }
+    }
+
+    #[test]
+    fn a_namespace_without_shards_is_refused() {
+        let shards = Two::new(None);
+        let other = NamespaceId::new(3);
+        let refused = async {
+            let mut txn = Coordinator::new(&shards).begin(other);
+            txn.put(b"a", "1").await
+        }
+        .now_or_never()
+        .unwrap();
+        assert_eq!(refused, Err(Error::Unmapped(other)), "unmapped");
+    }
+
+    #[test]
+    fn a_shard_of_another_namespace_is_misrouted() {
+        let shards = Elsewhere;
+        let misrouted = async {
+            let mut txn = Coordinator::new(&shards).begin(NamespaceId::DEFAULT);
+            txn.put(b"a", "1").await
+        }
+        .now_or_never()
+        .unwrap();
+        let held = Shard::whole(NamespaceId::new(5), ShardId::FIRST);
+        assert_eq!(
+            misrouted,
+            Err(Error::Misrouted(Box::new(held))),
+            "another namespace"
+        );
+    }
+
+    /// A shard that answers a begin as a shard of another namespace.
+    struct Elsewhere;
+
+    impl Shards for Elsewhere {
+        fn locate(&self, _namespace: NamespaceId, _key: &[u8]) -> Option<ShardId> {
+            Some(ShardId::FIRST)
+        }
+
+        async fn refresh(&self) -> Vec<Shard> {
+            Vec::new()
+        }
+
+        async fn call(&self, _shard: ShardId, _call: Call) -> Option<Reply> {
+            Some(Reply::Begun {
+                shard: Shard::whole(NamespaceId::new(5), ShardId::FIRST),
+                at: Version::new(1),
+            })
+        }
+
+        fn now(&self) -> Deadline {
+            Deadline::new(0)
+        }
+
+        fn next_txn(&self) -> TxnId {
+            TxnId::new(1)
         }
     }
 

@@ -25,7 +25,7 @@ use oleaph_raft::{
     Connection as _, Failure, Member, Message, NodeId, Peer, Progress, Refusal, Request, Response,
     Role, Transport as _, Vote,
 };
-use oleaph_shard::ShardId;
+use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_storage::{Command, Outcome, Version, WriteBatch};
 
 const LOOPBACK: &str = "127.0.0.1:0";
@@ -489,7 +489,7 @@ async fn client_requests() {
     // decision.
     let routed = Client::new(client.clone(), Wall::default(), peers.clone(), 1);
     assert!(routed.learn().await, "learned the shards");
-    let mut txn = Coordinator::new(&routed).begin();
+    let mut txn = Coordinator::new(&routed).begin(NamespaceId::DEFAULT);
     assert_eq!(txn.get(b"k").await.unwrap(), Some(b"v".to_vec()), "read");
     txn.put(b"k", "w").await.unwrap();
     txn.put(b"l", "x").await.unwrap();

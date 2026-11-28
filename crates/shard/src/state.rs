@@ -153,7 +153,7 @@ mod tests {
     };
 
     use super::{Applied, ShardState, Unsplit};
-    use crate::id::{Epoch, ShardId};
+    use crate::id::{Epoch, NamespaceId, ShardId};
     use crate::shard::{Shard, Split};
 
     fn put(key: &str) -> Command {
@@ -242,7 +242,10 @@ mod tests {
         let mut kv = KvState::default();
         let _outcome = kv.apply(Version::new(1), put("z"));
         let span = Span::new("", End::Before(b"m".to_vec())).unwrap();
-        let state = ShardState::new(Shard::new(ShardId::FIRST, span, Epoch::ZERO), kv);
+        let state = ShardState::new(
+            Shard::new(NamespaceId::DEFAULT, ShardId::FIRST, span, Epoch::ZERO),
+            kv,
+        );
         assert_eq!(roundtrip(&state), Err(DecodeError::Invalid), "outside");
     }
 }

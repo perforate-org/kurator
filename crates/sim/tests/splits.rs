@@ -16,7 +16,7 @@ use oleaph_client::Transacted;
 use oleaph_consensus::Transaction as _;
 use oleaph_raft::NodeId;
 use oleaph_raft::openraft::AsyncRuntime as _;
-use oleaph_shard::{Ceiling, ShardId};
+use oleaph_shard::{Ceiling, NamespaceId, ShardId};
 use oleaph_sim::{Cluster, Faults, Holdings, Outcome};
 use oleaph_storage::{Version, WriteBatch};
 use openraft_rt_sim::SimRuntime;
@@ -275,7 +275,9 @@ fn shards_split_at_their_middle_until_each_is_under_the_ceiling() {
         );
         let registry = cluster.registry().await.expect("a registry");
         assert_eq!(
-            registry.map().map(|map| map.iter().count()),
+            registry
+                .map(NamespaceId::DEFAULT)
+                .map(|map| map.iter().count()),
             Some(4),
             "the registry tiles the keys with them"
         );

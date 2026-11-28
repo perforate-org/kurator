@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use oleaph_shard::ShardId;
+use oleaph_shard::{Shard, ShardId};
 use oleaph_storage::{Abort, Collect, Command, Deadline, Outcome};
 
 use crate::remote::{Call, Reply};
@@ -72,28 +72,28 @@ impl<'shards, S: Shards> Collector<'shards, S> {
     async fn fence_all(self, horizon: Deadline) -> Option<BTreeSet<ShardId>> {
         let mut fenced = BTreeSet::new();
         loop {
-            let unfenced: Vec<ShardId> = self
+            let unfenced: Vec<Shard> = self
                 .shards
                 .refresh()
                 .await
                 .into_iter()
-                .filter(|shard| !fenced.contains(shard))
+                .filter(|shard| !fenced.contains(&shard.id()))
                 .collect();
             if unfenced.is_empty() {
                 return Some(fenced);
             }
             for shard in unfenced {
-                self.fence(shard, horizon).await?;
-                let _new: bool = fenced.insert(shard);
+                self.fence(&shard, horizon).await?;
+                let _new: bool = fenced.insert(shard.id());
             }
         }
     }
 
     /// Fences `shard` at `horizon`, resolving each transaction it holds
     /// prepared from before; `None` when it stays unfenced.
-    async fn fence(self, shard: ShardId, horizon: Deadline) -> Option<()> {
+    async fn fence(self, shard: &Shard, horizon: Deadline) -> Option<()> {
         for _ in 0..FENCE_TRIES {
-            let Err(abort) = self.step(shard, Collect::Fence(horizon)).await? else {
+            let Err(abort) = self.step(shard.id(), Collect::Fence(horizon)).await? else {
                 return Some(());
             };
             let Abort::Held {
@@ -134,7 +134,7 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::FutureExt as _;
-    use oleaph_shard::ShardId;
+    use oleaph_shard::{NamespaceId, Shard, ShardId};
     use oleaph_storage::{Abort, Collect, Command, Deadline, Decision, Outcome, TxnId, Version};
     use parking_lot::Mutex;
 
@@ -186,18 +186,20 @@ mod tests {
     }
 
     impl Shards for Split {
-        fn locate(&self, _key: &[u8]) -> ShardId {
-            ShardId::FIRST
+        fn locate(&self, _namespace: NamespaceId, _key: &[u8]) -> Option<ShardId> {
+            Some(ShardId::FIRST)
         }
 
-        async fn refresh(&self) -> Vec<ShardId> {
+        async fn refresh(&self) -> Vec<Shard> {
             let first = {
                 let mut looks = self.looks.lock();
                 *looks = looks.checked_add(1).unwrap();
                 *looks == 1
             };
             let shards = if first { 2 } else { 3 };
-            (1..=shards).map(ShardId::new).collect()
+            (1..=shards)
+                .map(|id| Shard::whole(NamespaceId::DEFAULT, ShardId::new(id)))
+                .collect()
         }
 
         async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {

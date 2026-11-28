@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use oleaph_raft::NodeId;
 use oleaph_raft::openraft::AsyncRuntime as _;
-use oleaph_shard::ShardId;
+use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_sim::{Cluster, Faults, Outcome};
 use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
@@ -41,7 +41,9 @@ fn the_registry_records_every_split_and_routes_the_client() {
         cluster.settle().await.expect("settle");
         let registry = cluster.registry().await.expect("a meta leader");
         assert_eq!(registry.next(), ShardId::new(4), "two ids taken");
-        let map = registry.map().expect("the registry tiles the keys");
+        let map = registry
+            .map(NamespaceId::DEFAULT)
+            .expect("the registry tiles the keys");
         let shards: Vec<_> = map.iter().cloned().collect();
         assert_eq!(shards, cluster.shards(), "the client routes by it");
         for shard in &shards {
