@@ -3,11 +3,11 @@
 //! ```text
 //! oleaph key <dir> [--consensus]
 //! oleaph run --id <n> --dir <dir> --listen <addr> [--peer <n>=<addr>,<key>]... [--client <key>]... [--bft <charter>]... [--split-above <bytes>] [--metrics <addr>] [--found | --restore <backup>]
-//! oleaph client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... (get <key> | put <key> <value> | del <key>)...
+//! oleaph client --dir <dir> --peer <n>=<addr>,<key> [--peer ...]... [--namespace <name>] (get <key> | put <key> <value> | del <key>)...
 //! ```
 //!
 //! A client's operations run as one transaction, across every shard they
-//! touch. A node splits a shard it leads once the shard's state takes more
+//! touch, on the keys of one namespace: `--namespace`, or `default`. A node splits a shard it leads once the shard's state takes more
 //! than `--split-above` bytes, [`Ceiling::DEFAULT`] unless given.
 //!
 //! `oleaph key` prints the node's transport key, or with `--consensus`
@@ -26,6 +26,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use oleaph_crypto::{KeyPurpose, VerifyingKey};
+use oleaph_meta::NamespaceName;
 use oleaph_raft::{NodeId, Peer};
 use oleaph_shard::Ceiling;
 
@@ -42,12 +43,13 @@ pub enum Invocation {
     Client(Session),
 }
 
-/// What a client does: who it is, where it first asks, and the
-/// operations of its transaction.
+/// What a client does: who it is, where it first asks, the namespace it
+/// works in, and the operations of its transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     dir: PathBuf,
     peers: Vec<(NodeId, Peer)>,
+    namespace: NamespaceName,
     ops: Vec<Op>,
 }
 
@@ -62,6 +64,12 @@ impl Session {
     #[must_use]
     pub fn peers(&self) -> &[(NodeId, Peer)] {
         &self.peers
+    }
+
+    /// The namespace whose keys the operations name.
+    #[must_use]
+    pub const fn namespace(&self) -> &NamespaceName {
+        &self.namespace
     }
 
     /// The operations, in order.
@@ -265,12 +273,18 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<Settings, UsageError> {
 fn client(mut args: impl Iterator<Item = String>) -> Result<Session, UsageError> {
     let mut dir = None;
     let mut peers = Vec::new();
+    let mut namespace = NamespaceName::default_name();
     let mut ops = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |option: &'static str| args.next().ok_or(UsageError::Missing(option));
         match arg.as_str() {
             "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--peer" => peers.push(read("--peer", &value("--peer")?, peer)?),
+            "--namespace" => {
+                namespace = read("--namespace", &value("--namespace")?, |name| {
+                    name.parse().ok()
+                })?;
+            }
             "get" => ops.push(Op::Get(value("get")?.into_bytes())),
             "put" => {
                 let key = value("put")?.into_bytes();
@@ -289,6 +303,7 @@ fn client(mut args: impl Iterator<Item = String>) -> Result<Session, UsageError>
     Ok(Session {
         dir: dir.ok_or(UsageError::Missing("--dir"))?,
         peers,
+        namespace,
         ops,
     })
 }
@@ -336,6 +351,7 @@ mod tests {
     use std::path::PathBuf;
 
     use oleaph_crypto::{KeyPurpose, NodeSecret};
+    use oleaph_meta::NamespaceName;
     use oleaph_raft::NodeId;
 
     use oleaph_shard::Ceiling;
@@ -431,6 +447,14 @@ mod tests {
             Op::Delete(b"c".to_vec()),
         ];
         assert_eq!(session.ops(), ops, "ops in order");
+        let default = NamespaceName::default_name();
+        assert_eq!(session.namespace(), &default, "the default namespace");
+        let named =
+            format!("client --dir c --peer 2=127.0.0.1:7002,{peer_key} --namespace payments get a");
+        let Ok(Invocation::Client(named)) = parse(args(&named)) else {
+            panic!("parses");
+        };
+        assert_eq!(named.namespace().as_str(), "payments", "a namespace");
         let peer = format!("--peer 2=127.0.0.1:7002,{peer_key}");
         for (bad, error) in [
             (format!("client --dir c {peer}"), UsageError::Nothing),
@@ -454,6 +478,13 @@ mod tests {
             (
                 format!("client --dir c {peer} scan"),
                 UsageError::Option("scan".to_owned()),
+            ),
+            (
+                format!("client --dir c {peer} --namespace Payments get a"),
+                UsageError::Value {
+                    option: "--namespace",
+                    value: "Payments".to_owned(),
+                },
             ),
         ] {
             assert_eq!(parse(args(&bad)), Err(error), "{bad:?}");

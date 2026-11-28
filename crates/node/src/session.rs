@@ -28,7 +28,10 @@ pub async fn run(session: &Session) -> Result<String, NodeError> {
     if !client.learn().await {
         return Err(NodeError::Unreached);
     }
-    let mut txn = Coordinator::new(&client).begin();
+    let namespace = client
+        .namespace(session.namespace())
+        .ok_or_else(|| NodeError::NoNamespace(session.namespace().clone()))?;
+    let mut txn = Coordinator::new(&client).begin(namespace);
     let mut shown = apply(&mut txn, session.ops()).await?;
     let outcome = match txn.commit().await {
         Transacted::Committed(version) => format!("committed at {version}"),

@@ -3,7 +3,7 @@
 
 use std::future::Future;
 
-use oleaph_shard::{Shard, ShardId};
+use oleaph_shard::{NamespaceId, Shard, ShardId};
 use oleaph_storage::{Abort, Deadline, TxnId};
 
 use crate::remote::{Call, Reply};
@@ -12,11 +12,12 @@ use crate::remote::{Call, Reply};
 /// reaches them over the network; a simulation reaches its replicas
 /// directly.
 pub trait Shards: Sync {
-    /// The shard that holds `key`, as far as this client knows.
-    fn locate(&self, key: &[u8]) -> ShardId;
+    /// The shard that holds `key` of `namespace`, as far as this client
+    /// knows, or `None` when it knows no shards of the namespace.
+    fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId>;
 
-    /// Every shard, learned afresh.
-    fn refresh(&self) -> impl Future<Output = Vec<ShardId>> + Send;
+    /// Every shard of every namespace, learned afresh.
+    fn refresh(&self) -> impl Future<Output = Vec<Shard>> + Send;
 
     /// Makes `call` on the leader of `shard`, following the leaders that
     /// replicas name: the leader's reply, or `None` when no leader
@@ -37,6 +38,10 @@ pub enum Error {
     /// No leader of the shard answered in time.
     #[error("no leader answered")]
     Unanswered,
+    /// The client knows no shards of the namespace: there is no such
+    /// namespace, or not yet.
+    #[error("no shards of {0} are known")]
+    Unmapped(NamespaceId),
     /// The shard does not hold the key: it split.
     #[error("shard {} does not hold the key", .0.id())]
     Misrouted(Box<Shard>),

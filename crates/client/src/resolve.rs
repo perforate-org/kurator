@@ -2,7 +2,7 @@
 //! runs into one of their locks past its deadline asks the primary how it
 //! came out, aborting it there when it never decided.
 
-use oleaph_shard::ShardId;
+use oleaph_shard::{Shard, ShardId};
 use oleaph_storage::{
     Abort, Command, Deadline, Decide, Decided, Decision, Outcome, Prepare, TxnId,
 };
@@ -64,25 +64,31 @@ impl Lock {
     /// primary decided it, or, when the primary never did, aborted there
     /// first. The primary's log orders that abort and its coordinator's
     /// commit, so whichever came first stands.
-    pub async fn resolve(self, shards: &impl Shards, shard: ShardId) {
+    ///
+    /// A transaction stays in one namespace, so its primary is a key of
+    /// `shard`'s namespace. When the client knows no shards of it, the
+    /// lock is left.
+    pub async fn resolve(self, shards: &impl Shards, shard: &Shard) {
         let Self {
             id,
             primary,
             deadline,
         } = self;
-        let primary_shard = shards.locate(&primary);
+        let Some(primary_shard) = shards.locate(shard.namespace(), &primary) else {
+            return;
+        };
         let abort = Decide::new(id, primary.clone(), deadline, Decision::Abort);
         let Some(decided) = decide(shards, primary_shard, abort).await else {
             return;
         };
         let outcome = Decide::new(id, primary, deadline, decision(decided));
-        let _decided: Option<Decided> = decide(shards, shard, outcome).await;
+        let _decided: Option<Decided> = decide(shards, shard.id(), outcome).await;
     }
 }
 
 /// Resolves the transaction whose lock `abort` ran into on `shard`, when
 /// its deadline passed; whether it did.
-pub async fn resolve_expired(shards: &impl Shards, shard: ShardId, abort: &Abort) -> bool {
+pub async fn resolve_expired(shards: &impl Shards, shard: &Shard, abort: &Abort) -> bool {
     let Some(lock) = Lock::expired(abort, shards.now()) else {
         return false;
     };
@@ -123,8 +129,9 @@ pub(crate) const fn decision(decided: Decided) -> Decision {
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
-    use oleaph_shard::ShardId;
+    use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{Abort, Command, Deadline, Decision, Outcome, TxnId, Version};
+    use oleaph_storage::{End, Span};
     use parking_lot::Mutex;
 
     use super::{Lock, resolve_expired};
@@ -138,16 +145,25 @@ mod tests {
         told: Mutex<Vec<(ShardId, Decision)>>,
     }
 
+    /// Shard 2, which holds the keys from `m` on.
+    fn second() -> Shard {
+        let span = Span::new("m", End::Unbounded).unwrap();
+        Shard::new(NamespaceId::DEFAULT, ShardId::new(2), span, Epoch::new(1))
+    }
+
     impl Shards for Decided {
-        fn locate(&self, key: &[u8]) -> ShardId {
-            if key < b"m".as_slice() {
+        fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId> {
+            if namespace != NamespaceId::DEFAULT {
+                return None;
+            }
+            Some(if key < b"m".as_slice() {
                 ShardId::FIRST
             } else {
                 ShardId::new(2)
-            }
+            })
         }
 
-        async fn refresh(&self) -> Vec<ShardId> {
+        async fn refresh(&self) -> Vec<Shard> {
             Vec::new()
         }
 
@@ -191,7 +207,8 @@ mod tests {
     fn a_lock_is_decided_as_its_primary_decided() {
         let shards = Decided::default();
         let abort = locked(99);
-        let resolved = resolve_expired(&shards, ShardId::new(2), &abort);
+        let second = second();
+        let resolved = resolve_expired(&shards, &second, &abort);
         assert!(resolved.now_or_never().unwrap(), "resolved");
         let told = shards.told.lock().clone();
         let expected = [
@@ -208,8 +225,19 @@ mod tests {
     fn a_lock_before_its_deadline_is_left() {
         let shards = Decided::default();
         let abort = locked(100);
-        let resolved = resolve_expired(&shards, ShardId::new(2), &abort);
+        let second = second();
+        let resolved = resolve_expired(&shards, &second, &abort);
         assert!(!resolved.now_or_never().unwrap(), "left");
+        assert!(shards.told.lock().is_empty(), "nothing told");
+    }
+
+    #[test]
+    fn a_lock_whose_namespace_is_unknown_is_left() {
+        let shards = Decided::default();
+        let abort = locked(99);
+        let elsewhere = Shard::whole(NamespaceId::new(4), ShardId::new(9));
+        let resolved = resolve_expired(&shards, &elsewhere, &abort);
+        assert!(resolved.now_or_never().unwrap(), "expired");
         assert!(shards.told.lock().is_empty(), "nothing told");
     }
 }

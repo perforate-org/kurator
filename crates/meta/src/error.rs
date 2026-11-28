@@ -16,8 +16,8 @@ pub enum MetaError {
     /// A record is too long to encode.
     #[error("a meta record does not encode: {0}")]
     Encode(#[from] std::io::Error),
-    /// Every shard id is taken.
-    #[error("every shard id is taken")]
+    /// Every shard id, or every namespace id, is taken.
+    #[error("every id is taken")]
     Exhausted,
     /// Other transactions kept changing the records this one read.
     #[error("the meta shard stayed too busy to commit")]

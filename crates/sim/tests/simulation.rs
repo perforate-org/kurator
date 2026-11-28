@@ -18,7 +18,7 @@ use std::time::Duration;
 use oleaph_consensus::{Duty, Route};
 use oleaph_raft::NodeId;
 use oleaph_raft::openraft::AsyncRuntime as _;
-use oleaph_shard::{Shard, ShardId, ShardMap, ShardState};
+use oleaph_shard::{NamespaceId, Shard, ShardId, ShardMap, ShardState};
 use oleaph_sim::{Cluster, Faults, Holdings, Outcome, Rng, SimError};
 use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
@@ -215,7 +215,10 @@ fn check(seed: u64, run: &Run) {
             );
         }
     }
-    let tiles = ShardMap::from_shards(shards.values().map(|state| state.shard().clone()));
+    let tiles = ShardMap::from_shards(
+        NamespaceId::DEFAULT,
+        shards.values().map(|state| state.shard().clone()),
+    );
     assert!(
         tiles.is_some(),
         "seed {seed}: the shards do not hold every key once: {:?}",

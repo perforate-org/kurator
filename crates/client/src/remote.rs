@@ -478,7 +478,7 @@ mod tests {
     use oleaph_consensus::{Duty, Members, NodeId, Peer, Reads, Replicated, Route, Transaction};
     use oleaph_crypto::{Algorithm, SigningKey};
     use oleaph_meta::Registry;
-    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{
         Abort, Command, End, KeyValue, KvState, Outcome, Span, Unreadable, Version, WriteBatch,
     };
@@ -522,7 +522,7 @@ mod tests {
 
     fn left() -> Shard {
         let span = Span::new("", End::Before(b"m".to_vec())).unwrap();
-        Shard::new(ShardId::new(5), span, Epoch::new(1))
+        Shard::new(NamespaceId::DEFAULT, ShardId::new(5), span, Epoch::new(1))
     }
 
     impl Fake {

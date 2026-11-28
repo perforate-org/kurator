@@ -92,6 +92,10 @@ pub enum Error {
     /// The cluster is already initialized.
     #[error("the cluster is already initialized")]
     Initialized,
+    /// A shard was to start with no voter, which could never elect a
+    /// leader.
+    #[error("a shard starts with a voter at least")]
+    NoVoters,
     /// Raft refused the request.
     #[error("Raft refused the request: {0}")]
     Raft(#[source] BoxedError),
@@ -143,6 +147,7 @@ impl From<Error> for oleaph_consensus::Error {
             | Error::Locked
             | Error::NoReplica { .. }
             | Error::Initialized
+            | Error::NoVoters
             | Error::Raft(_)
             | Error::Stopped(_)) => Self::Failed(Box::new(other)),
         }

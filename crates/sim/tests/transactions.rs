@@ -21,6 +21,7 @@ use oleaph_client::{Across, Collected, Collector, Coordinator, Error, Transacted
 use oleaph_consensus::Transaction as _;
 use oleaph_raft::Txn;
 use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_shard::NamespaceId;
 use oleaph_sim::{Cluster, Faults, Holdings, Outcome, Rng, Sim};
 use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
@@ -126,7 +127,7 @@ async fn transfer(cluster: &Cluster, client: Client, from: u64, to: u64, sum: u6
                 .await
         }
         Client::Across => {
-            let mut txn = Coordinator::new(cluster).begin();
+            let mut txn = Coordinator::new(cluster).begin(NamespaceId::DEFAULT);
             match transfer_across(&mut txn, from, to, sum).await {
                 Ok(()) => txn.commit().await,
                 Err(_) => Transacted::Rejected,

@@ -22,7 +22,7 @@ use oleaph_bft::{Committee, Config, Core, Domain, Journal, Ledger};
 use oleaph_crypto::{KeyPurpose, NodeSecret, VerifyingKey};
 use oleaph_net::{BftReplica, Quic, Wiring};
 use oleaph_raft::{NodeId, Peer};
-use oleaph_shard::{Shard, ShardId, ShardState};
+use oleaph_shard::{NamespaceId, Shard, ShardId, ShardState};
 use oleaph_storage::KvState;
 
 use crate::NodeError;
@@ -238,7 +238,10 @@ impl Seat<'_> {
             peers,
         } = self.charter;
         let (journal, recovered) = Journal::open(dir, oleaph_wal::Options::default())?;
-        let state = ShardState::new(Shard::whole(shard), KvState::default());
+        let state = ShardState::new(
+            Shard::whole(NamespaceId::DEFAULT, shard),
+            KvState::default(),
+        );
         let ledger = Ledger::replay(state, &recovered);
         let domain = Domain::of(shard, &committee);
         let key = self.secret.signing_key(KeyPurpose::Consensus);

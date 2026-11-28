@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oleaph_consensus::{NodeId, Peer};
-use oleaph_meta::Registry;
-use oleaph_shard::{Shard, ShardId, ShardMap};
+use oleaph_meta::{NamespaceName, Registry};
+use oleaph_shard::{NamespaceId, Shard, ShardId, ShardMap};
 use oleaph_storage::{Deadline, TxnId};
 use parking_lot::Mutex;
 
@@ -60,23 +60,29 @@ pub struct Client<R, T> {
 /// What a client knows of the cluster.
 #[derive(Debug)]
 struct Known {
-    map: ShardMap,
+    /// The id of each namespace, by name.
+    namespaces: BTreeMap<NamespaceName, NamespaceId>,
+    /// The map of each namespace whose shards this client knows.
+    maps: BTreeMap<NamespaceId, ShardMap>,
     peers: BTreeMap<NodeId, Peer>,
     /// The node that last answered for each shard.
     leaders: BTreeMap<ShardId, NodeId>,
 }
 
 impl<R: Reach, T: Time> Client<R, T> {
-    /// A client that first asks `entry` where the shards are. `origin`
+    /// A client that first asks `entry` where the shards are; until it
+    /// learns, it knows the default namespace as a new cluster holds it.
+    /// `origin`
     /// is a number no other client of the cluster uses: it tells this
     /// client's transactions from theirs.
     #[must_use]
-    pub const fn new(reach: R, time: T, entry: BTreeMap<NodeId, Peer>, origin: u64) -> Self {
+    pub fn new(reach: R, time: T, entry: BTreeMap<NodeId, Peer>, origin: u64) -> Self {
         Self {
             reach,
             time,
             known: Mutex::new(Known {
-                map: ShardMap::new(),
+                namespaces: BTreeMap::from([(NamespaceName::default_name(), NamespaceId::DEFAULT)]),
+                maps: BTreeMap::from([(NamespaceId::DEFAULT, ShardMap::new())]),
                 peers: entry,
                 leaders: BTreeMap::new(),
             }),
@@ -85,14 +91,28 @@ impl<R: Reach, T: Time> Client<R, T> {
         }
     }
 
-    /// Every shard as this client knows it.
+    /// Every shard of every namespace as this client knows it, by
+    /// namespace and then by key.
     #[must_use]
     pub fn shards(&self) -> Vec<Shard> {
-        self.known.lock().map.iter().cloned().collect()
+        let known = self.known.lock();
+        known
+            .maps
+            .values()
+            .flat_map(ShardMap::iter)
+            .cloned()
+            .collect()
     }
 
-    /// Asks one node after another where the shards are, until one
-    /// answers; whether one did.
+    /// The namespace called `name`, as this client last learned the
+    /// namespaces; see [`Client::learn`].
+    #[must_use]
+    pub fn namespace(&self, name: &NamespaceName) -> Option<NamespaceId> {
+        self.known.lock().namespaces.get(name).copied()
+    }
+
+    /// Asks one node after another where the shards are and which
+    /// namespaces there are, until one answers; whether one did.
     pub async fn learn(&self) -> bool {
         let peers: Vec<(NodeId, Peer)> = self
             .known
@@ -118,12 +138,18 @@ impl<R: Reach, T: Time> Client<R, T> {
         false
     }
 
-    /// Routes by `registry` from now on, once it holds every key, and
-    /// reaches the nodes at `peers`.
+    /// Routes each namespace by `registry` from now on, once it holds
+    /// every key of the namespace, and reaches the nodes at `peers`.
     fn adopt(&self, registry: &Registry, peers: BTreeMap<NodeId, Peer>) {
         let mut known = self.known.lock();
-        if let Some(map) = registry.map() {
-            known.map = map;
+        known.namespaces = registry
+            .namespaces()
+            .map(|(name, namespace)| (name.clone(), namespace.id()))
+            .collect();
+        for (_, namespace) in registry.namespaces() {
+            if let Some(map) = registry.map(namespace.id()) {
+                drop(known.maps.insert(namespace.id(), map));
+            }
         }
         if !peers.is_empty() {
             known.peers = peers;
@@ -195,13 +221,14 @@ impl<R: Reach, T: Time> Client<R, T> {
 }
 
 impl<R: Reach, T: Time> Shards for Client<R, T> {
-    fn locate(&self, key: &[u8]) -> ShardId {
-        self.known.lock().map.locate(key).id()
+    fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId> {
+        let known = self.known.lock();
+        Some(known.maps.get(&namespace)?.locate(key).id())
     }
 
-    async fn refresh(&self) -> Vec<ShardId> {
+    async fn refresh(&self) -> Vec<Shard> {
         let _learned: bool = self.learn().await;
-        self.shards().iter().map(Shard::id).collect()
+        self.shards()
     }
 
     /// A reply that the shard does not hold the key makes the client
@@ -243,8 +270,8 @@ mod tests {
     use oleaph_codec::{Reader, put_bytes};
     use oleaph_consensus::{NodeId, Peer};
     use oleaph_crypto::{Algorithm, SigningKey};
-    use oleaph_meta::{Placement, Registry};
-    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_meta::{Assurance, Namespace, NamespaceName, Placement, Registry};
+    use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{Deadline, End, Span, TxnId, Version};
     use parking_lot::Mutex;
 
@@ -270,13 +297,19 @@ mod tests {
         let left = Span::new("", End::Before(b"m".to_vec())).unwrap();
         let right = Span::new("m", End::Unbounded).unwrap();
         [
-            Shard::new(ShardId::FIRST, left, Epoch::new(1)),
-            Shard::new(ShardId::new(2), right, Epoch::new(1)),
+            Shard::new(NamespaceId::DEFAULT, ShardId::FIRST, left, Epoch::new(1)),
+            Shard::new(NamespaceId::DEFAULT, ShardId::new(2), right, Epoch::new(1)),
         ]
     }
 
     /// A registry that places each of `shards` on nodes 1, 2 and 3.
     fn registry(shards: &[Shard]) -> Registry {
+        named(shards, &[])
+    }
+
+    /// A registry that places each of `shards` on nodes 1, 2 and 3, and
+    /// records `namespaces` besides the default.
+    fn named(shards: &[Shard], namespaces: &[(NamespaceName, Namespace)]) -> Registry {
         let mut out = 3_u64.to_le_bytes().to_vec();
         out.extend_from_slice(&u32::try_from(shards.len()).unwrap().to_le_bytes());
         for shard in shards {
@@ -286,6 +319,13 @@ mod tests {
                 .encode(&mut placement)
                 .unwrap();
             put_bytes(&mut out, &placement).unwrap();
+        }
+        out.extend_from_slice(&u32::try_from(namespaces.len()).unwrap().to_le_bytes());
+        for (name, namespace) in namespaces {
+            put_bytes(&mut out, name.as_str().as_bytes()).unwrap();
+            let mut encoded = Vec::new();
+            namespace.encode(&mut encoded).unwrap();
+            put_bytes(&mut out, &encoded).unwrap();
         }
         Registry::decode(&mut Reader::new(&out)).unwrap()
     }
@@ -400,15 +440,56 @@ mod tests {
     }
 
     #[test]
+    fn a_client_routes_each_namespace_by_its_own_shards() {
+        let payments: NamespaceName = "payments".parse().unwrap();
+        let id = NamespaceId::new(1);
+        let namespace = (payments.clone(), Namespace::new(id, Assurance::Cft));
+        let own = Shard::whole(id, ShardId::new(3));
+        let mut shards = halves().to_vec();
+        shards.push(own.clone());
+        let nodes = Nodes::new(&[(1, Node::Leads)], named(&shards, &[namespace]));
+        let client = client(nodes, &[1]);
+        assert_eq!(client.namespace(&payments), None, "not learned yet");
+        assert_eq!(client.locate(id, b"a"), None, "no shards known");
+        assert!(client.learn().now_or_never().unwrap(), "learned");
+        assert_eq!(client.namespace(&payments), Some(id), "by name");
+        let default = NamespaceName::default_name();
+        assert_eq!(
+            client.namespace(&default),
+            Some(NamespaceId::DEFAULT),
+            "default"
+        );
+        assert_eq!(client.locate(id, b"a"), Some(own.id()), "its own shard");
+        assert_eq!(
+            client.locate(NamespaceId::DEFAULT, b"a"),
+            Some(ShardId::FIRST),
+            "the same key elsewhere"
+        );
+        assert_eq!(client.shards(), shards, "every shard, by namespace");
+    }
+
+    #[test]
     fn a_client_learns_the_shards_from_any_node() {
         let nodes = Nodes::new(&[(1, Node::Down), (2, Node::Leads)], registry(&halves()));
         let client = client(nodes, &[1, 2]);
-        assert_eq!(client.locate(b"z"), ShardId::FIRST, "one shard at first");
+        assert_eq!(
+            client.locate(NamespaceId::DEFAULT, b"z"),
+            Some(ShardId::FIRST),
+            "one shard at first"
+        );
         assert_eq!(client.shards(), [Shard::first()], "the founding map");
         let shards = client.refresh().now_or_never().unwrap();
-        assert_eq!(shards, [ShardId::FIRST, ShardId::new(2)], "both halves");
-        assert_eq!(client.locate(b"a"), ShardId::FIRST, "left");
-        assert_eq!(client.locate(b"z"), ShardId::new(2), "right");
+        assert_eq!(shards, halves(), "both halves");
+        assert_eq!(
+            client.locate(NamespaceId::DEFAULT, b"a"),
+            Some(ShardId::FIRST),
+            "left"
+        );
+        assert_eq!(
+            client.locate(NamespaceId::DEFAULT, b"z"),
+            Some(ShardId::new(2)),
+            "right"
+        );
         assert_eq!(
             client.reach.maps(),
             2,
@@ -512,7 +593,11 @@ mod tests {
         let reply = begin(&client, ShardId::FIRST);
         assert_eq!(reply, Some(Reply::Misrouted(Shard::first())), "misrouted");
         assert_eq!(client.reach.maps(), 1, "learned afresh");
-        assert_eq!(client.locate(b"z"), ShardId::new(2), "the split");
+        assert_eq!(
+            client.locate(NamespaceId::DEFAULT, b"z"),
+            Some(ShardId::new(2)),
+            "the split"
+        );
     }
 
     #[test]
