@@ -88,7 +88,7 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 
 ### 感度分析
 
-`specs/check.sh` は仕様をわざと壊した変種を作り、シナリオのどれかが失敗すること
+`specs/bft/check.sh` は仕様をわざと壊した変種を作り、シナリオのどれかが失敗すること
 (検査が破れを見つけること)を毎回確かめる。
 
 | 変種 | 壊す規則 |
@@ -155,10 +155,12 @@ npm install -g @informalsystems/quint@0.35.0   # Java 17 以上も(Apalache 用)
 specs/check.sh
 ```
 
-`specs/check.sh` は CI(`quint` ジョブ)と同じものを走らせる: 型検査、シナリオ
-(`quint test`)、感度分析、ランダムシミュレーション(`quint run`)、トレースの再生
-(Rust のツールチェーンも要る)、Apalache による有界モデル検査(`quint verify`)。
-回数は環境変数で変えられる(スクリプト冒頭を参照)。固定トレースを作り直すには
+`specs/check.sh` は CI(`quint` ジョブ)と同じものを走らせる。仕様ごとのディレクトリの
+`check.sh`(`bft/check.sh` など)を順に呼ぶだけで、各 `check.sh` は `specs/common.sh` の
+回数・評価器・感度分析(`check_mutants`)を使う。新しい仕様はディレクトリと `check.sh` を
+足せば加わる。`bft` では型検査、シナリオ(`quint test`)、感度分析、ランダムシミュレーション
+(`quint run`)、トレースの再生(Rust のツールチェーンも要る)、Apalache による有界モデル検査
+(`quint verify`)を走らせる。回数は環境変数で変えられる(`common.sh` 冒頭を参照)。固定トレースを作り直すには
 `specs/bft` で次を走らせる(`n4f0` も同様)。
 
 ```sh
