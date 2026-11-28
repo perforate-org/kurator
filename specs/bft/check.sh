@@ -18,13 +18,17 @@ for main in n4f0 n4f1 n4f2; do
   quint test "${backend[@]}" --main "$main" "$spec"
 done
 
+# No mutant drops `b.justify >= tc.high.view` from `justified`: a replica
+# observes the certificate a timeout certificate carries before it votes,
+# so its lock rule refuses the same blocks, and no scenario can tell.
 mutants=(
   "no lock rule|s/    b\.justify >= s\.lock\.view,/    true,/"
   "votes twice in a view|s/    s\.voted < b\.view,/    true,/"
   "quorum of 2f|s/Quorum: int = Replicas\.size\(\) - F/Quorum: int = Replicas.size() - F - 1/"
   "one-chain commit|s/\.union\(Set\(child\.parent\)\)/.union(Set(child.parent, q.block))/"
-  "crash forgets the vote|s/      proposed: s\.voted,/      proposed: s.voted,\n      voted: 0,/"
-  "timeout certificate ignores high|s/ and b\.justify >= tc\.high//"
+  "crash forgets the vote|s/      entered: NoTC,\n    \}\n    \/\/ It may/      entered: NoTC,\n      voted: 0,\n    }\n    \/\/ It may/"
+  "crash forgets the proposal|s/      entered: NoTC,\n    \}\n    \/\/ It may/      entered: NoTC,\n      proposed: 0,\n    }\n    \/\/ It may/"
+  "skip carries no certificate|s/leadIn\(r, observe\(replicas\.get\(r\), tc\.high\), now\)/(replicas.get(r), now)/"
 )
 check_mutants "$spec" n4f0 n4f1 n4f2
 

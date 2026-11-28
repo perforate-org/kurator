@@ -44,11 +44,12 @@ struct Qc {
     block: u64,
 }
 
-/// `TC`: a quorum gave up on `view`, the newest of them knowing `high`.
+/// `TC`: a quorum gave up on `view`, the newest of them knowing `high`,
+/// which it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Tc {
     view: u64,
-    high: u64,
+    high: Qc,
 }
 
 /// `Replica`: what a correct replica keeps.
@@ -215,7 +216,7 @@ impl Replay {
         let counted = state
             .timeouts
             .iter()
-            .filter(|timeout| timeout.view == tc.view && timeout.high.view <= tc.high);
+            .filter(|timeout| timeout.view == tc.view && timeout.high.view <= tc.high.view);
         for timeout in counted {
             let kept = newest.entry(&timeout.voter).or_insert(timeout);
             *kept = cmp::max_by_key(*kept, timeout, |timeout| timeout.high.view);
@@ -226,14 +227,16 @@ impl Replay {
     }
 
     fn certificate(&self, state: &State, tc: Tc) -> TimeoutCertificate {
-        let entries = Self::gave_up(state, tc)
+        let timeouts = Self::gave_up(state, tc)
             .into_iter()
-            .map(|timeout| {
-                let (voter, high, signature) = self.timeout(state, timeout).into_entry();
-                (voter, (high, signature))
-            })
-            .collect();
-        TimeoutCertificate::new(View::new(tc.view), entries)
+            .map(|timeout| self.timeout(state, timeout));
+        TimeoutCertificate::gather(View::new(tc.view), timeouts)
+    }
+
+    /// What the code's timeout certificate shows of `tc`: its view, and
+    /// its certificate's view and block.
+    fn named(&self, tc: Tc) -> (u64, u64, BlockId) {
+        (tc.view, tc.high.view, self.id(tc.high.block))
     }
 
     fn proposal(&self, state: &State, proposal: Proposal) -> (NodeId, RealProposal) {
@@ -484,7 +487,8 @@ impl Replay {
             .proposals
             .iter()
             .find(|model| model.block == id)
-            .and_then(|model| model.timeout);
+            .and_then(|model| model.timeout)
+            .map(|tc| self.named(tc));
         let shown = proposal.timeout().map(shown);
         assert_eq!(
             real.justify().view().get(),
@@ -515,8 +519,9 @@ impl Replay {
             );
             assert_eq!(core.proposed.get(), model.proposed, "{at}: last proposal");
             let entered = core.entered.as_ref().map(shown);
+            let expected = model.entered.map(|tc| self.named(tc));
             assert_eq!(
-                entered, model.entered,
+                entered, expected,
                 "{at}: timeout certificate it entered with"
             );
             let decided: BTreeSet<BlockId> =
@@ -591,12 +596,11 @@ impl Replay {
     }
 }
 
-/// The model's view of the code's timeout certificate.
-fn shown(certificate: &TimeoutCertificate) -> Tc {
-    Tc {
-        view: certificate.view().get(),
-        high: certificate.high().get(),
-    }
+/// The view of a timeout certificate, and its certificate's view and
+/// block.
+fn shown(certificate: &TimeoutCertificate) -> (u64, u64, BlockId) {
+    let high = certificate.high();
+    (certificate.view().get(), high.view().get(), high.block())
 }
 
 /// Another member than `name`, for messages whose sender does not matter.

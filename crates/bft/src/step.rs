@@ -12,24 +12,38 @@ use crate::rejection::Rejection;
 use crate::view::View;
 use crate::vote::{BlockId, Justify};
 
-/// What a replica must not forget across a crash: the last view it voted
-/// or gave up in, so it never votes twice in a view, and the newest
-/// certificate it knows, so it never votes against a commit.
+/// What a replica must not forget across a crash.
+///
+/// The last view it voted or gave up in, so it never votes twice in a
+/// view; the last view it proposed in, so it never proposes two blocks in
+/// a view; and the newest certificate it knows, so it never votes against
+/// a commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Safety {
     voted: View,
+    proposed: View,
     lock: Justify,
 }
 
 impl Safety {
-    pub(crate) const fn new(voted: View, lock: Justify) -> Self {
-        Self { voted, lock }
+    pub(crate) const fn new(voted: View, proposed: View, lock: Justify) -> Self {
+        Self {
+            voted,
+            proposed,
+            lock,
+        }
     }
 
     /// The last view the replica voted or gave up in.
     #[must_use]
     pub const fn voted(&self) -> View {
         self.voted
+    }
+
+    /// The last view the replica proposed in.
+    #[must_use]
+    pub const fn proposed(&self) -> View {
+        self.proposed
     }
 
     /// The newest certificate the replica knows.
@@ -244,7 +258,7 @@ impl Default for Recovered {
     /// A replica that never ran.
     fn default() -> Self {
         Self {
-            safety: Safety::new(View::GENESIS, Justify::Genesis),
+            safety: Safety::new(View::GENESIS, View::GENESIS, Justify::Genesis),
             blocks: BTreeMap::new(),
             committed: (BlockId::GENESIS, View::GENESIS),
             base: None,

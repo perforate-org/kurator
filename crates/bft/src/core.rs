@@ -114,7 +114,7 @@ pub struct Core {
     /// Votes it collects as the next view's leader.
     votes: BTreeMap<View, BTreeMap<BlockId, BTreeMap<NodeId, Signature>>>,
     /// Timeouts of the current view.
-    timeouts: BTreeMap<NodeId, (View, Signature)>,
+    timeouts: BTreeMap<NodeId, Timeout>,
     /// Commands submitted and not yet decided.
     pending: Vec<Vec<u8>>,
     /// The certified checkpoint its blocks start after: those before it
@@ -137,8 +137,8 @@ impl Core {
 
     /// A replica that ran before and remembers `recovered`. It starts in
     /// the view after its lock's, or in the last view it voted or gave up
-    /// in, whichever is later, and does not propose in a view it voted in:
-    /// a leader votes for its own block, so it may have proposed there.
+    /// in, whichever is later, and does not propose again in a view it
+    /// proposed in.
     #[must_use]
     pub fn recover(config: Config, recovered: Recovered) -> Self {
         let (safety, blocks, committed, certified) = recovered.into_parts();
@@ -147,7 +147,7 @@ impl Core {
             view: View::GENESIS,
             voted: safety.voted(),
             lock: safety.lock().clone(),
-            proposed: safety.voted(),
+            proposed: safety.proposed(),
             entered: None,
             failures: 0,
             committed,
@@ -192,10 +192,15 @@ impl Core {
         prune(&mut self.blocks, certificate.block(), certificate.view());
         self.base = Some(certificate.clone());
         let mut records: Vec<Record> = self.blocks.values().cloned().map(Record::Block).collect();
-        records.push(Record::Safety(Safety::new(self.voted, self.lock.clone())));
+        records.push(Record::Safety(self.safety()));
         records.push(Record::Committed(self.committed.0, self.committed.1));
         records.push(Record::Checkpoint(certificate.clone()));
         records
+    }
+
+    /// What it must not forget across a crash.
+    fn safety(&self) -> Safety {
+        Safety::new(self.voted, self.proposed, self.lock.clone())
     }
 
     /// The node it runs on.
@@ -230,7 +235,7 @@ impl Core {
 
     /// Handles `event`.
     pub fn handle(&mut self, event: Event) -> Step {
-        let before = (self.voted, self.lock.view());
+        let before = (self.voted, self.proposed, self.lock.view());
         let committed = self.committed;
         let handled = match event {
             Event::Start => {
@@ -268,8 +273,8 @@ impl Core {
             .into_iter()
             .map(Record::Block)
             .collect();
-        if before != (self.voted, self.lock.view()) {
-            records.push(Record::Safety(Safety::new(self.voted, self.lock.clone())));
+        if before != (self.voted, self.proposed, self.lock.view()) {
+            records.push(Record::Safety(self.safety()));
         }
         if committed != self.committed {
             records.push(Record::Committed(self.committed.0, self.committed.1));
@@ -458,16 +463,18 @@ impl Core {
 
     fn count_timeout(&mut self, timeout: Timeout) {
         let view = timeout.view();
-        let (voter, high, signature) = timeout.into_entry();
-        drop(self.timeouts.insert(voter, (high, signature)));
+        drop(self.timeouts.insert(timeout.voter(), timeout));
         if self.timeouts.len() >= self.config.committee.quorum() {
-            let entries = mem::take(&mut self.timeouts);
-            self.timed_out(TimeoutCertificate::new(view, entries));
+            let timeouts = mem::take(&mut self.timeouts).into_values();
+            self.timed_out(TimeoutCertificate::gather(view, timeouts));
         }
     }
 
     /// Leaves the view a timeout certificate ends.
     fn timed_out(&mut self, certificate: TimeoutCertificate) {
+        // The newest certificate a quorum knew, so that it proposes on a
+        // block every honest signer can vote for if it leads next.
+        self.observe(certificate.high().clone());
         let Some(next) = certificate.view().next().filter(|next| *next > self.view) else {
             return;
         };
