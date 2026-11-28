@@ -75,20 +75,16 @@ fn certify(view: u64, block: BlockId) -> Justify {
 /// A timeout certificate for `view`, by nodes 1 to 3 that each knew
 /// `high` as their newest certificate.
 fn timed_out(view: u64, high: &Justify) -> TimeoutCertificate {
-    let entries = (1..=3)
-        .map(|node| {
-            let timeout = Timeout::sign(
-                &key(node),
-                DOMAIN,
-                NodeId::new(node),
-                View::new(view),
-                high.clone(),
-            );
-            let (voter, seen, signature) = timeout.into_entry();
-            (voter, (seen, signature))
-        })
-        .collect();
-    TimeoutCertificate::new(View::new(view), entries)
+    let timeouts = (1..=3).map(|node| {
+        Timeout::sign(
+            &key(node),
+            DOMAIN,
+            NodeId::new(node),
+            View::new(view),
+            high.clone(),
+        )
+    });
+    TimeoutCertificate::gather(View::new(view), timeouts)
 }
 
 fn receive(core: &mut Core, message: Message) -> Effects {
@@ -104,6 +100,11 @@ fn the_first_leader_proposes_on_start() {
         step.safety().map(Safety::voted),
         Some(View::new(1)),
         "voted for its own block"
+    );
+    assert_eq!(
+        step.safety().map(Safety::proposed),
+        Some(View::new(1)),
+        "and proposed it, before it sends it"
     );
     let effects = step.persisted();
     assert_eq!(first.view(), View::new(1), "in the first view");
@@ -343,6 +344,28 @@ fn a_view_without_a_certificate_needs_a_timeout_certificate() {
         matches!(shown.messages()[0].message(), Message::Vote(_)),
         "votes"
     );
+}
+
+#[test]
+fn a_leader_skipped_in_proposes_on_the_newest_certificate_a_quorum_knew() {
+    let node = leader(3);
+    let mut replica = started(node);
+    let first = proposal(1, Justify::Genesis, None);
+    let certified = certify(1, first.block().id());
+    // It never heard of view 1's certificate: the timeout certificate
+    // shows it.
+    let step = replica.handle(Event::Received {
+        from: leader(2),
+        message: Message::Skip(timed_out(2, &certified)),
+    });
+    let proposed = step.safety().map(Safety::proposed);
+    let effects = step.persisted();
+    assert_eq!(replica.view(), View::new(3), "in view 3");
+    let ours = proposal_in(&effects).unwrap();
+    assert_eq!(ours.block().justify(), &certified, "on that certificate");
+    assert!(ours.open(&committee(), DOMAIN).is_ok(), "justified");
+    assert_eq!(effects.rejected(), None, "it votes for it too");
+    assert_eq!(proposed, Some(View::new(3)), "and remembers it proposed");
 }
 
 #[test]

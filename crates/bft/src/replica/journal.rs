@@ -63,6 +63,7 @@ impl Record {
             Self::Safety(safety) => {
                 out.write_all(&[SAFETY])?;
                 put_view(out, safety.voted())?;
+                put_view(out, safety.proposed())?;
                 safety.lock().encode(out)
             }
             Self::Committed(block, view) => {
@@ -83,7 +84,8 @@ impl Record {
             BLOCK => Self::Block(Block::decode(&mut reader)?),
             SAFETY => {
                 let voted = read_view(&mut reader)?;
-                Self::Safety(Safety::new(voted, Justify::decode(&mut reader)?))
+                let proposed = read_view(&mut reader)?;
+                Self::Safety(Safety::new(voted, proposed, Justify::decode(&mut reader)?))
             }
             COMMITTED => {
                 let block = BlockId::decode(&mut reader)?;
@@ -226,7 +228,7 @@ mod tests {
         let block = Block::new(View::new(3), Justify::Genesis, vec![b"x".to_vec()]);
         let records = [
             Record::Block(block.clone()),
-            Record::Safety(Safety::new(View::new(4), Justify::Genesis)),
+            Record::Safety(Safety::new(View::new(4), View::new(2), Justify::Genesis)),
             Record::Committed(block.id(), View::new(3)),
             Record::Checkpoint(certify(
                 Snapshot::take(
@@ -311,7 +313,7 @@ mod tests {
         let live = [
             Record::Block(second.clone()),
             Record::Block(later.clone()),
-            Record::Safety(Safety::new(View::new(3), Justify::Genesis)),
+            Record::Safety(Safety::new(View::new(3), View::new(3), Justify::Genesis)),
             Record::Committed(second.id(), View::new(2)),
             Record::Checkpoint(certificate.clone()),
         ];

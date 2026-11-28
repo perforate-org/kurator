@@ -200,7 +200,7 @@ impl Proposal {
         let after_timeout = self
             .timeout
             .as_ref()
-            .is_some_and(|timeout| view.follows(timeout.view()) && extends >= timeout.high());
+            .is_some_and(|timeout| timeout.justifies(view, extends));
         if !view.follows(extends) && !after_timeout {
             return Err(Rejection::Unjustified(view));
         }
@@ -317,7 +317,7 @@ mod tests {
     fn a_proposal_checks_what_it_carries() {
         let leader = committee().leader(View::new(5)).unwrap();
         let block = Block::new(View::new(5), Justify::Genesis, Vec::new());
-        let short = TimeoutCertificate::new(View::new(4), BTreeMap::new());
+        let short = TimeoutCertificate::new(View::new(4), BTreeMap::new(), Justify::Genesis);
         let proposal = Proposal::sign(
             &key(leader.get()),
             DOMAIN,

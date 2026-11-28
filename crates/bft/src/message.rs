@@ -225,7 +225,7 @@ mod tests {
             proptest::collection::btree_map(1..6_u64, any::<u64>(), 0..4),
         )
             .prop_map(|(view, highs)| {
-                let entries: BTreeMap<_, _> = highs
+                let entries: Vec<_> = highs
                     .into_iter()
                     .map(|(node, high)| {
                         let high = Justify::Certified(Certificate::new(
@@ -233,18 +233,10 @@ mod tests {
                             BlockId::GENESIS,
                             BTreeMap::new(),
                         ));
-                        let timeout = Timeout::sign(
-                            &key(node),
-                            DOMAIN,
-                            NodeId::new(node),
-                            View::new(view),
-                            high,
-                        );
-                        let (voter, seen, signature) = timeout.into_entry();
-                        (voter, (seen, signature))
+                        Timeout::sign(&key(node), DOMAIN, NodeId::new(node), View::new(view), high)
                     })
                     .collect();
-                TimeoutCertificate::new(View::new(view), entries)
+                TimeoutCertificate::gather(View::new(view), entries)
             })
     }
 

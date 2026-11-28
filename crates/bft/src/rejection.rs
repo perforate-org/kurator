@@ -53,4 +53,8 @@ pub enum Rejection {
     /// A block nobody asked for.
     #[error("a block nobody asked for")]
     Unwanted,
+    /// A timeout certificate whose certificate, of the first view, is
+    /// older than one a signer knew, of the second.
+    #[error("a timeout certificate showing a certificate of {0} where a signer knew {1}")]
+    Outdated(View, View),
 }
