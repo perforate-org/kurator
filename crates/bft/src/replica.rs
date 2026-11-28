@@ -20,7 +20,7 @@ use oleaph_consensus::{
     Duty, Error, Members, NodeId, Peer, Reads, Replicated, Result, Route, Transaction,
 };
 use oleaph_shard::{Applied, Shard};
-use oleaph_storage::{Command, Draft, KeyValue, KvState, Outcome, Version};
+use oleaph_storage::{Command, Draft, Finished, KeyValue, KvState, Outcome, Version};
 use parking_lot::Mutex;
 
 use crate::block::Block;
@@ -395,9 +395,12 @@ impl<H: Host> Transaction for Txn<'_, H> {
     }
 
     async fn commit(self) -> Result<Version> {
-        let read_at = self.draft.read_at();
-        let Some(transaction) = self.draft.into_transaction() else {
-            return Ok(read_at);
+        let transaction = match self.draft.finish() {
+            Finished::Writes(transaction) => transaction,
+            Finished::Reads(read) => {
+                let confirmed = self.replica.inner.lock().ledger.kv().confirm(&read);
+                return Ok(confirmed.map_err(oleaph_storage::Error::from)?);
+            }
         };
         match self.replica.propose(Command::Txn(transaction)).await? {
             Outcome::Committed(version) | Outcome::Prepared(version) => Ok(version),

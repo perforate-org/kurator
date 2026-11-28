@@ -545,7 +545,17 @@ impl Cluster {
     where
         F: FnOnce(&mut Txn<'_, Sim>) -> oleaph_consensus::Result<()> + Send,
     {
-        let Some(replica) = self.leader_replica(ShardId::FIRST) else {
+        self.transact_in(ShardId::FIRST, body).await
+    }
+
+    /// Runs `body` as one transaction on the leader of `shard`, as
+    /// [`Cluster::transact`] does on the first shard. Its keys must all be
+    /// keys of the shard.
+    pub async fn transact_in<F>(&self, shard: ShardId, body: F) -> Transacted
+    where
+        F: FnOnce(&mut Txn<'_, Sim>) -> oleaph_consensus::Result<()> + Send,
+    {
+        let Some(replica) = self.leader_replica(shard) else {
             return Transacted::Rejected;
         };
         let attempt = async {

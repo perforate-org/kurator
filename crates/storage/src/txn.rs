@@ -129,6 +129,35 @@ impl Transaction {
     }
 }
 
+/// A transaction that wrote nothing, so there is nothing to log.
+///
+/// Its reads all saw one version, but where transactions across shards
+/// commit that alone does not make it serializable. One of them may have
+/// committed at its primary, been read there by a transaction that then
+/// wrote here, and not yet been told to this shard, which still holds its
+/// part locked: a read here can see the later transaction's write but not
+/// the earlier one's. [`KvState::confirm`](crate::KvState::confirm) checks for that as applying a
+/// [`Transaction`] would, but on the replica's own state, with no log
+/// entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnly(Transaction);
+
+impl ReadOnly {
+    pub(crate) const fn new(transaction: Transaction) -> Self {
+        Self(transaction)
+    }
+
+    /// The version its reads saw.
+    #[must_use]
+    pub const fn read_at(&self) -> Version {
+        self.0.read_at
+    }
+
+    pub(crate) const fn transaction(&self) -> &Transaction {
+        &self.0
+    }
+}
+
 /// What a transaction read: single keys, and ranges it scanned. A write
 /// to a key in a scanned range conflicts even when the key was not there
 /// at the read version, so a transaction never misses a row that appears

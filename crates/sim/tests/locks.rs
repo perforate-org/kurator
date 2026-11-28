@@ -4,17 +4,18 @@
 //! after, the decisions are forgotten.
 #![expect(
     clippy::expect_used,
+    clippy::panic,
     reason = "test code: a failure should panic with context"
 )]
 
 use std::time::Duration;
 
-use oleaph_client::{Collected, Collector, Coordinator, Transacted};
+use oleaph_client::{Call, Collected, Collector, Coordinator, Reply, Shards as _, Transacted};
 use oleaph_consensus::Transaction as _;
 use oleaph_raft::openraft::AsyncRuntime as _;
-use oleaph_shard::NamespaceId;
+use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_sim::{Cluster, Faults, Holdings, Outcome};
-use oleaph_storage::WriteBatch;
+use oleaph_storage::{Command, Deadline, Decide, Decision, Draft, Outcome as Applied, WriteBatch};
 use openraft_rt_sim::SimRuntime;
 
 /// Longer than a coordinator means to take over a transaction.
@@ -189,6 +190,76 @@ fn decisions_long_past_their_deadline_are_forgotten() {
         }
         let again = put_both(&cluster, "4").await;
         assert!(matches!(again, Transacted::Committed(_)), "{again:?}");
+        cluster.shutdown().await.expect("shutdown");
+    });
+}
+
+/// The shard that holds `z`.
+fn second(cluster: &Cluster) -> ShardId {
+    cluster
+        .shards()
+        .into_iter()
+        .find(|shard| shard.span().contains(b"z"))
+        .expect("the second shard")
+        .id()
+}
+
+/// Proposes `command` on `shard`'s leader: how it applied.
+async fn propose(cluster: &Cluster, shard: ShardId, command: Command) -> Applied {
+    match cluster.call(shard, Call::Propose(command)).await {
+        Some(Reply::Applied(applied)) => applied,
+        other => panic!("{shard}: {other:?}"),
+    }
+}
+
+/// Writes `a = 2` and `z = 2` in a transaction across both shards whose
+/// coordinator stops right after the commit point: the primary, the first
+/// shard, committed it, and the second shard still holds its part locked.
+async fn commit_on_the_primary_only(cluster: &Cluster) {
+    let shards = [ShardId::FIRST, second(cluster)];
+    let id = cluster.next_txn();
+    let deadline = Deadline::new(cluster.now().millis().saturating_add(5000));
+    for (shard, key) in shards.into_iter().zip([b"a", b"z"]) {
+        let Some(Reply::Begun { at, .. }) = cluster.call(shard, Call::Begin).await else {
+            panic!("{shard} begins");
+        };
+        let mut draft = Draft::new(at);
+        draft.put(key, "2");
+        let prepare = draft.into_prepare(id, b"a".to_vec(), deadline);
+        let prepared = propose(cluster, shard, Command::Prepare(prepare)).await;
+        assert!(matches!(prepared, Applied::Prepared(_)), "{prepared:?}");
+    }
+    let decide = Decide::new(id, b"a".to_vec(), deadline, Decision::Commit);
+    let committed = propose(cluster, ShardId::FIRST, Command::Decide(decide)).await;
+    assert!(matches!(committed, Applied::Committed(_)), "{committed:?}");
+}
+
+#[test]
+fn a_read_only_transaction_does_not_see_half_of_one_across_shards() {
+    SimRuntime::with_seed(35).block_on(async {
+        let cluster = cluster(35).await;
+        commit_on_the_primary_only(&cluster).await;
+        // A second transaction reads what the first wrote on the first
+        // shard, and writes `y` on the second.
+        let mut txn = Coordinator::new(&cluster).begin(NamespaceId::DEFAULT);
+        assert_eq!(txn.get(b"a").await.expect("a"), Some(b"2".to_vec()), "a");
+        txn.put(b"y", "after").await.expect("y");
+        let after = txn.commit().await;
+        assert!(matches!(after, Transacted::Committed(_)), "{after:?}");
+        // Seeing `y` but not `z` puts this read after the second
+        // transaction, which comes after the first, and before the first.
+        let mut seen = None;
+        let read = cluster
+            .transact_in(second(&cluster), |reader| {
+                seen = Some((reader.get(b"y")?, reader.get(b"z")?));
+                Ok(())
+            })
+            .await;
+        let skewed = Some((Some(b"after".to_vec()), Some(b"1".to_vec())));
+        assert!(
+            !(matches!(read, Transacted::Committed(_)) && seen == skewed),
+            "read skew: {read:?} saw {seen:?}"
+        );
         cluster.shutdown().await.expect("shutdown");
     });
 }

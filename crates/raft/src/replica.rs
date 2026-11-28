@@ -9,7 +9,7 @@ use std::time::Instant;
 use oleaph_consensus::{Duty, Members, Reads, Replicated, Role, Route, Transaction};
 use oleaph_metrics::{Exposition, Histogram, Histograms, Label, Values};
 use oleaph_shard::{Applied, Halves, Shard, ShardId, ShardState, Split};
-use oleaph_storage::{Command, Draft, KeyValue, KvState, Outcome, Version, WriteBatch};
+use oleaph_storage::{Command, Draft, Finished, KeyValue, KvState, Outcome, Version, WriteBatch};
 use openraft::error::{ClientWriteError, Fatal, InitializeError, LinearizableReadError, RaftError};
 use openraft::network::NetSnapshot;
 use openraft::raft::ClientWriteResponse;
@@ -695,7 +695,9 @@ impl<C: Config> Transaction for Txn<'_, C> {
 
     /// Replicates the transaction and returns the version its writes made,
     /// once a quorum holds it and this replica applied it. A transaction
-    /// that wrote nothing returns its read version and logs nothing.
+    /// that wrote nothing logs nothing: it is confirmed on this replica's
+    /// state ([`KvState::confirm`]) and
+    /// returns its read version.
     ///
     /// # Errors
     ///
@@ -705,9 +707,12 @@ impl<C: Config> Transaction for Txn<'_, C> {
     /// [`Replica::write`]; [`Error::Misrouted`] means the shard split
     /// before the transaction applied, and a key it touched moved.
     async fn commit(self) -> oleaph_consensus::Result<Version> {
-        let read_at = self.draft.read_at();
-        let Some(transaction) = self.draft.into_transaction() else {
-            return Ok(read_at);
+        let transaction = match self.draft.finish() {
+            Finished::Writes(transaction) => transaction,
+            Finished::Reads(read) => {
+                let confirmed = self.replica.state.read(|state| state.kv().confirm(&read));
+                return Ok(confirmed.map_err(oleaph_storage::Error::from)?);
+            }
         };
         let proposal = Proposal::new(Command::Txn(transaction))?;
         let response = self.replica.replicate(proposal).await?;

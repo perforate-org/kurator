@@ -24,6 +24,7 @@ oleaph-bft = { path = "crates/bft" }
 oleaph-client = { path = "crates/client" }
 oleaph-raft = { path = "crates/raft" }
 oleaph-meta = { path = "crates/meta" }
+oleaph-history = { path = "crates/history" }
 oleaph-sim = { path = "crates/sim" }
 oleaph-net = { path = "crates/net" }
 crc32c = "0.6.9"

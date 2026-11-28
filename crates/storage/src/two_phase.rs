@@ -35,7 +35,12 @@
 //!
 //! Every shard held all the locks of the transaction at its commit point,
 //! so its reads on every shard were still current then: committed
-//! transactions are serializable, each at its commit point.
+//! transactions are serializable, each at its commit point. Between the
+//! commit point and the decision reaching a shard, that shard holds the
+//! part locked, so a transaction on it alone that read a key the part
+//! writes must not commit either: a logged one aborts as it applies, and
+//! one that only read is checked the same way by
+//! [`KvState::confirm`](crate::KvState::confirm).
 
 use oleaph_codec::{DecodeError, Reader, put_bytes};
 

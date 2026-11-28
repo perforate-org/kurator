@@ -27,6 +27,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+oleaph-history.workspace = true
 
 [lints]
 workspace = true

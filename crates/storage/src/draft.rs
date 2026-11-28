@@ -8,7 +8,7 @@ use crate::batch::WriteBatch;
 use crate::outcome::Unreadable;
 use crate::state::KvState;
 use crate::two_phase::Prepare;
-use crate::txn::{KeyRange, ReadSet, Transaction};
+use crate::txn::{KeyRange, ReadOnly, ReadSet, Transaction};
 use crate::version::Version;
 
 /// A key and its value, as a transaction reads them.
@@ -22,7 +22,7 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// read from, so the same draft works on either.
 ///
 /// ```
-/// use oleaph_storage::{Command, Draft, KvState, Version, WriteBatch};
+/// use oleaph_storage::{Command, Draft, Finished, KvState, Version, WriteBatch};
 ///
 /// let mut state = KvState::default();
 /// let _ = state.apply(Version::new(1), Command::Kv(WriteBatch::new().put("n", "1")));
@@ -31,7 +31,9 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// assert_eq!(draft.get(&state, b"n")?, Some(b"1".to_vec()));
 /// draft.put("n", "2");
 /// assert_eq!(draft.get(&state, b"n")?, Some(b"2".to_vec()), "its own write");
-/// let transaction = draft.into_transaction().expect("it writes");
+/// let Finished::Writes(transaction) = draft.finish() else {
+///     panic!("it writes");
+/// };
 /// assert_eq!(transaction.read_at(), Version::new(1));
 /// # Ok::<(), oleaph_storage::Unreadable>(())
 /// ```
@@ -147,20 +149,31 @@ impl Draft {
         Prepare::new(id, primary, deadline, transaction)
     }
 
-    /// The transaction to commit, or `None` when it writes nothing: its
-    /// reads all saw one version, so a read-only transaction is already
-    /// serializable at its read version and needs no commit.
+    /// The transaction to commit: one to log when it writes, otherwise one
+    /// to confirm where it read.
     #[must_use]
-    pub fn into_transaction(self) -> Option<Transaction> {
-        if self.writes.is_empty() {
-            return None;
+    pub fn finish(self) -> Finished {
+        let read_only = self.writes.is_empty();
+        let transaction = Transaction::new(self.read_at, self.reads, batch(self.writes));
+        if read_only {
+            Finished::Reads(ReadOnly::new(transaction))
+        } else {
+            Finished::Writes(transaction)
         }
-        Some(Transaction::new(
-            self.read_at,
-            self.reads,
-            batch(self.writes),
-        ))
     }
+}
+
+/// A finished [`Draft`]: what committing it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a transaction writes or it does not; callers handle both"
+)]
+pub enum Finished {
+    /// It writes: the transaction to put in the log.
+    Writes(Transaction),
+    /// It only read: nothing to log, but it commits only once confirmed.
+    Reads(ReadOnly),
 }
 
 /// `writes`, each a value or a removal, as one batch.
@@ -177,9 +190,10 @@ fn batch(writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> WriteBatch {
 mod tests {
     use std::ops::Bound::{Excluded, Unbounded};
 
-    use super::Draft;
+    use super::{Draft, Finished};
     use crate::batch::WriteBatch;
     use crate::command::Command;
+    use crate::outcome::Abort;
     use crate::state::KvState;
     use crate::version::Version;
 
@@ -212,7 +226,9 @@ mod tests {
         );
         let outside = draft.range(&state, Unbounded, Excluded(b"b")).unwrap();
         assert_eq!(outside, [(b"a".to_vec(), b"1".to_vec())], "writes outside");
-        let transaction = draft.into_transaction().unwrap();
+        let Finished::Writes(transaction) = draft.finish() else {
+            panic!("it writes");
+        };
         assert_eq!(transaction.read_at(), Version::new(1), "read version");
         assert_eq!(transaction.reads().keys().len(), 1, "own writes not read");
         assert_eq!(transaction.reads().ranges().len(), 2, "ranges");
@@ -228,17 +244,36 @@ mod tests {
         assert_eq!(draft.written(b"b"), Some(Some(b"9".as_slice())), "put");
         assert_eq!(draft.written(b"c"), Some(None), "deleted");
         draft.note_read(b"a");
-        let transaction = draft.into_transaction().unwrap();
+        let Finished::Writes(transaction) = draft.finish() else {
+            panic!("it writes");
+        };
         assert_eq!(transaction.reads().keys().len(), 1, "the read noted");
     }
 
     #[test]
-    fn a_read_only_draft_has_nothing_to_commit() {
-        let state = state();
+    fn a_read_only_draft_is_confirmed_unless_what_it_read_changed() {
+        let mut state = state();
         let mut draft = Draft::new(state.version());
         assert_eq!(draft.read_at(), Version::new(1), "read version");
         assert_eq!(draft.get(&state, b"a"), Ok(Some(b"1".to_vec())), "read");
-        assert_eq!(draft.into_transaction(), None, "nothing to commit");
+        let Finished::Reads(read) = draft.finish() else {
+            panic!("it only read");
+        };
+        assert_eq!(state.confirm(&read), Ok(Version::new(1)), "confirmed");
+        let _other = state.apply(
+            Version::new(2),
+            Command::Kv(WriteBatch::new().put("b", "0")),
+        );
+        assert_eq!(state.confirm(&read), Ok(Version::new(1)), "b not read");
+        let _a = state.apply(
+            Version::new(3),
+            Command::Kv(WriteBatch::new().put("a", "0")),
+        );
+        let conflict = Abort::Conflict {
+            key: b"a".to_vec(),
+            version: Version::new(3),
+        };
+        assert_eq!(state.confirm(&read), Err(conflict), "a changed");
     }
 
     #[test]
