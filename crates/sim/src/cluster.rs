@@ -601,6 +601,13 @@ impl Cluster {
             .collect()
     }
 
+    /// How many snapshot chunks replicas kept before the last of their
+    /// snapshot: nonzero once a snapshot went in more than one request.
+    #[must_use]
+    pub fn chunks_kept(&self) -> u64 {
+        self.network.chunks_kept()
+    }
+
     /// Where each replica of the first shard that is up stands.
     #[must_use]
     pub fn statuses(&self) -> Vec<(NodeId, Status)> {
