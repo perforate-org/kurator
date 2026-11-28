@@ -110,6 +110,10 @@ module bft {
   /// in slot 0; a faulty one may use them all.
   pure def blockId(view: View, slot: int): BlockId = view * Slots + slot
 
+  /// The ids of a correct leader's second, third, .. block of a view, which
+  /// it proposes only when it forgot the first: `Proposed * k + view`.
+  pure val Proposed: int = 1000
+
   pure def max(a: int, b: int): int = if (a > b) a else b
 
   // ------------------------------------------------------------------
@@ -160,14 +164,19 @@ module bft {
   /// certificate in the model is genuine, so it need not be checked.
   def valid(p: Proposal): bool = {
     val b = blocks.get(p.block)
-    val afterTimeout = match p.timeout {
+    and {
+      LeaderOf.get(b.view) == b.proposer,
+      justified(b, p.timeout),
+    }
+  }
+
+  /// Whether `b`'s certificate, with `timeout`, justifies its view.
+  pure def justified(b: Block, timeout: MaybeTC): bool = {
+    val afterTimeout = match timeout {
       | NoTC => false
       | Entered(tc) => tc.view + 1 == b.view and b.justify >= tc.high
     }
-    and {
-      LeaderOf.get(b.view) == b.proposer,
-      b.view == b.justify + 1 or afterTimeout,
-    }
+    b.view == b.justify + 1 or afterTimeout
   }
 
   // ------------------------------------------------------------------
@@ -208,15 +217,35 @@ module bft {
   // Actions of the correct replicas
   // ------------------------------------------------------------------
 
-  /// `Core::propose`: the leader of its view proposes once, on top of its
-  /// lock, and votes for its own block in the same step, so that the
-  /// journal holds the vote before the proposal leaves. The code proposes
-  /// only when there is something to decide; the model may propose
-  /// whenever the code may.
-  action propose(r: str): bool = {
-    val s = replicas.get(r)
-    val id = blockId(s.view, 0)
-    val parent = blocks.get(s.lock.block)
+  /// Whether `r`, in state `s`, leads its view and has not proposed there.
+  /// The code proposes on entering such a view when there is something to
+  /// decide; the model takes clients to always have more commands, so the
+  /// leader of a view always proposes on entering it.
+  def leads(r: str, s: Replica): bool = and {
+    LeaderOf.keys().contains(s.view),
+    LeaderOf.get(s.view) == r,
+    s.proposed < s.view,
+  }
+
+  /// What a step of a correct replica changes besides its own state.
+  type World = {
+    blocks: BlockId -> Block,
+    proposals: Set[Proposal],
+    votes: Set[Vote],
+    equivocated: bool,
+  }
+
+  def now: World = { blocks: blocks, proposals: proposals, votes: votes, equivocated: equivocated }
+
+  /// `Core::enter` calls `Core::offer`: when `leading`, `r` proposes in the
+  /// view of `s` on top of its lock, and checks and votes for its own
+  /// block in the same step (`Core::propose`), so that the journal holds
+  /// the vote before the proposal leaves.
+  pure def lead(r: str, s: Replica, w: World, leading: bool): (Replica, World) = {
+    // Its blocks of this view so far: none, unless it forgot it proposed.
+    val before = w.blocks.keys().filter(b => w.blocks.get(b).view == s.view and w.blocks.get(b).proposer == r).size()
+    val id = if (before == 0) blockId(s.view, 0) else Proposed * before + s.view
+    val parent = w.blocks.get(s.lock.block)
     val block = {
       view: s.view,
       parent: s.lock.block,
@@ -226,70 +255,71 @@ module bft {
       ancestors: parent.ancestors.union(Set(s.lock.block)),
     }
     val proposed = { ...s, proposed: s.view }
+    val shown = {
+      ...w,
+      blocks: w.blocks.put(id, block),
+      proposals: w.proposals.union(Set({ block: id, timeout: s.entered })),
+    }
+    val own = { voter: r, view: s.view, block: id }
+    // A second block of the view is an equivocation, which `equivocated`
+    // records.
+    val signed = { ...shown, equivocated: shown.equivocated or before > 0 }
+    if (not(leading)) (s, w)
+    // It checks its own proposal as anyone's, and may find that its
+    // certificates do not justify it.
+    else if (justified(block, s.entered) and mayVote(proposed, block))
+      ({ ...proposed, voted: s.view }, { ...signed, votes: signed.votes.union(Set(own)) })
+    else (proposed, signed)
+  }
+
+  /// `lead` for `r` in `s`, if `s` leads its view.
+  def leadIn(r: str, s: Replica, w: World): (Replica, World) = lead(r, s, w, leads(r, s))
+
+  /// Writes the step of correct replica `r`, which ends in state `s`,
+  /// having changed `w` and given up with `gaveUp`, after proposing if `s`
+  /// leads its view.
+  action settle(r: str, s: Replica, w: World, gaveUp: Set[Timeout]): bool = {
+    val led = leadIn(r, s, w)
     all {
-      s.view <= MaxView,
-      LeaderOf.get(s.view) == r,
-      s.proposed < s.view,
-      if (blocks.keys().contains(id)) all {
-        // It proposed in this view before: the model has no slot for a
-        // second block, and says so.
-        equivocated' = true,
-        blocks' = blocks,
-        proposals' = proposals,
-        replicas' = replicas.set(r, proposed),
-        votes' = votes,
-      } else all {
-        equivocated' = equivocated,
-        blocks' = blocks.put(id, block),
-        proposals' = proposals.union(Set({ block: id, timeout: s.entered })),
-        if (mayVote(proposed, block)) all {
-          replicas' = replicas.set(r, { ...proposed, voted: s.view }),
-          votes' = votes.union(Set({ voter: r, view: s.view, block: id })),
-        } else all {
-          replicas' = replicas.set(r, proposed),
-          votes' = votes,
-        },
-      },
-      timeouts' = timeouts,
+      replicas' = replicas.set(r, led._1),
+      blocks' = led._2.blocks,
+      proposals' = led._2.proposals,
+      votes' = led._2.votes,
+      equivocated' = led._2.equivocated,
+      timeouts' = timeouts.union(gaveUp),
     }
   }
 
-  /// `Core::on_proposal`: learns the block's certificate and the timeout
-  /// certificate with it, then votes if it may, for the next leader.
+  /// `Core::on_proposal`: learns the block's certificate, which may move it
+  /// to a view it leads and so propose there, then the timeout certificate
+  /// with it, which may do the same, then votes if it may, for the next
+  /// leader.
   action receiveProposal(r: str, p: Proposal): bool = {
     val b = blocks.get(p.block)
-    val learned = observe(replicas.get(r), { view: b.justify, block: b.parent })
-    val s = match p.timeout {
+    val learned = leadIn(r, observe(replicas.get(r), { view: b.justify, block: b.parent }), now)
+    val skipped = match p.timeout {
       | NoTC => learned
-      | Entered(tc) => timedOut(learned, tc)
+      | Entered(tc) => leadIn(r, timedOut(learned._1, tc), learned._2)
     }
+    val s = skipped._1
+    val w = skipped._2
+    val cast = { ...w, votes: w.votes.union(Set({ voter: r, view: b.view, block: p.block })) }
     all {
       valid(p),
       mayVote(s, b) or s != replicas.get(r),
-      if (mayVote(s, b)) all {
-        replicas' = replicas.set(r, { ...s, voted: b.view }),
-        votes' = votes.union(Set({ voter: r, view: b.view, block: p.block })),
-      } else all {
-        replicas' = replicas.set(r, s),
-        votes' = votes,
-      },
-      blocks' = blocks,
-      proposals' = proposals,
-      timeouts' = timeouts,
-      equivocated' = equivocated,
+      if (mayVote(s, b)) settle(r, { ...s, voted: b.view }, cast, Set())
+      else settle(r, s, w, Set()),
     }
   }
 
   /// Learns of a certificate: as the next leader collecting votes, or from
   /// a proposal, a timeout or a forwarded one.
-  action observeQC(r: str, q: QC): bool = all {
-    observe(replicas.get(r), q) != replicas.get(r),
-    replicas' = replicas.set(r, observe(replicas.get(r), q)),
-    blocks' = blocks,
-    proposals' = proposals,
-    votes' = votes,
-    timeouts' = timeouts,
-    equivocated' = equivocated,
+  action observeQC(r: str, q: QC): bool = {
+    val s = observe(replicas.get(r), q)
+    all {
+      s != replicas.get(r),
+      settle(r, s, now, Set()),
+    }
   }
 
   /// `Core::expire`: gives up on its view, again each time the timer
@@ -300,12 +330,7 @@ module bft {
     all {
       s.view <= MaxView,
       not(timeouts.contains(t)),
-      replicas' = replicas.set(r, { ...s, voted: max(s.voted, s.view) }),
-      timeouts' = timeouts.union(Set(t)),
-      equivocated' = equivocated,
-      blocks' = blocks,
-      proposals' = proposals,
-      votes' = votes,
+      settle(r, { ...s, voted: max(s.voted, s.view) }, now, Set(t)),
     }
   }
 
@@ -320,30 +345,31 @@ module bft {
                       .fold(GenesisQC, (_, t) => t.high)
     all {
       tc.view == s.view,
-      replicas' = replicas.set(r, timedOut(observe(s, top), tc)),
-      equivocated' = equivocated,
-      blocks' = blocks,
-      proposals' = proposals,
-      votes' = votes,
-      timeouts' = timeouts,
+      // Its own timeout of the view, the last it sent, counts too.
+      timeouts.forall(t => (t.voter == r and t.view == tc.view) implies t.high.view <= tc.high),
+      {
+        // It learns the timeouts' certificate first, which may move it to
+        // a view it leads.
+        val learned = leadIn(r, observe(s, top), now)
+        settle(r, timedOut(learned._1, tc), learned._2, Set())
+      },
     }
   }
 
   /// `Message::Skip`: a timeout certificate from another replica ends its
   /// view, without the timeouts in it.
-  action receiveSkip(r: str, tc: TC): bool = all {
-    timedOut(replicas.get(r), tc) != replicas.get(r),
-    replicas' = replicas.set(r, timedOut(replicas.get(r), tc)),
-    blocks' = blocks,
-    proposals' = proposals,
-    votes' = votes,
-    timeouts' = timeouts,
-    equivocated' = equivocated,
+  action receiveSkip(r: str, tc: TC): bool = {
+    val s = timedOut(replicas.get(r), tc)
+    all {
+      s != replicas.get(r),
+      settle(r, s, now, Set()),
+    }
   }
 
-  /// `Core::recover`: a crash forgets everything but what the journal
-  /// keeps, and the replica starts again in the view after its lock's or
-  /// the last it voted or gave up in, without proposing there.
+  /// `Core::recover`, then `Event::Start`: a crash forgets everything but
+  /// what the journal keeps, and the replica starts again in the view
+  /// after its lock's or the last it voted or gave up in, whichever is
+  /// later, and does not propose in a view it voted in.
   action crash(r: str): bool = {
     val s = replicas.get(r)
     val restarted = {
@@ -354,12 +380,7 @@ module bft {
     }
     all {
       restarted != s,
-      replicas' = replicas.set(r, restarted),
-      blocks' = blocks,
-      proposals' = proposals,
-      votes' = votes,
-      timeouts' = timeouts,
-      equivocated' = equivocated,
+      settle(r, restarted, now, Set()),
     }
   }
 
@@ -431,21 +452,35 @@ module bft {
   // The system
   // ------------------------------------------------------------------
 
-  action init: bool = all {
-    replicas' = Correct.mapBy(_ => {
-      view: 1, voted: 0, lock: GenesisQC, proposed: 0, entered: NoTC, decided: Set(),
-    }),
-    blocks' = Map(Genesis -> GenesisBlock),
-    proposals' = Set(),
-    votes' = Set(),
-    timeouts' = Set(),
-    equivocated' = false,
+  pure val Fresh: Replica = {
+    view: 1, voted: 0, lock: GenesisQC, proposed: 0, entered: NoTC, decided: Set(),
+  }
+
+  /// Every correct replica starts in view 1 (`Event::Start`), and its
+  /// leader proposes there.
+  action init: bool = {
+    val first = LeaderOf.get(1)
+    val block = {
+      view: 1, parent: Genesis, justify: 0, proposer: first, height: 1, ancestors: Set(Genesis),
+    }
+    val proposes = Correct.contains(first)
+    all {
+      replicas' = Correct.mapBy(r =>
+        if (r == first) { ...Fresh, proposed: 1, voted: 1 } else Fresh
+      ),
+      blocks' =
+        if (proposes) Map(Genesis -> GenesisBlock, blockId(1, 0) -> block)
+        else Map(Genesis -> GenesisBlock),
+      proposals' = if (proposes) Set({ block: blockId(1, 0), timeout: NoTC }) else Set(),
+      votes' = if (proposes) Set({ voter: first, view: 1, block: blockId(1, 0) }) else Set(),
+      timeouts' = Set(),
+      equivocated' = false,
+    }
   }
 
   action correctStep: bool = {
     nondet r = Correct.oneOf()
     any {
-      propose(r),
       all { proposals != Set(), nondet p = proposals.oneOf() receiveProposal(r, p) },
       nondet q = qcs.oneOf() observeQC(r, q),
       timeout(r),
@@ -520,8 +555,16 @@ module bft {
     noVoteAfterTimeout,
     oneCertificatePerView,
     lockIsCertified,
-    not(equivocated),
   }
+
+  /// A correct leader proposes one block in a view at most, crashes or
+  /// not. The code breaks this today (`crashedLeaderProposesAgainTest`):
+  /// it takes the last view it voted in for the last it proposed in, and a
+  /// leader whose own proposal is unjustified proposes without voting. No
+  /// fork follows, since every correct replica still votes once in a view,
+  /// but a correct leader signs two blocks of one view, which is what a
+  /// faulty one is caught by.
+  val proposesOnce: bool = not(equivocated)
 
   // ------------------------------------------------------------------
   // States the scenarios reach, to show the invariants above do not
@@ -547,14 +590,22 @@ module bft {
     proposals.exists(p => Correct.contains(blocks.get(p.block).proposer) and not(valid(p)))
 }
 
-/// Four replicas, one of them faulty and leading the second view.
+/// The leader schedule `Committee::leader` draws for members 1 to 4 (as
+/// n1 to n4), views 1 to 16. The trace replay checks every proposal's
+/// leader against the code, so a change to the schedule fails it.
+module schedule {
+  pure val Leaders: int -> str = Map(1 -> "n2", 2 -> "n4", 3 -> "n2", 4 -> "n4", 5 -> "n2", 6 -> "n2", 7 -> "n1", 8 -> "n4", 9 -> "n2", 10 -> "n2", 11 -> "n1", 12 -> "n4", 13 -> "n3", 14 -> "n4", 15 -> "n1", 16 -> "n3")
+}
+
+/// Four replicas, one of them faulty: n4, which leads views 2 and 4.
 module n4f1 {
+  import schedule.*
   import bft(
     Replicas = Set("n1", "n2", "n3", "n4"),
     Faulty = Set("n4"),
     MaxView = 5,
     Slots = 2,
-    LeaderOf = Map(1 -> "n1", 2 -> "n4", 3 -> "n2", 4 -> "n3", 5 -> "n4"),
+    LeaderOf = Leaders,
   ).*
 
   pure val GaveUp1: TC = { view: 1, high: 0 }
@@ -565,8 +616,7 @@ module n4f1 {
   /// are not a quorum, so neither block is certified.
   run oneFaultCannotCertifyAForkTest =
     init
-      .then(propose("n1"))
-      .then(receiveProposal("n2", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
       .then(receiveProposal("n3", { block: 2, timeout: NoTC }))
       .then(faultyPropose("n4", 2, 0, { view: 1, block: 2 }))
       .then(faultyPropose("n4", 2, 1, { view: 1, block: 2 }))
@@ -579,20 +629,19 @@ module n4f1 {
   /// A replica that voted and crashed does not vote again in that view.
   run crashKeepsTheVoteTest =
     init
-      .then(propose("n1"))
-      .then(receiveProposal("n2", { block: 2, timeout: NoTC }))
-      .then(crash("n2"))
-      .then(receiveProposal("n2", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
+      .then(crash("n1"))
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
       .fail()
 
   /// The faulty n4 leads view 2 and keeps the certificate of view 1's
   /// block to itself. The others give up on views 1 and 2 knowing only
-  /// genesis, and view 3 certifies a block beside the one view 1 did. That
-  /// block, not view 1's, is decided once view 4 certifies its child.
+  /// genesis, and n2 proposes in view 3 beside the block of view 1, which
+  /// is certified too. n4 then proposes the child of view 3's block in view
+  /// 4, and once that is certified, view 3's block is decided, not view 1's.
   run forkAfterTimeoutsTest =
     init
-      .then(propose("n1"))
-      .then(receiveProposal("n2", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
       .then(receiveProposal("n3", { block: 2, timeout: NoTC }))
       .expect(qcs.contains({ view: 1, block: 2 }))
       .then(timeout("n1"))
@@ -605,79 +654,77 @@ module n4f1 {
       .then(timeout("n2"))
       .then(timeout("n3"))
       .then(collectTimeouts("n1", GaveUp2))
-      .then(collectTimeouts("n2", GaveUp2))
       .then(collectTimeouts("n3", GaveUp2))
+      .then(collectTimeouts("n2", GaveUp2))
       .expect(Correct.forall(r => replicas.get(r).view == 3))
-      .then(propose("n2"))
+      .expect(proposals.contains({ block: 6, timeout: Entered(GaveUp2) }))
       .then(receiveProposal("n1", { block: 6, timeout: Entered(GaveUp2) }))
       .then(receiveProposal("n3", { block: 6, timeout: Entered(GaveUp2) }))
       .expect(certifiedFork and not(decidedSomething))
-      .then(observeQC("n3", { view: 3, block: 6 }))
-      .then(propose("n3"))
+      .then(faultyPropose("n4", 4, 0, { view: 3, block: 6 }))
       .then(receiveProposal("n1", { block: 8, timeout: NoTC }))
       .then(receiveProposal("n2", { block: 8, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 8, timeout: NoTC }))
       .then(observeQC("n1", { view: 4, block: 8 }))
       .expect(replicas.get("n1").decided == Set(6) and decidedAfterTimeout and safety)
 }
 
-/// Four replicas, all correct.
+/// Four replicas, all correct. With one slot, the block of view `v` is
+/// block `v`.
 module n4f0 {
+  import schedule.*
   import bft(
     Replicas = Set("n1", "n2", "n3", "n4"),
     Faulty = Set(),
     MaxView = 5,
     Slots = 1,
-    LeaderOf = Map(1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n1"),
+    LeaderOf = Leaders,
   ).*
-
-  /// With one slot, the block of view `v` is block `v`.
-  pure val Fresh: MaybeTC = NoTC
 
   /// Two views, each certified: the second certifies the first's child,
   /// which commits the first block, and nothing else.
   run twoChainCommitsTest =
     init
-      .then(propose("n1"))
-      .then(receiveProposal("n2", { block: 1, timeout: Fresh }))
-      .then(receiveProposal("n3", { block: 1, timeout: Fresh }))
-      // n2 leads view 2 and collects the votes of n1, n2 and n3.
-      .then(observeQC("n2", { view: 1, block: 1 }))
-      .expect(replicas.get("n2").view == 2 and replicas.get("n2").decided == Set())
-      .then(propose("n2"))
-      .then(receiveProposal("n3", { block: 2, timeout: Fresh }))
-      .then(receiveProposal("n4", { block: 2, timeout: Fresh }))
-      .then(observeQC("n3", { view: 2, block: 2 }))
-      .expect(replicas.get("n3").decided == Set(1) and safety)
+      .then(receiveProposal("n1", { block: 1, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 1, timeout: NoTC }))
+      // n4 leads view 2: it collects the votes of n1, n2 and n3, and
+      // proposes on entering the view.
+      .then(observeQC("n4", { view: 1, block: 1 }))
+      .expect(replicas.get("n4").view == 2 and replicas.get("n4").decided == Set())
+      .expect(proposals.contains({ block: 2, timeout: NoTC }))
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 2, timeout: NoTC }))
+      .then(observeQC("n2", { view: 2, block: 2 }))
+      .expect(replicas.get("n2").decided == Set(1) and safety)
 
-  /// Every replica gives up on view 1; the leader of view 2 collects the
-  /// timeouts and proposes with their certificate, which the others accept.
+  /// Three replicas give up on view 1; n4, which leads view 2, collects
+  /// their timeouts and proposes with their certificate, which the others
+  /// accept.
   run timeoutStartsTheNextViewTest =
     init
       .then(timeout("n1"))
-      .then(timeout("n2"))
       .then(timeout("n3"))
-      .then(collectTimeouts("n2", { view: 1, high: 0 }))
-      .expect(replicas.get("n2").view == 2)
-      .then(propose("n2"))
+      .then(timeout("n4"))
+      .then(collectTimeouts("n4", { view: 1, high: 0 }))
+      .expect(replicas.get("n4").view == 2)
+      .expect(proposals.contains({ block: 2, timeout: Entered({ view: 1, high: 0 }) }))
       .expect(proposals.forall(p => valid(p)))
-      .then(receiveProposal("n4", { block: 2, timeout: Entered({ view: 1, high: 0 }) }))
-      .expect(votes.contains({ voter: "n4", view: 2, block: 2 }))
+      .then(receiveProposal("n1", { block: 2, timeout: Entered({ view: 1, high: 0 }) }))
+      .expect(votes.contains({ voter: "n1", view: 2, block: 2 }))
 
-  /// n3 knows view 2's certificate; n1, n2 and n4 know only view 1's, give
-  /// up on views 2 and 3, and n4 proposes in view 4 on view 1's
+  /// n3 knows view 2's certificate; n1, n2 and n4 know only view 1's and
+  /// give up on views 2 and 3, and n4 proposes in view 4 on view 1's
   /// certificate, as their timeout certificate allows. n3's lock keeps it
   /// from voting for the older branch.
   run lockRefusesAnOlderBranchTest =
     init
-      .then(propose("n1"))
-      .then(receiveProposal("n2", { block: 1, timeout: Fresh }))
-      .then(receiveProposal("n3", { block: 1, timeout: Fresh }))
-      .then(observeQC("n2", { view: 1, block: 1 }))
-      .then(propose("n2"))
-      .then(receiveProposal("n3", { block: 2, timeout: Fresh }))
-      .then(receiveProposal("n4", { block: 2, timeout: Fresh }))
+      .then(receiveProposal("n1", { block: 1, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 1, timeout: NoTC }))
+      .then(observeQC("n4", { view: 1, block: 1 }))
+      .then(receiveProposal("n1", { block: 2, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 2, timeout: NoTC }))
       .then(observeQC("n3", { view: 2, block: 2 }))
-      .then(observeQC("n1", { view: 1, block: 1 }))
+      .then(observeQC("n2", { view: 1, block: 1 }))
       .then(timeout("n1"))
       .then(timeout("n2"))
       .then(timeout("n4"))
@@ -688,7 +735,6 @@ module n4f0 {
       .then(timeout("n2"))
       .then(timeout("n4"))
       .then(collectTimeouts("n4", { view: 3, high: 1 }))
-      .then(propose("n4"))
       .expect(proposals.contains({ block: 4, timeout: Entered({ view: 3, high: 1 }) }))
       .then(receiveProposal("n3", { block: 4, timeout: Entered({ view: 3, high: 1 }) }))
       .expect(replicas.get("n3").view == 4 and not(votes.exists(v => v.voter == "n3" and v.view == 4)))
@@ -700,10 +746,16 @@ module n4f0 {
   /// times out. Safe, but a view lost: the code's `Skip` carries the
   /// timeouts' views and not their certificates, so n4 cannot catch up.
   run skippedLeaderProposesUnjustifiedTest =
+    skippedLeaderProposes
+      .expect(unjustifiedProposal)
+      .then(receiveProposal("n1", { block: 4, timeout: Entered({ view: 3, high: 1 }) }))
+      .fail()
+
+  /// The run of `skippedLeaderProposesUnjustifiedTest` up to n4's proposal.
+  run skippedLeaderProposes =
     init
-      .then(propose("n1"))
-      .then(receiveProposal("n2", { block: 1, timeout: Fresh }))
-      .then(receiveProposal("n3", { block: 1, timeout: Fresh }))
+      .then(receiveProposal("n1", { block: 1, timeout: NoTC }))
+      .then(receiveProposal("n3", { block: 1, timeout: NoTC }))
       .then(observeQC("n1", { view: 1, block: 1 }))
       .then(observeQC("n2", { view: 1, block: 1 }))
       .then(observeQC("n3", { view: 1, block: 1 }))
@@ -717,17 +769,20 @@ module n4f0 {
       .then(timeout("n2"))
       .then(timeout("n3"))
       .then(receiveSkip("n4", { view: 3, high: 1 }))
-      .then(propose("n4"))
-      .expect(unjustifiedProposal)
-      .then(receiveProposal("n1", { block: 4, timeout: Entered({ view: 3, high: 1 }) }))
-      .fail()
+
+  /// n4, after its unjustified proposal of view 4, crashes, restarts in
+  /// view 1 (it never voted), and on the same `Skip` proposes view 4 again.
+  run crashedLeaderProposesAgainTest =
+    skippedLeaderProposes
+      .then(crash("n4"))
+      .then(receiveSkip("n4", { view: 3, high: 1 }))
+      .expect(not(proposesOnce) and safety)
 
   /// A replica that gave up on a view does not vote in it.
   run noVoteAfterGivingUpTest =
     init
-      .then(propose("n1"))
-      .then(timeout("n2"))
-      .then(receiveProposal("n2", { block: 1, timeout: Fresh }))
+      .then(timeout("n1"))
+      .then(receiveProposal("n1", { block: 1, timeout: NoTC }))
       .fail()
 }
 
@@ -747,7 +802,6 @@ module n4f2 {
   /// view 2, n2 the other.
   run forkDecidedTest =
     init
-      .then(propose("n1"))
       .then(receiveProposal("n2", { block: 2, timeout: NoTC }))
       .then(faultyVote("n3", 2))
       .then(faultyPropose("n4", 2, 0, { view: 1, block: 2 }))

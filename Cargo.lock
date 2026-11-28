@@ -809,6 +809,7 @@ dependencies = [
  "oleaph-wal",
  "parking_lot",
  "proptest",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

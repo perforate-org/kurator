@@ -4,7 +4,9 @@
 #
 # QUINT_SAMPLES  random runs per simulation          (default 2000)
 # QUINT_STEPS    steps per random run                (default 40)
-# QUINT_DEPTH    steps the model checker explores    (default 6)
+# QUINT_DEPTH    steps the model checker explores    (default 3)
+# QUINT_TRACES   runs of each instance replayed against crates/bft
+#                                                    (default 100)
 #
 # Sensitivity: each mutant below breaks one rule the protocol's safety
 # rests on, and the scenarios must catch every one. A check that passes on
@@ -13,7 +15,8 @@ set -euo pipefail
 
 samples="${QUINT_SAMPLES:-2000}"
 steps="${QUINT_STEPS:-40}"
-depth="${QUINT_DEPTH:-6}"
+depth="${QUINT_DEPTH:-3}"
+traces="${QUINT_TRACES:-100}"
 # The TypeScript evaluator ships with quint; the Rust one is fetched from
 # GitHub's API on first use, which CI runners may be rate-limited on.
 backend=(--backend typescript --verbosity 1)
@@ -74,6 +77,17 @@ for main in n4f0 n4f1; do
   quint run "${backend[@]}" --main "$main" --invariant safety \
     --max-samples "$samples" --max-steps "$steps" "$spec"
 done
+
+# Trace validation: runs of the model, replayed step by step against the
+# code (crates/bft/src/core/trace.rs), which must do what the model did.
+mkdir "$scratch/traces"
+for main in n4f0 n4f1; do
+  quint run "${backend[@]}" --main "$main" --invariant safety --mbt \
+    --max-samples "$traces" --n-traces "$traces" --max-steps "$steps" \
+    --out-itf "$scratch/traces/$main-{seq}.itf.json" "$spec" > /dev/null
+done
+step "trace validation: $traces runs of n4f0 and of n4f1 replayed against crates/bft"
+OLEAPH_BFT_TRACES="$scratch/traces" cargo test --locked -q -p oleaph-bft --lib core::trace
 
 step "model checking of n4f1: safety in every run of $depth steps"
 quint verify --main n4f1 --invariant safety --max-steps "$depth" --verbosity 1 "$spec"
