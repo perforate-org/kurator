@@ -73,9 +73,9 @@ module bft {
   /// `Timeout`: `voter` gives up on `view`, knowing `high`.
   type Timeout = { voter: str, view: View, high: QC }
 
-  /// `TimeoutCertificate`: a quorum gave up on `view`; the newest
-  /// certificate any of them knew is from `high`.
-  type TC = { view: View, high: View }
+  /// `TimeoutCertificate`: a quorum gave up on `view`; `high` is the
+  /// newest certificate any of them knew, which it carries.
+  type TC = { view: View, high: QC }
 
   type MaybeTC = NoTC | Entered(TC)
 
@@ -91,7 +91,7 @@ module bft {
     voted: View,
     // The newest certificate it knows. Durable.
     lock: QC,
-    // The last view it proposed in.
+    // The last view it proposed in. Durable.
     proposed: View,
     // The certificate it entered its view with, if the view before timed
     // out.
@@ -144,18 +144,18 @@ module bft {
     votes.map(v => { view: v.view, block: v.block }).filter(q => certified(q)).union(Set(GenesisQC))
 
   /// Whether a quorum's timeouts of `tc.view` make a certificate whose
-  /// newest known certificate is from `tc.high`: one of them knew `high`,
-  /// and with the others that knew no newer one they are a quorum.
+  /// newest known certificate is `tc.high`: one of them knew `high`, and
+  /// with the others that knew no newer one they are a quorum.
   def timeoutCertified(tc: TC): bool = and {
-    timeouts.exists(t => t.view == tc.view and t.high.view == tc.high),
-    timeouts.filter(t => t.view == tc.view and t.high.view <= tc.high)
+    timeouts.exists(t => t.view == tc.view and t.high == tc.high),
+    timeouts.filter(t => t.view == tc.view and t.high.view <= tc.high.view)
             .map(t => t.voter)
             .size() >= Quorum,
   }
 
   /// Every timeout certificate that the timeouts so far make.
   def tcs: Set[TC] =
-    timeouts.map(t => { view: t.view, high: t.high.view }).filter(tc => timeoutCertified(tc))
+    timeouts.map(t => { view: t.view, high: t.high }).filter(tc => timeoutCertified(tc))
 
   /// The model's `Proposal::verify`: the leader of the block's view
   /// proposed it, and the block extends a certificate from the view right
@@ -174,7 +174,7 @@ module bft {
   pure def justified(b: Block, timeout: MaybeTC): bool = {
     val afterTimeout = match timeout {
       | NoTC => false
-      | Entered(tc) => tc.view + 1 == b.view and b.justify >= tc.high
+      | Entered(tc) => tc.view + 1 == b.view and b.justify >= tc.high.view
     }
     b.view == b.justify + 1 or afterTimeout
   }
@@ -202,7 +202,8 @@ module bft {
     if (q.view + 1 > s.view) enter(learned, q.view + 1, NoTC) else learned
   }
 
-  /// `Core::timed_out`: leaves the view that `tc` ends.
+  /// `Core::timed_out`, after it observes `tc.high`: leaves the view that
+  /// `tc` ends.
   pure def timedOut(s: Replica, tc: TC): Replica =
     if (tc.view + 1 > s.view) enter(s, tc.view + 1, Entered(tc)) else s
 
@@ -292,14 +293,17 @@ module bft {
 
   /// `Core::on_proposal`: learns the block's certificate, which may move it
   /// to a view it leads and so propose there, then the timeout certificate
-  /// with it, which may do the same, then votes if it may, for the next
-  /// leader.
+  /// with it and the certificate that carries, which may do the same, then
+  /// votes if it may, for the next leader.
   action receiveProposal(r: str, p: Proposal): bool = {
     val b = blocks.get(p.block)
     val learned = leadIn(r, observe(replicas.get(r), { view: b.justify, block: b.parent }), now)
     val skipped = match p.timeout {
       | NoTC => learned
-      | Entered(tc) => leadIn(r, timedOut(learned._1, tc), learned._2)
+      | Entered(tc) => {
+        val high = leadIn(r, observe(learned._1, tc.high), learned._2)
+        leadIn(r, timedOut(high._1, tc), high._2)
+      }
     }
     val s = skipped._1
     val w = skipped._2
@@ -339,49 +343,45 @@ module bft {
   /// the view.
   action collectTimeouts(r: str, tc: TC): bool = {
     val s = replicas.get(r)
-    // The newest certificate in the timeouts. A view certifies one block,
-    // so every timeout that names its view names the same certificate.
-    val top = timeouts.filter(t => t.view == tc.view and t.high.view == tc.high)
-                      .fold(GenesisQC, (_, t) => t.high)
     all {
       tc.view == s.view,
       // Its own timeout of the view, the last it sent, counts too.
-      timeouts.forall(t => (t.voter == r and t.view == tc.view) implies t.high.view <= tc.high),
+      timeouts.forall(t => (t.voter == r and t.view == tc.view) implies t.high.view <= tc.high.view),
       {
-        // It learns the timeouts' certificate first, which may move it to
-        // a view it leads.
-        val learned = leadIn(r, observe(s, top), now)
+        // It learns the timeouts' newest certificate first, which may move
+        // it to a view it leads.
+        val learned = leadIn(r, observe(s, tc.high), now)
         settle(r, timedOut(learned._1, tc), learned._2, Set())
       },
     }
   }
 
-  /// `Message::Skip`: a timeout certificate from another replica ends its
-  /// view, without the timeouts in it.
+  /// `Message::Skip`: a timeout certificate from another replica teaches
+  /// it the newest certificate the timeouts knew, which may move it to a
+  /// view it leads, and ends its view.
   action receiveSkip(r: str, tc: TC): bool = {
-    val s = timedOut(replicas.get(r), tc)
+    val learned = leadIn(r, observe(replicas.get(r), tc.high), now)
+    val s = timedOut(learned._1, tc)
     all {
       s != replicas.get(r),
-      settle(r, s, now, Set()),
+      settle(r, s, learned._2, Set()),
     }
   }
 
   /// `Core::recover`, then `Event::Start`: a crash forgets everything but
   /// what the journal keeps, and the replica starts again in the view
   /// after its lock's or the last it voted or gave up in, whichever is
-  /// later, and does not propose in a view it voted in.
+  /// later, and does not propose again in a view it proposed in.
   action crash(r: str): bool = {
     val s = replicas.get(r)
     val restarted = {
       ...s,
       view: max(s.lock.view + 1, s.voted),
-      proposed: s.voted,
       entered: NoTC,
     }
-    all {
-      restarted != s,
-      settle(r, restarted, now, Set()),
-    }
+    // It may change nothing the model keeps: what it forgets, the code
+    // keeps in memory only.
+    settle(r, restarted, now, Set())
   }
 
   // ------------------------------------------------------------------
@@ -555,15 +555,11 @@ module bft {
     noVoteAfterTimeout,
     oneCertificatePerView,
     lockIsCertified,
+    proposesOnce,
   }
 
   /// A correct leader proposes one block in a view at most, crashes or
-  /// not. The code breaks this today (`crashedLeaderProposesAgainTest`):
-  /// it takes the last view it voted in for the last it proposed in, and a
-  /// leader whose own proposal is unjustified proposes without voting. No
-  /// fork follows, since every correct replica still votes once in a view,
-  /// but a correct leader signs two blocks of one view, which is what a
-  /// faulty one is caught by.
+  /// not: two blocks of one view are what a faulty leader is caught by.
   val proposesOnce: bool = not(equivocated)
 
   // ------------------------------------------------------------------
@@ -608,8 +604,8 @@ module n4f1 {
     LeaderOf = Leaders,
   ).*
 
-  pure val GaveUp1: TC = { view: 1, high: 0 }
-  pure val GaveUp2: TC = { view: 2, high: 0 }
+  pure val GaveUp1: TC = { view: 1, high: GenesisQC }
+  pure val GaveUp2: TC = { view: 2, high: GenesisQC }
 
   /// The faulty n4 proposes two blocks in view 2 and votes for both; n1
   /// votes for one, n2 for the other. One faulty vote and one correct one
@@ -705,11 +701,11 @@ module n4f0 {
       .then(timeout("n1"))
       .then(timeout("n3"))
       .then(timeout("n4"))
-      .then(collectTimeouts("n4", { view: 1, high: 0 }))
+      .then(collectTimeouts("n4", { view: 1, high: GenesisQC }))
       .expect(replicas.get("n4").view == 2)
-      .expect(proposals.contains({ block: 2, timeout: Entered({ view: 1, high: 0 }) }))
+      .expect(proposals.contains({ block: 2, timeout: Entered({ view: 1, high: GenesisQC }) }))
       .expect(proposals.forall(p => valid(p)))
-      .then(receiveProposal("n1", { block: 2, timeout: Entered({ view: 1, high: 0 }) }))
+      .then(receiveProposal("n1", { block: 2, timeout: Entered({ view: 1, high: GenesisQC }) }))
       .expect(votes.contains({ voter: "n1", view: 2, block: 2 }))
 
   /// n3 knows view 2's certificate; n1, n2 and n4 know only view 1's and
@@ -728,30 +724,29 @@ module n4f0 {
       .then(timeout("n1"))
       .then(timeout("n2"))
       .then(timeout("n4"))
-      .then(collectTimeouts("n1", { view: 2, high: 1 }))
-      .then(collectTimeouts("n2", { view: 2, high: 1 }))
-      .then(collectTimeouts("n4", { view: 2, high: 1 }))
+      .then(collectTimeouts("n1", { view: 2, high: { view: 1, block: 1 } }))
+      .then(collectTimeouts("n2", { view: 2, high: { view: 1, block: 1 } }))
+      .then(collectTimeouts("n4", { view: 2, high: { view: 1, block: 1 } }))
       .then(timeout("n1"))
       .then(timeout("n2"))
       .then(timeout("n4"))
-      .then(collectTimeouts("n4", { view: 3, high: 1 }))
-      .expect(proposals.contains({ block: 4, timeout: Entered({ view: 3, high: 1 }) }))
-      .then(receiveProposal("n3", { block: 4, timeout: Entered({ view: 3, high: 1 }) }))
+      .then(collectTimeouts("n4", { view: 3, high: { view: 1, block: 1 } }))
+      .expect(proposals.contains({ block: 4, timeout: Entered({ view: 3, high: { view: 1, block: 1 } }) }))
+      .then(receiveProposal("n3", { block: 4, timeout: Entered({ view: 3, high: { view: 1, block: 1 } }) }))
       .expect(replicas.get("n3").view == 4 and not(votes.exists(v => v.voter == "n3" and v.view == 4)))
 
   /// n4 misses everything of views 1 to 3 but a `Skip` of view 3, whose
-  /// timeouts knew view 1's certificate. It leads view 4 and proposes on
-  /// the newest certificate it knows, genesis, which the timeout
-  /// certificate does not justify: everyone rejects the block and view 4
-  /// times out. Safe, but a view lost: the code's `Skip` carries the
-  /// timeouts' views and not their certificates, so n4 cannot catch up.
-  run skippedLeaderProposesUnjustifiedTest =
+  /// timeouts knew view 1's certificate, which the `Skip` carries. It
+  /// learns it, leads view 4 and proposes on it, which the timeout
+  /// certificate justifies: the others vote for it.
+  run skippedLeaderProposesJustifiedTest =
     skippedLeaderProposes
-      .expect(unjustifiedProposal)
-      .then(receiveProposal("n1", { block: 4, timeout: Entered({ view: 3, high: 1 }) }))
-      .fail()
+      .expect(not(unjustifiedProposal))
+      .expect(replicas.get("n4").lock == { view: 1, block: 1 })
+      .then(receiveProposal("n1", { block: 4, timeout: Entered({ view: 3, high: { view: 1, block: 1 } }) }))
+      .expect(votes.contains({ voter: "n1", view: 4, block: 4 }))
 
-  /// The run of `skippedLeaderProposesUnjustifiedTest` up to n4's proposal.
+  /// The run of `skippedLeaderProposesJustifiedTest` up to n4's proposal.
   run skippedLeaderProposes =
     init
       .then(receiveProposal("n1", { block: 1, timeout: NoTC }))
@@ -762,21 +757,23 @@ module n4f0 {
       .then(timeout("n1"))
       .then(timeout("n2"))
       .then(timeout("n3"))
-      .then(collectTimeouts("n1", { view: 2, high: 1 }))
-      .then(collectTimeouts("n2", { view: 2, high: 1 }))
-      .then(collectTimeouts("n3", { view: 2, high: 1 }))
+      .then(collectTimeouts("n1", { view: 2, high: { view: 1, block: 1 } }))
+      .then(collectTimeouts("n2", { view: 2, high: { view: 1, block: 1 } }))
+      .then(collectTimeouts("n3", { view: 2, high: { view: 1, block: 1 } }))
       .then(timeout("n1"))
       .then(timeout("n2"))
       .then(timeout("n3"))
-      .then(receiveSkip("n4", { view: 3, high: 1 }))
+      .then(receiveSkip("n4", { view: 3, high: { view: 1, block: 1 } }))
 
-  /// n4, after its unjustified proposal of view 4, crashes, restarts in
-  /// view 1 (it never voted), and on the same `Skip` proposes view 4 again.
-  run crashedLeaderProposesAgainTest =
+  /// n4, after its proposal of view 4, crashes and restarts in view 4,
+  /// which the journal says it proposed in: it does not propose there
+  /// again, and the same `Skip` changes nothing.
+  run crashedLeaderProposesOnceTest =
     skippedLeaderProposes
       .then(crash("n4"))
-      .then(receiveSkip("n4", { view: 3, high: 1 }))
-      .expect(not(proposesOnce) and safety)
+      .expect(replicas.get("n4").view == 4 and proposesOnce and safety)
+      .then(receiveSkip("n4", { view: 3, high: { view: 1, block: 1 } }))
+      .fail()
 
   /// A replica that gave up on a view does not vote in it.
   run noVoteAfterGivingUpTest =

@@ -75,7 +75,7 @@ impl Tc {
     fn read(tc: &Value) -> Self {
         Self {
             view: int(&tc["view"]),
-            high: int(&tc["high"]),
+            high: Qc::read(&tc["high"]),
         }
     }
 

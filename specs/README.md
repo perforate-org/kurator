@@ -41,9 +41,8 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 - `noVoteAfterTimeout`: 正しいレプリカは諦めたビューで投票しない。
 - `oneCertificatePerView`: 1 ビューで証明されるブロックは高々 1 つ。
 - `lockIsCertified`: ロック(知っている最新の証明書)は本物で、ビューはその先にある。
-
-`proposesOnce`(正しいリーダーは、クラッシュしても 1 ビューで 1 回しか提案しない)は
-`safety` から分けてある。今の実装はこれを破るため(下の「見つかったこと」)。
+- `proposesOnce`: 正しいリーダーは、クラッシュしても 1 ビューで 1 回しか提案しない
+  (2 つ目は故障の証拠になる)。
 
 ### 保証しないこと
 
@@ -78,8 +77,8 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 | `n4f0::twoChainCommitsTest` | 2 ビュー続けて証明されると最初のブロックだけ確定する |
 | `n4f0::timeoutStartsTheNextViewTest` | タイムアウト証明書で次のビューに進み、その提案に投票できる |
 | `n4f0::lockRefusesAnOlderBranchTest` | ロックが古い枝への投票を拒む |
-| `n4f0::skippedLeaderProposesUnjustifiedTest` | 下の「見つかったこと」 |
-| `n4f0::crashedLeaderProposesAgainTest` | 下の「見つかったこと」(`proposesOnce` が破れる) |
+| `n4f0::skippedLeaderProposesJustifiedTest` | `Skip` で入ったリーダーは、TC が運ぶ証明書の上に正当な提案を出す(下の「見つかったこと」) |
+| `n4f0::crashedLeaderProposesOnceTest` | 提案したリーダーはクラッシュしても同じビューで提案し直さない(同上) |
 | `n4f0::noVoteAfterGivingUpTest` | 諦めたビューでは投票しない |
 | `n4f1::oneFaultCannotCertifyAForkTest` | 故障 1 台の二重提案はどちらも証明されない |
 | `n4f1::crashKeepsTheVoteTest` | クラッシュ後も同じビューで二度投票しない |
@@ -98,7 +97,12 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 | quorum of 2f | 定足数を `n - f` から `n - f - 1` にする |
 | one-chain commit | 証明されたブロック自身を確定する |
 | crash forgets the vote | 復旧時に投票済みビューを忘れる |
-| timeout certificate ignores high | タイムアウト証明書付き提案の high 検査を外す |
+| crash forgets the proposal | 復旧時に提案済みビューを忘れる |
+| skip carries no certificate | `Skip` の受け手が TC の運ぶ証明書を学ばない |
+
+タイムアウト証明書付き提案の high 検査(`b.justify >= tc.high.view`)を外す変種は置かない。
+受け手は投票の前に TC が運ぶ証明書を学ぶので、ロック検査が同じブロックを拒み、どの
+シナリオでも区別できないため(実装の `Proposal::verify` には多重の防御として残してある)。
 
 ランダムシミュレーションだけでは、たとえばロック検査を外した変種の反例は 3000 本では
 出なかった。そのためシナリオで攻撃の筋を固定して検出している。
@@ -121,24 +125,21 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
   一連鎖で確定する、タイムアウトで投票済みにしない)は、600 本 × 60 ステップの再生で
   すべて食い違いとして検出された。
 
-### 見つかったこと
+### 見つかったこと(直した)
 
 `Skip` で次のビューに入ったリーダーは、タイムアウト証明書の high(署名者が知っていた
-最新の証明書のビュー)だけを受け取り、その証明書自体は受け取らない。自分のロックが
-それより古いと、出した提案は全員に `Unjustified` で拒まれ、そのビューは必ず
-タイムアウトする(`skippedLeaderProposesUnjustifiedTest`)。安全性は崩れないが、
-メッセージが落ちる状況ではビューが 1 つ無駄になる。Jolteon のようにタイムアウト証明書に
-最新の証明書そのものを載せるか、ロックが high より古いリーダーは提案せずに `Fetch`
-する、で直せる。
+最新の証明書のビュー)だけを受け取り、証明書そのものは受け取っていなかった。そのため
+自分のロックがそれより古いと、出した提案は全員に `Unjustified` で拒まれ、そのビューは
+必ずタイムアウトしていた。今はタイムアウト証明書が最新の証明書そのものを運び
+(Jolteon 方式)、受け取ったレプリカはそれを学んでから次のビューに入る
+(`skippedLeaderProposesJustifiedTest`)。
 
-さらに、そのリーダーがクラッシュすると同じビューでもう一度、別のブロックを提案する
-(`crashedLeaderProposesAgainTest`、トレースの再生で見つかった)。`Core::recover` は
-「最後に投票したビュー」を「最後に提案したビュー」の代わりに使うが、不当な自分の提案には
-投票しないので、提案したことが記録に残らないため。各レプリカは 1 ビュー 1 票を守るので
-分岐は起きないが、正しい運営者が二重提案の証拠を残すことになる(スラッシングの対象)。
-どちらも BFT 側で直す予定(タイムアウト証明書に証明書を載せる、提案したビューを
-ジャーナルに書く)。直ったら両シナリオの期待値を反転し、`proposesOnce` を `safety` に
-戻す。
+さらに、そのリーダーはクラッシュすると同じビューでもう一度、別のブロックを提案していた
+(トレースの再生で見つかった)。`Core::recover` が「最後に投票したビュー」を「最後に
+提案したビュー」の代わりに使っていて、不当な自分の提案には投票しないので、提案したことが
+残らなかったため。分岐は起きないが、正しい運営者が二重提案の証拠を残すことになる。今は
+提案したビューもジャーナルの `Safety` に書き、提案を送る前に永続化している
+(`crashedLeaderProposesOnceTest`、`proposesOnce` は `safety` に戻した)。
 
 ### インスタンス
 
