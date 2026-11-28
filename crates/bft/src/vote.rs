@@ -69,21 +69,6 @@ fn statement(domain: Domain, view: View, block: BlockId) -> Vec<u8> {
     .concat()
 }
 
-/// Checks that `signature` is `signer`'s, on `message`.
-pub(crate) fn check(
-    committee: &Committee,
-    signer: NodeId,
-    message: &[u8],
-    signature: &Signature,
-) -> Result<(), Rejection> {
-    let key = committee.key(signer).ok_or(Rejection::Stranger(signer))?;
-    if key.verify(message, signature) {
-        Ok(())
-    } else {
-        Err(Rejection::Forged(signer))
-    }
-}
-
 /// A replica's vote for a block in a view. An honest replica votes once
 /// in a view at most.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +122,7 @@ impl Vote {
     /// When the voter is not a member or the signature is not theirs.
     pub fn verify(&self, committee: &Committee, domain: Domain) -> Result<(), Rejection> {
         let message = statement(domain, self.view, self.block);
-        check(committee, self.voter, &message, &self.signature)
+        committee.check(self.voter, &message, &self.signature)
     }
 
     pub(crate) fn into_signature(self) -> Signature {
@@ -199,7 +184,7 @@ impl Certificate {
         let message = statement(domain, self.view, self.block);
         self.signatures
             .iter()
-            .try_for_each(|(signer, signature)| check(committee, *signer, &message, signature))
+            .try_for_each(|(signer, signature)| committee.check(*signer, &message, signature))
     }
 }
 

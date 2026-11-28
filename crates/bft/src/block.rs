@@ -7,11 +7,11 @@ use oleaph_codec::{DecodeError, Reader};
 use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
 
-use crate::committee::{Committee, Domain};
+use crate::committee::{ChangeCertificate, Committee, Domain};
 use crate::rejection::Rejection;
 use crate::timeout::TimeoutCertificate;
 use crate::view::View;
-use crate::vote::{BlockId, Justify, check};
+use crate::vote::{BlockId, Justify};
 use crate::wire::{
     put_commands, put_node, put_signature, put_view, read_commands, read_node, read_signature,
     read_view,
@@ -98,6 +98,60 @@ impl Block {
         let view = read_view(reader)?;
         let justify = Justify::decode(reader)?;
         Ok(Self::new(view, justify, read_commands(reader)?))
+    }
+}
+
+/// What one command of a block asks: a command for the shard, or the
+/// change of committee that ends the epoch.
+///
+/// It encodes as a tag byte, then the shard command's bytes as they are,
+/// or the change certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Order {
+    /// The bytes of a command for the shard above, which decides what
+    /// they mean.
+    Command(Vec<u8>),
+    /// A committee change, which ends the epoch at the block that holds
+    /// it once the committee admits it.
+    Change(ChangeCertificate),
+}
+
+const COMMAND: u8 = 0;
+const CHANGE: u8 = 1;
+
+impl Order {
+    /// Its bytes, as a block holds them.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Command(bytes) => [&[COMMAND], bytes.as_slice()].concat(),
+            Self::Change(certificate) => {
+                let mut out = vec![CHANGE];
+                // Writing to a vector does not fail, and a committee
+                // holds fewer members than a `u32` counts.
+                let _written = certificate.encode(&mut out);
+                out
+            }
+        }
+    }
+
+    /// The order `bytes` encode.
+    ///
+    /// # Errors
+    ///
+    /// When they encode none: a faulty leader proposed them.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        match reader.read::<u8>()? {
+            COMMAND => Ok(Self::Command(reader.rest().to_vec())),
+            CHANGE => {
+                let certificate = ChangeCertificate::decode(&mut reader)?;
+                reader.finish()?;
+                Ok(Self::Change(certificate))
+            }
+            other => Err(DecodeError::Tag(other)),
+        }
     }
 }
 
@@ -195,7 +249,7 @@ impl Proposal {
             return Err(Rejection::NotLeader(self.proposer, view));
         }
         let message = statement(domain, self.block.id);
-        check(committee, self.proposer, &message, &self.signature)?;
+        committee.check(self.proposer, &message, &self.signature)?;
         let extends = self.block.justify.view();
         let after_timeout = self
             .timeout
@@ -251,6 +305,47 @@ impl Proposal {
             proposer: read_node(reader)?,
             signature: read_signature(reader)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod orders {
+    use oleaph_codec::DecodeError;
+    use proptest::prelude::*;
+
+    use super::Order;
+    use crate::fixture::change_to;
+
+    #[test]
+    fn an_order_is_a_command_or_a_change() {
+        let change = Order::Change(change_to(1, &[1, 2, 3]));
+        assert_eq!(
+            Order::decode(&change.encode()),
+            Ok(change.clone()),
+            "change"
+        );
+        let mut longer = change.encode();
+        longer.push(0);
+        assert_eq!(
+            Order::decode(&longer),
+            Err(DecodeError::Trailing),
+            "trailing"
+        );
+        assert_eq!(Order::decode(&[7, 1]), Err(DecodeError::Tag(7)), "unknown");
+        assert!(Order::decode(&[]).is_err(), "empty");
+    }
+
+    proptest! {
+        #[test]
+        fn commands_round_trip(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let order = Order::Command(bytes);
+            prop_assert_eq!(Order::decode(&order.encode()), Ok(order));
+        }
+
+        #[test]
+        fn decoding_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let _decoded = Order::decode(&bytes);
+        }
     }
 }
 

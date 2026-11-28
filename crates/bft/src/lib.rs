@@ -59,18 +59,18 @@ mod view;
 mod vote;
 mod wire;
 
-pub use block::{Block, Proposal};
+pub use block::{Block, Order, Proposal};
 pub use checkpoint::{
     Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Share, StateRoot,
 };
-pub use committee::{Committee, Domain};
+pub use committee::{Change, ChangeCertificate, Committee, Domain, Endorsement};
 pub use core::{Config, Core, Event};
 pub use message::Message;
 pub use rejection::Rejection;
 pub use replica::{Host, Journal, Ledger, Replica, Settled, Txn};
 pub use step::{Act, Effects, Recovered, Safety, Step, Timer, To};
 pub use timeout::{Timeout, TimeoutCertificate};
-pub use view::View;
+pub use view::{Epoch, View};
 pub use vote::{BlockId, Certificate, Justify, Vote};
 
 /// What the tests share: four members with keys from their ids, in one
@@ -81,7 +81,8 @@ mod fixture {
     use oleaph_crypto::{Algorithm, SigningKey};
 
     use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
-    use crate::committee::{Committee, Domain};
+    use crate::committee::{Change, ChangeCertificate, Committee, Domain, Endorsement};
+    use crate::view::Epoch;
 
     /// The domain every test signs in.
     pub(crate) const DOMAIN: Domain = Domain::new([1; 32]);
@@ -97,6 +98,20 @@ mod fixture {
             .map(|node| (NodeId::new(node), key(node).verifying_key()))
             .collect();
         Committee::new(members).unwrap()
+    }
+
+    /// The change to a committee of `members` in `epoch`, which nodes 1
+    /// to 3 endorse in [`DOMAIN`].
+    pub(crate) fn change_to(epoch: u64, members: &[u64]) -> ChangeCertificate {
+        let keys = members
+            .iter()
+            .map(|node| (NodeId::new(*node), key(*node).verifying_key()))
+            .collect();
+        let change = Change::new(Epoch::new(epoch), Committee::new(keys).unwrap());
+        let endorsements: Vec<_> = (1..=3)
+            .map(|node| Endorsement::sign(&key(node), DOMAIN, NodeId::new(node), &change))
+            .collect();
+        ChangeCertificate::new(change, endorsements)
     }
 
     /// A certificate for `checkpoint`, signed by nodes 1 to 3.

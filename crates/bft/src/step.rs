@@ -7,6 +7,7 @@ use oleaph_shard::ShardState;
 
 use crate::block::{Block, prune};
 use crate::checkpoint::{CheckpointCertificate, Height};
+use crate::committee::{ChangeCertificate, Domain};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::view::View;
@@ -124,6 +125,11 @@ pub trait Act {
     /// decides the same blocks in the same order.
     fn decide(&mut self, block: &Block);
 
+    /// Learns that `block`, the last block decided, ends the epoch: the
+    /// state there is a checkpoint, wherever the interval falls, for the
+    /// committee to certify and the next one to start from.
+    fn end(&mut self, block: BlockId);
+
     /// Learns that a quorum certified `certificate`'s checkpoint, which
     /// the state it applied must match at that height.
     fn certify(&mut self, certificate: &CheckpointCertificate);
@@ -141,6 +147,7 @@ pub trait Act {
 pub struct Effects {
     messages: Vec<Outgoing>,
     decided: Vec<Block>,
+    end: Option<BlockId>,
     certified: Option<CheckpointCertificate>,
     timer: Option<Timer>,
     rejected: Option<Rejection>,
@@ -153,6 +160,12 @@ impl Effects {
 
     pub(crate) fn decide(&mut self, block: Block) {
         self.decided.push(block);
+    }
+
+    /// Has the driver take the state at `block`, which ends the epoch.
+    /// An epoch ends at one block, so the first one stands.
+    pub(crate) fn end(&mut self, block: BlockId) {
+        let _first: &mut BlockId = self.end.get_or_insert(block);
     }
 
     /// Hands on `certificate`. Should a step certify two checkpoints,
@@ -179,11 +192,15 @@ impl Effects {
     }
 
     /// Has `act` carry the effects out: apply the decided blocks, in
-    /// order, then take in the certified checkpoint, then send the
-    /// messages, in order, then arm the timer.
+    /// order, then take the state at the end of the epoch, then take in
+    /// the certified checkpoint, then send the messages, in order, then
+    /// arm the timer.
     pub fn carry_out(&self, act: &mut impl Act) {
         for block in &self.decided {
             act.decide(block);
+        }
+        if let Some(block) = self.end {
+            act.end(block);
         }
         if let Some(certificate) = &self.certified {
             act.certify(certificate);
@@ -239,7 +256,17 @@ pub(crate) enum Record {
     /// The newest checkpoint the committee certified that the replica
     /// keeps the state of: the blocks it decided up to it are forgotten.
     Checkpoint(CheckpointCertificate),
+    /// The committee change that started the epoch the replica decides
+    /// in, and that epoch's domain. Once it changes, all the replica knew
+    /// of the epoch before but its checkpoint is forgotten.
+    Epoch(ChangeCertificate, Domain),
 }
+
+/// Blocks by their ids.
+pub(crate) type Blocks = BTreeMap<BlockId, Block>;
+
+/// The change that started an epoch, and the epoch's domain.
+pub(crate) type Era = (ChangeCertificate, Domain);
 
 /// What a replica remembers from before it stopped: enough to rejoin
 /// without voting twice in a view, voting against its lock or deciding a
@@ -252,6 +279,9 @@ pub struct Recovered {
     /// The newest certified checkpoint it keeps the state of, and that
     /// state once the journal loaded it.
     base: Option<(CheckpointCertificate, Option<ShardState>)>,
+    /// The change that started the epoch it decides in, with that epoch's
+    /// domain, unless it decides in the charter's.
+    era: Option<Era>,
 }
 
 impl Default for Recovered {
@@ -262,6 +292,7 @@ impl Default for Recovered {
             blocks: BTreeMap::new(),
             committed: (BlockId::GENESIS, View::GENESIS),
             base: None,
+            era: None,
         }
     }
 }
@@ -279,7 +310,27 @@ impl Recovered {
                 prune(&mut self.blocks, certificate.block(), certificate.view());
                 self.base = Some((certificate, None));
             }
+            // Written again with every compaction in the epoch, so only a
+            // new change starts afresh. It follows the checkpoint that
+            // ended the epoch before, whose state it starts from.
+            Record::Epoch(change, domain) => {
+                let era = Some((change, domain));
+                if self.era != era {
+                    *self = Self {
+                        era,
+                        base: self.base.take(),
+                        ..Self::default()
+                    };
+                }
+            }
         }
+    }
+
+    /// The change that started the epoch it decides in, with that epoch's
+    /// domain, if it is not the charter's.
+    #[cfg(test)]
+    pub(crate) const fn era(&self) -> Option<&Era> {
+        self.era.as_ref()
     }
 
     /// The certified checkpoint whose state the replica kept, if any.
@@ -333,12 +384,19 @@ impl Recovered {
         self,
     ) -> (
         Safety,
-        BTreeMap<BlockId, Block>,
+        Blocks,
         (BlockId, View),
         Option<CheckpointCertificate>,
+        Option<Era>,
     ) {
         let certified = self.base.map(|(certificate, _)| certificate);
-        (self.safety, self.blocks, self.committed, certified)
+        (
+            self.safety,
+            self.blocks,
+            self.committed,
+            certified,
+            self.era,
+        )
     }
 }
 
@@ -366,7 +424,10 @@ impl Step {
     pub fn safety(&self) -> Option<&Safety> {
         self.records.iter().find_map(|record| match record {
             Record::Safety(safety) => Some(safety),
-            Record::Block(_) | Record::Committed(..) | Record::Checkpoint(_) => None,
+            Record::Block(_)
+            | Record::Committed(..)
+            | Record::Checkpoint(_)
+            | Record::Epoch(..) => None,
         })
     }
 

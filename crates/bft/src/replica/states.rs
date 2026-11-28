@@ -52,7 +52,6 @@ impl Snapshot {
     }
 
     /// The checkpoint that names it.
-    #[cfg(test)]
     pub(crate) const fn checkpoint(&self) -> &Checkpoint {
         &self.checkpoint
     }

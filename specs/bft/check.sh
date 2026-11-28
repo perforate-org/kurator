@@ -20,7 +20,11 @@ done
 
 # No mutant drops `b.justify >= tc.high.view` from `justified`: a replica
 # observes the certificate a timeout certificate carries before it votes,
-# so its lock rule refuses the same blocks, and no scenario can tell.
+# so its lock rule refuses the same blocks, and no scenario can tell. Nor
+# does one drop `not(ended(s))` from what `observe` decides: a block after
+# the end is decided only by a certificate of its child's child, which
+# needs votes cast after the end, and within MaxView no replica still in
+# the epoch is left to cast them.
 mutants=(
   "no lock rule|s/    b\.justify >= s\.lock\.view,/    true,/"
   "votes twice in a view|s/    s\.voted < b\.view,/    true,/"
@@ -29,6 +33,9 @@ mutants=(
   "crash forgets the vote|s/      entered: NoTC,\n    \}\n    \/\/ It may/      entered: NoTC,\n      voted: 0,\n    }\n    \/\/ It may/"
   "crash forgets the proposal|s/      entered: NoTC,\n    \}\n    \/\/ It may/      entered: NoTC,\n      proposed: 0,\n    }\n    \/\/ It may/"
   "skip carries no certificate|s/leadIn\(r, observe\(replicas\.get\(r\), tc\.high\), now\)/(replicas.get(r), now)/"
+  "decides past the change|s/      if \(end == -1\) chain\n      else chain\.filter\(b => blocks\.get\(b\)\.height <= blocks\.get\(end\)\.height\)/      chain/"
+  "votes after the end|s/    not\(ended\(s\)\),\n    b\.view == s\.view,/    b.view == s.view,/"
+  "proposes after the end|s/    not\(ended\(s\)\),\n    LeaderOf/    LeaderOf/"
 )
 check_mutants "$spec" n4f0 n4f1 n4f2
 
@@ -46,7 +53,16 @@ for main in n4f0 n4f1; do
     --max-samples "$traces" --n-traces "$traces" --max-steps "$steps" \
     --out-itf "$scratch/traces/$main-{seq}.itf.json" "$spec" > /dev/null
 done
-step "trace validation: $traces runs of n4f0 and of n4f1 replayed against crates/bft"
+# Random runs seldom end the epoch, so one that does is sought: a run that
+# breaks `not(endedEverywhere)` is one in which every correct replica ends
+# it, some of them steps before the others.
+if quint run "${backend[@]}" --main n4f1 --invariant 'not(endedEverywhere)' --mbt \
+  --max-samples "$samples" --max-steps "$steps" \
+  --out-itf "$scratch/traces/n4f1-ended.itf.json" "$spec" > /dev/null; then
+  echo "no run of n4f1 ends the epoch"
+  exit 1
+fi
+step "trace validation: $traces runs of n4f0 and of n4f1, and one that ends the epoch, replayed against crates/bft"
 OLEAPH_BFT_TRACES="$scratch/traces" cargo test --locked -q -p oleaph-bft --lib core::trace
 
 step "model checking of n4f1: safety in every run of $depth steps"

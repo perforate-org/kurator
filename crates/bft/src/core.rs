@@ -9,14 +9,15 @@ use std::{cmp, mem};
 use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
 
-use crate::block::{Block, Proposal, prune};
+use crate::block::{Block, Order, Proposal, prune};
 use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
-use crate::committee::{Committee, Domain};
+use crate::committee::{ChangeCertificate, Committee, Domain};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::step::Recovered;
 use crate::step::{Effects, Record, Safety, Step, Timer, To};
 use crate::timeout::{Timeout, TimeoutCertificate};
+use crate::view::Epoch;
 use crate::view::View;
 use crate::vote::{BlockId, Certificate, Justify, Vote};
 
@@ -31,7 +32,9 @@ pub struct Config {
 
 impl Config {
     /// Replica `node`, which votes with `key`, in `committee`, signing in
-    /// `domain`.
+    /// `domain`: the charter's committee and domain, in the first epoch.
+    /// A replica that ran before goes on in the epoch its journal
+    /// recorded.
     #[must_use]
     pub const fn new(node: NodeId, key: SigningKey, committee: Committee, domain: Domain) -> Self {
         Self {
@@ -86,9 +89,18 @@ pub enum Event {
 ///   next view, is certified: a quorum then holds a lock on it, and no
 ///   later certificate can extend anything else. Committing a block
 ///   commits its ancestors with it.
+/// - **Epochs.** A committee hands the shard on to the next by deciding
+///   a block holding a [`ChangeCertificate`] it admits. It decides
+///   nothing after that block, and votes no more: once it certifies the
+///   checkpoint at that block, the next committee starts from that state,
+///   in the first view and a domain of its own.
 #[derive(Debug)]
 pub struct Core {
+    /// Who it is, and the committee and domain of the epoch it decides
+    /// in.
     config: Config,
+    /// The change that started that epoch, unless it is the charter's.
+    era: Option<ChangeCertificate>,
     /// The view this replica is in.
     view: View,
     /// The last view it voted or gave up in.
@@ -122,6 +134,11 @@ pub struct Core {
     base: Option<CheckpointCertificate>,
     /// The checkpoint shares it collects.
     tally: Tally,
+    /// The last checkpoint share it signed.
+    shared: Option<Share>,
+    /// The change it decided, which ends the epoch at the last decided
+    /// block.
+    ending: Option<ChangeCertificate>,
     /// Blocks the event in hand taught it, to write down.
     learned: Vec<Block>,
     /// What the event in hand asks of the driver.
@@ -141,9 +158,10 @@ impl Core {
     /// proposed in.
     #[must_use]
     pub fn recover(config: Config, recovered: Recovered) -> Self {
-        let (safety, blocks, committed, certified) = recovered.into_parts();
-        Self {
+        let (safety, blocks, committed, certified, era) = recovered.into_parts();
+        let mut core = Self {
             config,
+            era: None,
             view: View::GENESIS,
             voted: safety.voted(),
             lock: safety.lock().clone(),
@@ -159,9 +177,39 @@ impl Core {
             pending: Vec::new(),
             base: certified.clone(),
             tally: Tally::since(certified),
+            shared: None,
+            ending: None,
             learned: Vec::new(),
             effects: Effects::default(),
+        };
+        if let Some((change, domain)) = era {
+            core.adopt(change, domain);
         }
+        // The decided chain stops at a change, so only the last decided
+        // block can hold one.
+        core.ending = core
+            .blocks
+            .get(&core.committed.0)
+            .and_then(|block| core.change_in(block));
+        core
+    }
+
+    /// Moves on to the epoch that `change` starts, in `domain`.
+    fn adopt(&mut self, change: ChangeCertificate, domain: Domain) {
+        self.config.committee = change.committee().clone();
+        self.config.domain = domain;
+        self.era = Some(change);
+    }
+
+    /// The first change in `block` that the committee can make, if any.
+    fn change_in(&self, block: &Block) -> Option<ChangeCertificate> {
+        block
+            .commands()
+            .iter()
+            .find_map(|command| match Order::decode(command) {
+                Ok(Order::Change(change)) => self.admits(&change).is_ok().then_some(change),
+                Ok(_) | Err(_) => None,
+            })
     }
 
     /// Moves on to `certificate`, a certified checkpoint whose state the
@@ -191,11 +239,52 @@ impl Core {
     pub(crate) fn compact(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
         prune(&mut self.blocks, certificate.block(), certificate.view());
         self.base = Some(certificate.clone());
-        let mut records: Vec<Record> = self.blocks.values().cloned().map(Record::Block).collect();
+        // The epoch first, written again so that the journal can forget
+        // the record that started it.
+        let era = self.era.clone();
+        let mut records: Vec<Record> = era
+            .map(|change| Record::Epoch(change, self.config.domain))
+            .into_iter()
+            .collect();
+        records.extend(self.blocks.values().cloned().map(Record::Block));
         records.push(Record::Safety(self.safety()));
         records.push(Record::Committed(self.committed.0, self.committed.1));
         records.push(Record::Checkpoint(certificate.clone()));
         records
+    }
+
+    /// Starts the epoch that the change it decided begins, once the
+    /// committee certified `certificate`, the checkpoint at the block that
+    /// holds the change, and returns the records the journal needs, as
+    /// [`Core::compact`] does. The commands it holds wait for the new
+    /// committee. It returns nothing, and changes nothing, unless the
+    /// checkpoint is that one.
+    pub(crate) fn succeed(&mut self, certificate: &CheckpointCertificate) -> Option<Vec<Record>> {
+        if certificate.block() != self.committed.0 {
+            return None;
+        }
+        let change = self.ending.take()?;
+        let domain = self.config.domain.next(&change);
+        self.adopt(change, domain);
+        self.view = View::GENESIS;
+        self.voted = View::GENESIS;
+        self.lock = Justify::Genesis;
+        self.proposed = View::GENESIS;
+        self.entered = None;
+        self.failures = 0;
+        self.committed = (BlockId::GENESIS, View::GENESIS);
+        self.blocks.clear();
+        self.wanted.clear();
+        self.certified.clear();
+        self.votes.clear();
+        self.timeouts.clear();
+        self.tally = Tally::since(Some(certificate.clone()));
+        self.shared = None;
+        // The checkpoint first: the state the new epoch starts from must
+        // be on record before the epoch is.
+        let mut records = vec![Record::Checkpoint(certificate.clone())];
+        records.extend(self.compact(certificate));
+        Some(records)
     }
 
     /// What it must not forget across a crash.
@@ -233,6 +322,44 @@ impl Core {
         self.committed.0
     }
 
+    /// The epoch it decides in.
+    #[must_use]
+    pub fn epoch(&self) -> Epoch {
+        self.era
+            .as_ref()
+            .map_or(Epoch::FIRST, ChangeCertificate::epoch)
+    }
+
+    /// The change it decided, which ends its epoch, if it did.
+    #[cfg(test)]
+    pub(crate) const fn ending(&self) -> Option<&ChangeCertificate> {
+        self.ending.as_ref()
+    }
+
+    /// Checks that the committee can make `change`.
+    ///
+    /// # Errors
+    ///
+    /// As [`ChangeCertificate::verify`], for the committee of its epoch.
+    pub fn admits(&self, change: &ChangeCertificate) -> Result<(), Rejection> {
+        change.verify(&self.config.committee, self.config.domain, self.epoch())
+    }
+
+    /// Checks that the committee made `change`, a change it decided: the
+    /// one that ends its epoch.
+    ///
+    /// # Errors
+    ///
+    /// As [`Core::admits`], or [`Rejection::Ended`] for a change decided
+    /// after the one that ends the epoch.
+    pub(crate) fn made(&self, change: &ChangeCertificate) -> Result<(), Rejection> {
+        if self.ending.as_ref() == Some(change) {
+            return Ok(());
+        }
+        self.admits(change)
+            .and_then(|()| Err(Rejection::Ended(self.epoch())))
+    }
+
     /// Handles `event`.
     pub fn handle(&mut self, event: Event) -> Step {
         let before = (self.voted, self.proposed, self.lock.view());
@@ -261,6 +388,7 @@ impl Core {
                 );
                 self.effects
                     .send(To::Others, Message::Checkpoint(share.clone()));
+                self.shared = Some(share.clone());
                 self.count(share);
                 Ok(())
             }
@@ -283,6 +411,18 @@ impl Core {
     }
 
     fn start(&mut self) {
+        // Stopped at the end of its epoch: it takes the state there again,
+        // and moves on if the committee certified it already.
+        if self.ending.is_some() {
+            self.effects.end(self.committed.0);
+            if let Some(base) = self
+                .base
+                .clone()
+                .filter(|base| base.block() == self.committed.0)
+            {
+                self.effects.certify(base);
+            }
+        }
         if self.view == View::GENESIS
             && let Some(first) = self.lock.view().next()
         {
@@ -394,8 +534,9 @@ impl Core {
     /// idle for them. It offers on entering a view, on voting and on each
     /// command submitted.
     fn offer(&mut self, tip: BlockId) {
-        if self.view == View::GENESIS {
-            // Not started: it enters its first view, and offers, then.
+        if self.view == View::GENESIS || self.ending.is_some() {
+            // Not started: it enters its first view, and offers, then. Or
+            // ended: the next committee decides the commands.
             return;
         }
         if self.leads() && self.proposed < self.view {
@@ -445,6 +586,13 @@ impl Core {
         if let Some(certificate) = &self.entered {
             self.effects
                 .send(To::Others, Message::Skip(certificate.clone()));
+        }
+        // No later checkpoint makes up for a lost share of the one that
+        // ends the epoch. Its timeout shows the others its lock, which
+        // decides the change for those that missed it.
+        if let (Some(_), Some(share)) = (&self.ending, &self.shared) {
+            self.effects
+                .send(To::Others, Message::Checkpoint(share.clone()));
         }
         self.wait(self.failures.saturating_add(1));
         // Its own timeout is valid: it signed it.
@@ -512,19 +660,21 @@ impl Core {
         let found = self.certified.iter().rev().find_map(|(view, id)| {
             let child = self.blocks.get(id).filter(|child| child.view() == *view)?;
             let parent = child.justify().view();
-            child
-                .view()
-                .follows(parent)
-                .then(|| (child.parent(), parent))
+            child.view().follows(parent).then(|| child.parent())
         });
-        if let Some((target, view)) = found {
-            self.decide(target, view);
+        if let Some(target) = found {
+            self.decide(target);
         }
     }
 
-    /// Decides `target`, from `view`, and its undecided ancestors, oldest
-    /// first, once it has all their bodies.
-    fn decide(&mut self, target: BlockId, view: View) {
+    /// Decides `target` and its undecided ancestors, oldest first, once it
+    /// has all their bodies.
+    /// A change ends the chain: it decides nothing after the first block
+    /// that holds one the committee admits.
+    fn decide(&mut self, target: BlockId) {
+        if self.ending.is_some() {
+            return;
+        }
         let mut chain = Vec::new();
         let mut id = target;
         while id != self.committed.0 {
@@ -538,20 +688,32 @@ impl Core {
                 // can certify.
                 return;
             }
-            chain.push(id);
             id = block.parent();
+            chain.push(block.clone());
         }
-        self.committed = (target, view);
-        self.certified = view
+        let mut decided = Vec::new();
+        for block in chain.into_iter().rev() {
+            self.ending = self.change_in(&block);
+            if self.ending.is_some() {
+                self.effects.end(block.id());
+                decided.push(block);
+                break;
+            }
+            decided.push(block);
+        }
+        let Some(last) = decided.last() else {
+            return;
+        };
+        self.committed = (last.id(), last.view());
+        self.certified = last
+            .view()
             .next()
             .map(|next| self.certified.split_off(&next))
             .unwrap_or_default();
-        for decided in chain.iter().rev() {
-            if let Some(block) = self.blocks.get(decided) {
-                self.pending
-                    .retain(|command| !block.commands().contains(command));
-                self.effects.decide(block.clone());
-            }
+        for block in decided {
+            self.pending
+                .retain(|command| !block.commands().contains(command));
+            self.effects.decide(block);
         }
     }
 
@@ -587,7 +749,7 @@ impl Core {
     /// decided. A leader with neither leaves its view idle, and the view
     /// times out.
     fn propose(&mut self, view: View) {
-        if self.proposed >= view {
+        if self.proposed >= view || self.ending.is_some() {
             return;
         }
         let commands = self.unproposed(self.lock.block());
@@ -692,6 +854,9 @@ impl Core {
     /// extends a certificate from `extends`: in its own view, once, and
     /// not against its lock.
     fn check_vote(&self, view: View, extends: View) -> Result<(), Rejection> {
+        if self.ending.is_some() {
+            return Err(Rejection::Ended(self.epoch()));
+        }
         if view != self.view {
             return Err(Rejection::OtherView(view, self.view));
         }

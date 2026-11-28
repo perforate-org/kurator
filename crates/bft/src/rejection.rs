@@ -2,7 +2,7 @@
 
 use oleaph_consensus::NodeId;
 
-use crate::view::View;
+use crate::view::{Epoch, View};
 
 /// Why a replica ignored what it was sent.
 ///
@@ -57,4 +57,12 @@ pub enum Rejection {
     /// older than one a signer knew, of the second.
     #[error("a timeout certificate showing a certificate of {0} where a signer knew {1}")]
     Outdated(View, View),
+    /// A committee change that starts the first epoch, from the second,
+    /// which is not the one before it.
+    #[error("a change to {0} from {1}")]
+    OtherEpoch(Epoch, Epoch),
+    /// A proposal in an epoch the replica decided the end of: it votes no
+    /// more until the next committee starts.
+    #[error("{0} has ended")]
+    Ended(Epoch),
 }

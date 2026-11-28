@@ -8,7 +8,7 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 | 仕様 | 対象 |
 | --- | --- |
 | `txn/txn.qnt` | シャード横断トランザクションの二相コミット(`crates/storage` の `Prepare`・`Decide`・`KvState::confirm`、`crates/client` の調整役と `Lock::resolve`) |
-| `bft/bft.qnt` | `crates/bft` の合意(`HotStuff-2` / Jolteon 型の二連鎖コミット、ビューごとのリーダー、タイムアウト証明によるビュー切り替え、クラッシュからの復旧) |
+| `bft/bft.qnt` | `crates/bft` の合意(`HotStuff-2` / Jolteon 型の二連鎖コミット、ビューごとのリーダー、タイムアウト証明によるビュー切り替え、クラッシュからの復旧、委員会の変更によるエポックの終わり) |
 
 ## `txn/txn.qnt`
 
@@ -96,6 +96,11 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
   入った時点で必ず提案する(実装は決めることがあるときだけ提案する)。ビューを途中で
   通過するとき(提案の証明書で入り、続けてタイムアウト証明書で次へ進むなど)も、
   実装どおり途中のビューで提案する。
+- モデルが扱うのは 1 エポック。定数 `Changes` のブロックは、委員会が認める委員会の変更
+  (`ChangeCertificate`)を持つ(実装の `Core::change_in`)。それを確定したレプリカは
+  エポックを終え、その先は確定せず、投票も提案もしない。次の委員会は新しいドメインで
+  ビュー 1 から始めるので、メンバーの違う同じモデルになる。`n4f1` では故障した n4 の
+  ビュー 2 の 1 つ目のブロック(ブロック 4)が変更を持つ(変更は誰でも転送できる)。
 
 ### 保証すること(`safety`、不変条件)
 
@@ -107,6 +112,8 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 - `lockIsCertified`: ロック(知っている最新の証明書)は本物で、ビューはその先にある。
 - `proposesOnce`: 正しいリーダーは、クラッシュしても 1 ビューで 1 回しか提案しない
   (2 つ目は故障の証拠になる)。
+- `endsAtOneBlock`: エポックを終えた正しいレプリカは、みな同じブロックで終える。
+- `nothingAfterTheEnd`: 正しいレプリカは、エポックを終えるブロックより先を確定しない。
 
 ### 保証しないこと
 
@@ -125,7 +132,8 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 - 落とした情報: バイト列・署名検証・ハッシュ(署名は偽造不能、ブロック ID は衝突しない
   と仮定)、コマンドの中身と「決めることがないときは提案しない」規則、`Fetch`/`Deliver`
   (本体は常に手に入る)、タイマーの長さ、チェックポイント(P4a)と状態同期(P4b)、
-  委員会の変更。
+  エポックの終わりのチェックポイントの認証と次の委員会への切り替え、変更の署名の検証
+  (`Changes` のブロックは認められる変更を持つと仮定)。
 
 ### 抽象化が実装より広い(=安全側の)ところ
 
@@ -147,6 +155,8 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 | `n4f1::oneFaultCannotCertifyAForkTest` | 故障 1 台の二重提案はどちらも証明されない |
 | `n4f1::crashKeepsTheVoteTest` | クラッシュ後も同じビューで二度投票しない |
 | `n4f1::forkAfterTimeoutsTest` | 証明済みの分岐に届き、タイムアウト後の提案が確定する |
+| `n4f1::aChangeEndsTheChainTest` | 変更を持つブロックの子孫が証明されて一度に確定するとき、変更のブロックで止まる |
+| `n4f1::anEndedReplicaVotesNoMoreTest` | エポックを終えたレプリカは投票せず、率いるビューに入っても提案しない |
 | `n4f2::forkDecidedTest` | 故障 2 台(許容量超え)なら `agreement` が破れる |
 
 ### 感度分析
@@ -163,10 +173,17 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 | crash forgets the vote | 復旧時に投票済みビューを忘れる |
 | crash forgets the proposal | 復旧時に提案済みビューを忘れる |
 | skip carries no certificate | `Skip` の受け手が TC の運ぶ証明書を学ばない |
+| decides past the change | 変更を持つブロックの先まで確定する |
+| votes after the end | エポックを終えても投票する |
+| proposes after the end | エポックを終えても提案する |
 
 タイムアウト証明書付き提案の high 検査(`b.justify >= tc.high.view`)を外す変種は置かない。
 受け手は投票の前に TC が運ぶ証明書を学ぶので、ロック検査が同じブロックを拒み、どの
 シナリオでも区別できないため(実装の `Proposal::verify` には多重の防御として残してある)。
+同じく、エポックを終えたレプリカが確定を続けない検査(`observe` の `not(ended(s))`)を外す
+変種も置かない。終わりの先のブロックを確定するには、その孫の証明書、つまり終わった後に
+投じられる票が要るが、ビュー 5 までには、まだエポックにいて票を投じられるレプリカが残らない
+ため(実装の `Core::decide` は同じ理由で早く戻る)。
 
 ランダムシミュレーションだけでは、たとえばロック検査を外した変種の反例は 3000 本では
 出なかった。そのためシナリオで攻撃の筋を固定して検出している。
@@ -182,6 +199,10 @@ Rust の Kani 証明(`#[cfg(kani)]`)がコード片の全域性と往復を証�
 
 - `cargo test` は `specs/bft/traces/` の固定トレースを再生する。`specs/check.sh` は毎回
   新しいランダムな実行(既定で各インスタンス 100 本 × 40 ステップ)を作って再生する。
+- ランダムな実行がエポックを終えることはまれなので、`check.sh` は `not(endedEverywhere)` を
+  破る実行(正しいレプリカ全員がエポックを終え、先に終えたものはその後も動く)を探して
+  再生する。固定トレースの `n4f1-ended.itf.json` もその 1 本。再生側は `Changes` の
+  ブロック(故障リーダーのもの)に、委員会が認める変更を入れる。
 - 照合を作る過程で仕様を実装に合わせた点: 即時の提案、実装のリーダー表、クラッシュで
   忘れる票とタイムアウト、自分の提案も検証して不当なら投票しないこと、途中で通過する
   ビューでの提案、自分のタイムアウトも TC に数えること。
@@ -231,4 +252,6 @@ specs/check.sh
 ```sh
 quint run --backend typescript --main n4f1 --invariant safety --mbt \
   --max-samples 1 --max-steps 40 --out-itf traces/n4f1-0.itf.json bft.qnt
+quint run --backend typescript --main n4f1 --invariant 'not(endedEverywhere)' --mbt \
+  --max-samples 50000 --max-steps 40 --out-itf traces/n4f1-ended.itf.json bft.qnt
 ```

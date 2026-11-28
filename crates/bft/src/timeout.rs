@@ -11,7 +11,7 @@ use oleaph_crypto::{Signature, SigningKey};
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
 use crate::view::View;
-use crate::vote::{Justify, check};
+use crate::vote::Justify;
 use crate::wire::{
     put_count, put_node, put_signature, put_view, read_count, read_node, read_signature, read_view,
 };
@@ -88,7 +88,7 @@ impl Timeout {
     /// signature not theirs.
     pub fn verify(&self, committee: &Committee, domain: Domain) -> Result<(), Rejection> {
         let message = statement(domain, self.view, self.high.view());
-        check(committee, self.voter, &message, &self.signature)?;
+        committee.check(self.voter, &message, &self.signature)?;
         self.high.verify(committee, domain)
     }
 
@@ -195,12 +195,7 @@ impl TimeoutCertificate {
         self.entries
             .iter()
             .try_for_each(|(signer, (high, signature))| {
-                check(
-                    committee,
-                    *signer,
-                    &statement(domain, self.view, *high),
-                    signature,
-                )
+                committee.check(*signer, &statement(domain, self.view, *high), signature)
             })?;
         let known = self
             .entries
