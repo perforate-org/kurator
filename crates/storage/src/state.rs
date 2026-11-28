@@ -15,7 +15,7 @@ use crate::command::Command;
 use crate::outcome::{Abort, Outcome, Unreadable};
 use crate::span::Span;
 use crate::two_phase::{Collect, Decide, Decided, Decision, Prepare};
-use crate::txn::{ReadSet, Transaction};
+use crate::txn::{ReadOnly, ReadSet, Transaction};
 use crate::version::{Retention, Version};
 
 pub use self::footprint::Footprint;
@@ -225,6 +225,25 @@ impl KvState {
     /// Whether `transaction` may commit now: its read version is readable,
     /// nothing it read was written after it, and no prepared transaction
     /// holds what it touches.
+    /// Confirms `read` on this state, the state it read, at its read
+    /// version or any later one: its read version, at which it is
+    /// serializable.
+    ///
+    /// Any later state will do. A transaction across shards whose effects
+    /// it could have seen elsewhere was prepared here before the read
+    /// version, so it is still locked here, or decided after the read
+    /// version.
+    ///
+    /// # Errors
+    ///
+    /// The [`Abort`] that applying it as a [`Transaction`] would give: a
+    /// write after the read version touched what it read, a prepared
+    /// transaction holds a key it read, or the read version is forgotten.
+    pub fn confirm(&self, read: &ReadOnly) -> Result<Version, Abort> {
+        let transaction = read.transaction();
+        self.check(transaction).map(|()| transaction.read_at())
+    }
+
     fn check(&self, transaction: &Transaction) -> Result<(), Abort> {
         self.validate(transaction)?;
         self.locks

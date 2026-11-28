@@ -25,6 +25,9 @@
 //!   replica checks, as it applies that entry, whether a write after the
 //!   read version touched what the transaction read, so every replica
 //!   commits or aborts it alike and the committed ones are serializable.
+//!   A transaction that only read logs nothing; the replica it read from
+//!   confirms it with the same check, since a transaction across shards
+//!   may have committed elsewhere and still be locked here.
 //!   A version is the index of the entry that made it.
 //!
 //! - **Membership changes.** A new node joins as a learner, catches up

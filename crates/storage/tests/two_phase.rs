@@ -3,6 +3,7 @@
 //! decision is made once however often it is told.
 #![expect(
     clippy::unwrap_used,
+    clippy::panic,
     reason = "test code: a failure should panic with context"
 )]
 
@@ -11,8 +12,8 @@ use std::ops::Bound::{Excluded, Included};
 use criterion as _;
 use oleaph_codec::Reader;
 use oleaph_storage::{
-    Abort, Collect, Command, Deadline, Decide, Decided, Decision, Draft, KvState, NamespaceId,
-    Outcome, Prepare, Primary, TxnId, Version, WriteBatch,
+    Abort, Collect, Command, Deadline, Decide, Decided, Decision, Draft, Finished, KvState,
+    NamespaceId, Outcome, Prepare, Primary, Transaction, TxnId, Version, WriteBatch,
 };
 
 /// `key` of the default namespace, as a primary.
@@ -40,6 +41,14 @@ fn part(state: &KvState, id: u128) -> Prepare {
     let _a = draft.get(state, b"a").unwrap();
     draft.put("b", "3");
     draft.into_prepare(TxnId::new(id), primary("a"), DEADLINE)
+}
+
+/// The transaction `draft` writes.
+fn writes(draft: Draft) -> Transaction {
+    match draft.finish() {
+        Finished::Writes(transaction) => transaction,
+        Finished::Reads(read) => panic!("it writes: {read:?}"),
+    }
 }
 
 fn decide(id: u128, decision: Decision) -> Command {
@@ -109,7 +118,7 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
     let mut reader = Draft::new(state.version());
     let _b = reader.get(&state, b"b").unwrap();
     reader.put("c", "4");
-    let reads_written = Command::Txn(reader.into_transaction().unwrap());
+    let reads_written = Command::Txn(writes(reader));
     assert_eq!(
         state.apply(Version::new(6), reads_written),
         locked("b", 7),
@@ -120,7 +129,7 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
         .range(&state, Excluded(b"a"), Included(b"b"))
         .unwrap();
     scanner.put("c", "4");
-    let scans_written = Command::Txn(scanner.into_transaction().unwrap());
+    let scans_written = Command::Txn(writes(scanner));
     assert_eq!(
         state.apply(Version::new(7), scans_written),
         locked("b", 7),
@@ -129,7 +138,7 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
     let mut sharer = Draft::new(state.version());
     let _a = sharer.get(&state, b"a").unwrap();
     sharer.put("c", "5");
-    let shares_a_read = Command::Txn(sharer.into_transaction().unwrap());
+    let shares_a_read = Command::Txn(writes(sharer));
     assert_eq!(
         state.apply(Version::new(8), shares_a_read),
         Outcome::Committed(Version::new(8)),

@@ -862,6 +862,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oleaph-history"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "oleaph-meta"
 version = "0.0.1"
 dependencies = [
@@ -963,6 +970,7 @@ dependencies = [
  "oleaph-codec",
  "oleaph-consensus",
  "oleaph-crypto",
+ "oleaph-history",
  "oleaph-meta",
  "oleaph-raft",
  "oleaph-shard",

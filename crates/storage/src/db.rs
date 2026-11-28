@@ -18,7 +18,7 @@ use self::core::Core;
 use self::lock::DirLock;
 use crate::batch::WriteBatch;
 use crate::command::Command;
-use crate::draft::{Draft, KeyValue};
+use crate::draft::{Draft, Finished, KeyValue};
 use crate::error::Result;
 use crate::state::KvState;
 use crate::version::Version;
@@ -236,11 +236,11 @@ impl Txn<'_> {
     /// forgotten: then it wrote nothing, and running it again may succeed.
     /// Otherwise as [`Db::write`].
     pub fn commit(self) -> Result<Version> {
-        let read_at = self.draft.read_at();
-        self.draft
-            .into_transaction()
-            .map_or(Ok(read_at), |transaction| {
-                self.db.commit(Command::Txn(transaction))
-            })
+        match self.draft.finish() {
+            Finished::Writes(transaction) => self.db.commit(Command::Txn(transaction)),
+            // A database prepares no part of a transaction across shards,
+            // so a read of one version is serializable at that version.
+            Finished::Reads(read) => Ok(read.read_at()),
+        }
     }
 }
