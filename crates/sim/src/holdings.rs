@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use oleaph_shard::{ShardId, ShardState};
+use oleaph_shard::{NamespaceId, ShardId, ShardState};
 
 /// The state of every shard one node replicates, as it applied them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -18,12 +18,23 @@ impl Holdings {
         )
     }
 
-    /// The newest value of `key`, from the shard whose span holds it.
+    /// The newest value of `key` of the default namespace, from the shard
+    /// whose span holds it.
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        self.get_in(NamespaceId::DEFAULT, key)
+    }
+
+    /// The newest value of `key` of `namespace`, from the shard of the
+    /// namespace whose span holds it.
+    #[must_use]
+    pub fn get_in(&self, namespace: NamespaceId, key: &[u8]) -> Option<&[u8]> {
         self.0
             .values()
-            .find(|state| state.shard().span().contains(key))?
+            .find(|state| {
+                let shard = state.shard();
+                shard.namespace() == namespace && shard.span().contains(key)
+            })?
             .kv()
             .get(key)
     }

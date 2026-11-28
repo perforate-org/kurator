@@ -6,36 +6,52 @@ use std::io::{self, Write};
 use oleaph_codec::{DecodeError, Reader, put_bytes};
 use oleaph_storage::Span;
 
-use crate::id::{Epoch, ShardId};
+use crate::id::{Epoch, NamespaceId, ShardId};
 
-/// A shard as routing sees it: its id, the keys it holds, and its epoch.
+/// A shard as routing sees it: the namespace it belongs to, its id, the
+/// keys of the namespace it holds, and its epoch.
+///
+/// A shard belongs to one namespace for as long as it exists, and both
+/// halves of a split belong to it too.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Shard {
+    namespace: NamespaceId,
     id: ShardId,
     span: Span,
     epoch: Epoch,
 }
 
 impl Shard {
-    /// The shard `id` holding `span` at `epoch`.
+    /// The shard `id` of `namespace` holding `span` at `epoch`.
     #[must_use]
-    pub const fn new(id: ShardId, span: Span, epoch: Epoch) -> Self {
-        Self { id, span, epoch }
+    pub const fn new(namespace: NamespaceId, id: ShardId, span: Span, epoch: Epoch) -> Self {
+        Self {
+            namespace,
+            id,
+            span,
+            epoch,
+        }
     }
 
     /// The shard a new cluster starts with: [`ShardId::FIRST`], holding
-    /// every key, at [`Epoch::ZERO`].
+    /// every key of [`NamespaceId::DEFAULT`], at [`Epoch::ZERO`].
     #[must_use]
     pub const fn first() -> Self {
-        Self::whole(ShardId::FIRST)
+        Self::whole(NamespaceId::DEFAULT, ShardId::FIRST)
     }
 
-    /// Shard `id` holding every key at [`Epoch::ZERO`]: how the first and
-    /// the meta shard start, and how a replica that holds no state yet
-    /// describes its shard.
+    /// Shard `id` holding every key of `namespace` at [`Epoch::ZERO`]: how
+    /// the first shard of a namespace and the meta shard start, and how a
+    /// replica that holds no state yet describes its shard.
     #[must_use]
-    pub const fn whole(id: ShardId) -> Self {
-        Self::new(id, Span::FULL, Epoch::ZERO)
+    pub const fn whole(namespace: NamespaceId, id: ShardId) -> Self {
+        Self::new(namespace, id, Span::FULL, Epoch::ZERO)
+    }
+
+    /// The namespace it belongs to.
+    #[must_use]
+    pub const fn namespace(&self) -> NamespaceId {
+        self.namespace
     }
 
     /// Its id.
@@ -70,18 +86,19 @@ impl Shard {
         let epoch = self.epoch.next()?;
         let (left, right) = self.span.split_at(&split.at)?;
         Some(Halves {
-            left: Self::new(self.id, left, epoch),
-            right: Self::new(split.right, right, epoch),
+            left: Self::new(self.namespace, self.id, left, epoch),
+            right: Self::new(self.namespace, split.right, right, epoch),
         })
     }
 
-    /// Writes the shard as `id u64 | epoch u64 | span`, the span as
-    /// [`Span::encode`] writes it.
+    /// Writes the shard as `namespace u32 | id u64 | epoch u64 | span`,
+    /// the span as [`Span::encode`] writes it.
     ///
     /// # Errors
     ///
     /// When `out` fails or a key is too long for its prefix.
     pub fn encode(&self, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        out.write_all(&self.namespace.get().to_le_bytes())?;
         out.write_all(&self.id.get().to_le_bytes())?;
         out.write_all(&self.epoch.get().to_le_bytes())?;
         self.span.encode(out)
@@ -94,15 +111,20 @@ impl Shard {
     ///
     /// As [`Span::decode`].
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let namespace = NamespaceId::new(reader.read()?);
         let id = ShardId::new(reader.read()?);
         let epoch = Epoch::new(reader.read()?);
-        Ok(Self::new(id, Span::decode(reader)?, epoch))
+        Ok(Self::new(namespace, id, Span::decode(reader)?, epoch))
     }
 }
 
 impl fmt::Display for Shard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {} at {}", self.id, self.span, self.epoch)
+        write!(
+            f,
+            "{} {} at {} in {}",
+            self.id, self.span, self.epoch, self.namespace
+        )
     }
 }
 
@@ -203,7 +225,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{Shard, Split};
-    use crate::id::{Epoch, ShardId};
+    use crate::id::{Epoch, NamespaceId, ShardId};
 
     fn key() -> impl Strategy<Value = Vec<u8>> {
         proptest::collection::vec(any::<u8>(), 0..4)
@@ -211,36 +233,56 @@ mod tests {
 
     fn shards() -> impl Strategy<Value = Shard> {
         (
+            any::<u32>(),
             any::<u64>(),
             any::<u64>(),
             key(),
             proptest::option::of(key()),
         )
-            .prop_filter_map("empty", |(id, epoch, start, end)| {
+            .prop_filter_map("empty", |(namespace, id, epoch, start, end)| {
                 let span = Span::new(start, end.map_or(End::Unbounded, End::Before))?;
-                Some(Shard::new(ShardId::new(id), span, Epoch::new(epoch)))
+                let namespace = NamespaceId::new(namespace);
+                Some(Shard::new(
+                    namespace,
+                    ShardId::new(id),
+                    span,
+                    Epoch::new(epoch),
+                ))
             })
     }
 
     #[test]
     fn a_split_applies_once_and_only_inside() {
         let first = Shard::first();
-        assert_eq!(first.to_string(), "s1 [, ..) at e0", "display");
+        assert_eq!(first.to_string(), "s1 [, ..) at e0 in ns0", "display");
         let split = Split::new("m", ShardId::new(2), Epoch::ZERO);
         let halves = first.split(&split).unwrap();
-        assert_eq!(halves.left().to_string(), "s1 [, m) at e1", "left");
-        assert_eq!(halves.right().to_string(), "s2 [m, ..) at e1", "right");
+        assert_eq!(halves.left().to_string(), "s1 [, m) at e1 in ns0", "left");
+        assert_eq!(
+            halves.right().to_string(),
+            "s2 [m, ..) at e1 in ns0",
+            "right"
+        );
+        let other = NamespaceId::new(3);
+        let apart = Shard::whole(other, ShardId::new(9)).split(&split).unwrap();
+        assert_eq!(apart.left().namespace(), other, "the left half stays");
+        assert_eq!(apart.right().namespace(), other, "so does the right");
         assert_eq!(halves.left().split(&split), None, "a later epoch");
         let own = Split::new("m", ShardId::FIRST, Epoch::ZERO);
         assert_eq!(first.split(&own), None, "its own id");
         let at_start = Split::new("", ShardId::new(2), Epoch::ZERO);
         assert_eq!(first.split(&at_start), None, "at the start");
-        let last = Shard::new(ShardId::FIRST, Span::FULL, Epoch::new(u64::MAX));
+        let last = Shard::new(
+            NamespaceId::DEFAULT,
+            ShardId::FIRST,
+            Span::FULL,
+            Epoch::new(u64::MAX),
+        );
         let at_last = Split::new("m", ShardId::new(2), Epoch::new(u64::MAX));
         assert_eq!(last.split(&at_last), None, "no next epoch");
         let into_meta = Split::new("m", ShardId::META, Epoch::ZERO);
         assert_eq!(first.split(&into_meta), None, "the meta shard's id");
-        let meta = Shard::whole(ShardId::META);
+        let meta = Shard::whole(NamespaceId::DEFAULT, ShardId::META);
         assert_eq!(meta.split(&split), None, "the meta shard");
     }
 
@@ -283,6 +325,8 @@ mod tests {
             if let Some(halves) = shard.split(&split) {
                 let (left, right) = (halves.left(), halves.right());
                 prop_assert_eq!(left.id(), shard.id(), "left keeps the id");
+                prop_assert_eq!(left.namespace(), shard.namespace(), "left stays");
+                prop_assert_eq!(right.namespace(), shard.namespace(), "right stays");
                 prop_assert_eq!(left.epoch(), right.epoch(), "same epoch");
                 prop_assert!(left.epoch() > shard.epoch(), "a later epoch");
                 prop_assert_eq!(

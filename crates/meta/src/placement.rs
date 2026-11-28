@@ -138,23 +138,33 @@ pub(crate) mod tests {
 
     use oleaph_codec::DecodeError;
     use oleaph_consensus::NodeId;
-    use oleaph_shard::{Epoch, Shard, ShardId};
+    use oleaph_shard::{Epoch, NamespaceId, Shard, ShardId};
     use oleaph_storage::{End, Span};
     use proptest::prelude::*;
 
     use super::Placement;
 
-    pub(crate) fn placements() -> impl Strategy<Value = Placement> {
+    pub(crate) fn shards() -> impl Strategy<Value = Shard> {
         (
+            any::<u32>(),
             any::<u64>(),
             any::<u64>(),
             proptest::collection::vec(any::<u8>(), 0..4),
+        )
+            .prop_map(|(namespace, id, epoch, start)| {
+                let span = Span::new(start, End::Unbounded).unwrap();
+                let namespace = NamespaceId::new(namespace);
+                Shard::new(namespace, ShardId::new(id), span, Epoch::new(epoch))
+            })
+    }
+
+    pub(crate) fn placements() -> impl Strategy<Value = Placement> {
+        (
+            shards(),
             proptest::collection::btree_set(any::<u64>(), 0..6),
             any::<u64>(),
         )
-            .prop_map(|(id, epoch, start, replicas, membership)| {
-                let span = Span::new(start, End::Unbounded).unwrap();
-                let shard = Shard::new(ShardId::new(id), span, Epoch::new(epoch));
+            .prop_map(|(shard, replicas, membership)| {
                 let replicas = replicas.into_iter().map(NodeId::new).collect();
                 Placement::new(shard, replicas, membership)
             })
@@ -162,7 +172,12 @@ pub(crate) mod tests {
 
     fn placement(epoch: u64, membership: u64) -> Placement {
         let replicas = BTreeSet::from([NodeId::new(1), NodeId::new(2)]);
-        let shard = Shard::new(ShardId::FIRST, Span::FULL, Epoch::new(epoch));
+        let shard = Shard::new(
+            NamespaceId::DEFAULT,
+            ShardId::FIRST,
+            Span::FULL,
+            Epoch::new(epoch),
+        );
         Placement::new(shard, replicas, membership)
     }
 
@@ -176,12 +191,21 @@ pub(crate) mod tests {
         assert!(!placement(1, 4).supersedes(&base), "an earlier membership");
         assert_eq!(
             base.shard(),
-            &Shard::new(ShardId::FIRST, Span::FULL, Epoch::new(1)),
+            &Shard::new(
+                NamespaceId::DEFAULT,
+                ShardId::FIRST,
+                Span::FULL,
+                Epoch::new(1)
+            ),
             "shard"
         );
         assert_eq!(base.replicas().len(), 2, "replicas");
         assert_eq!(base.id(), ShardId::FIRST, "id");
-        assert_eq!(base.to_string(), "s1 [, ..) at e1 on n1 n2", "display");
+        assert_eq!(
+            base.to_string(),
+            "s1 [, ..) at e1 in ns0 on n1 n2",
+            "display"
+        );
     }
 
     #[test]

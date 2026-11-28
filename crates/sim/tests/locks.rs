@@ -12,6 +12,7 @@ use std::time::Duration;
 use oleaph_client::{Collected, Collector, Coordinator, Transacted};
 use oleaph_consensus::Transaction as _;
 use oleaph_raft::openraft::AsyncRuntime as _;
+use oleaph_shard::NamespaceId;
 use oleaph_sim::{Cluster, Faults, Holdings, Outcome};
 use oleaph_storage::WriteBatch;
 use openraft_rt_sim::SimRuntime;
@@ -36,7 +37,7 @@ async fn cluster(seed: u64) -> Cluster {
 
 /// Writes `value` to `a` and `z` in one transaction across both shards.
 async fn put_both(cluster: &Cluster, value: &str) -> Transacted {
-    let mut txn = Coordinator::new(cluster).begin();
+    let mut txn = Coordinator::new(cluster).begin(NamespaceId::DEFAULT);
     for key in [b"a", b"z"] {
         if txn.put(key, value).await.is_err() {
             return Transacted::Rejected;
@@ -47,7 +48,7 @@ async fn put_both(cluster: &Cluster, value: &str) -> Transacted {
 
 /// Reads `a` and writes `z` in one transaction across both shards.
 async fn read_a_write_z(cluster: &Cluster) -> Transacted {
-    let mut txn = Coordinator::new(cluster).begin();
+    let mut txn = Coordinator::new(cluster).begin(NamespaceId::DEFAULT);
     if txn.get(b"a").await.is_err() || txn.put(b"z", "3").await.is_err() {
         return Transacted::Rejected;
     }
@@ -57,7 +58,7 @@ async fn read_a_write_z(cluster: &Cluster) -> Transacted {
 /// Starts a transaction that writes `a` and `z` and gives up on it as
 /// soon as it prepared its first part, on the first shard.
 async fn abandon(cluster: &Cluster) {
-    let mut txn = Coordinator::new(cluster).begin();
+    let mut txn = Coordinator::new(cluster).begin(NamespaceId::DEFAULT);
     txn.put(b"a", "2").await.expect("a");
     txn.put(b"z", "2").await.expect("z");
     let abandoned = SimRuntime::timeout(Duration::from_millis(1), txn.commit()).await;

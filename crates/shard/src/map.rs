@@ -5,13 +5,15 @@ use std::ops::Bound;
 
 use oleaph_storage::End;
 
-use crate::id::ShardId;
+use crate::id::{NamespaceId, ShardId};
 use crate::shard::{Halves, Shard};
 
-/// Shards that hold every key exactly once, ordered by their spans.
+/// Shards that hold every key of one namespace exactly once, ordered by
+/// their spans.
 ///
 /// A map changes only by whole splits, so it never has a gap or an
-/// overlap: [`ShardMap::locate`] always finds a shard.
+/// overlap: [`ShardMap::locate`] always finds a shard. Each namespace has
+/// a map of its own.
 ///
 /// ```
 /// use oleaph_shard::{Epoch, Shard, ShardId, ShardMap, Split};
@@ -45,7 +47,8 @@ impl Default for ShardMap {
 }
 
 impl ShardMap {
-    /// The map of a new cluster: [`Shard::first`] holds every key.
+    /// The map of a new cluster: [`Shard::first`] holds every key of
+    /// [`NamespaceId::DEFAULT`].
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -54,12 +57,20 @@ impl ShardMap {
         }
     }
 
-    /// The map of `shards`, or `None` unless they hold every key exactly
-    /// once and their ids differ. The meta shard is in no map.
+    /// The map of `namespace` made of those of `shards` that belong to it,
+    /// or `None` unless they hold every key of it exactly once and their
+    /// ids differ. Shards of other namespaces are passed over; the meta
+    /// shard is in no map.
     #[must_use]
-    pub fn from_shards(shards: impl IntoIterator<Item = Shard>) -> Option<Self> {
+    pub fn from_shards(
+        namespace: NamespaceId,
+        shards: impl IntoIterator<Item = Shard>,
+    ) -> Option<Self> {
         let mut by_start: BTreeMap<Vec<u8>, Shard> = BTreeMap::new();
-        for shard in shards {
+        let own = shards
+            .into_iter()
+            .filter(|shard| shard.namespace() == namespace);
+        for shard in own {
             let start = shard.span().start().to_vec();
             if by_start.insert(start, shard).is_some() {
                 return None;
@@ -82,6 +93,12 @@ impl ShardMap {
             first,
             rest: by_start,
         })
+    }
+
+    /// The namespace whose keys the map tiles.
+    #[must_use]
+    pub const fn namespace(&self) -> NamespaceId {
+        self.first.namespace()
     }
 
     /// The shard that holds `key`.
@@ -135,12 +152,14 @@ impl ShardMap {
     /// # Errors
     ///
     /// [`Stale`] when the map does not hold that shard as it was before the
-    /// split: at an earlier epoch, with the span of both halves.
+    /// split: of its namespace, at an earlier epoch, with the span of both
+    /// halves.
     pub fn split(&mut self, halves: &Halves) -> Result<(), Stale> {
         let (left, right) = (halves.left(), halves.right());
         let stale = || Stale(left.id());
         let before = self.get(left.id()).ok_or_else(stale)?;
-        let whole = before.span().start() == left.span().start()
+        let whole = before.namespace() == left.namespace()
+            && before.span().start() == left.span().start()
             && before.span().end() == right.span().end()
             && before.epoch() < left.epoch();
         if !whole || self.get(right.id()).is_some() {
@@ -166,7 +185,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::ShardMap;
-    use crate::id::{Epoch, ShardId};
+    use crate::id::{Epoch, NamespaceId, ShardId};
     use crate::shard::{Shard, Split};
     use oleaph_storage::Span;
 
@@ -227,25 +246,49 @@ mod tests {
             .unwrap();
         assert!(map.split(&reused).is_err(), "an id in use");
         let left = halves.left();
-        let same_epoch = Shard::new(ShardId::FIRST, left.span().clone(), Epoch::ZERO)
-            .split(&Split::new("f", ShardId::new(5), Epoch::ZERO))
-            .unwrap();
+        let same_epoch = Shard::new(
+            NamespaceId::DEFAULT,
+            ShardId::FIRST,
+            left.span().clone(),
+            Epoch::ZERO,
+        )
+        .split(&Split::new("f", ShardId::new(5), Epoch::ZERO))
+        .unwrap();
         assert_eq!(same_epoch.left().epoch(), left.epoch(), "the same epoch");
         assert!(
             map.split(&same_epoch).is_err(),
             "a split of the span the map holds, but not at a later epoch"
         );
-        let moved = Shard::new(ShardId::FIRST, Span::FULL, halves.left().epoch())
-            .split(&Split::new("f", ShardId::new(6), halves.left().epoch()))
-            .unwrap();
+        let moved = Shard::new(
+            NamespaceId::DEFAULT,
+            ShardId::FIRST,
+            Span::FULL,
+            halves.left().epoch(),
+        )
+        .split(&Split::new("f", ShardId::new(6), halves.left().epoch()))
+        .unwrap();
         assert!(
             map.split(&moved).is_err(),
             "a later split of a span the map does not hold"
         );
-        let unknown = Shard::new(ShardId::new(9), halves.right().span().clone(), Epoch::ZERO)
-            .split(&Split::new("x", ShardId::new(10), Epoch::ZERO))
-            .unwrap();
+        let unknown = Shard::new(
+            NamespaceId::DEFAULT,
+            ShardId::new(9),
+            halves.right().span().clone(),
+            Epoch::ZERO,
+        )
+        .split(&Split::new("x", ShardId::new(10), Epoch::ZERO))
+        .unwrap();
         assert!(map.split(&unknown).is_err(), "an unknown shard");
+        let elsewhere = Shard::new(
+            NamespaceId::new(4),
+            ShardId::new(2),
+            halves.right().span().clone(),
+            halves.right().epoch(),
+        )
+        .split(&Split::new("x", ShardId::new(11), halves.right().epoch()))
+        .unwrap();
+        assert!(map.split(&elsewhere).is_err(), "another namespace's shard");
         assert_eq!(map.get(ShardId::new(2)), Some(halves.right()), "by id");
         assert_eq!(map.get(ShardId::new(9)), None, "not there");
     }
@@ -254,35 +297,98 @@ mod tests {
     fn maps_from_shards_must_tile_the_keys() {
         let map = split_at(&[b"f".to_vec(), b"m".to_vec()]);
         let shards: Vec<Shard> = map.iter().cloned().collect();
-        assert_eq!(ShardMap::from_shards(shards.clone()), Some(map), "tiled");
-        assert_eq!(ShardMap::from_shards(Vec::new()), None, "nothing");
         assert_eq!(
-            ShardMap::from_shards(shards[1..].to_vec()),
+            ShardMap::from_shards(NamespaceId::DEFAULT, shards.clone()),
+            Some(map.clone()),
+            "tiled"
+        );
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, Vec::new()),
+            None,
+            "nothing"
+        );
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, shards[1..].to_vec()),
             None,
             "no first"
         );
-        assert_eq!(ShardMap::from_shards(shards[..2].to_vec()), None, "no last");
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, shards[..2].to_vec()),
+            None,
+            "no last"
+        );
         let gap = vec![shards[0].clone(), shards[2].clone()];
-        assert_eq!(ShardMap::from_shards(gap), None, "a gap");
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, gap),
+            None,
+            "a gap"
+        );
         let twice = vec![
             shards[0].clone(),
             shards[1].clone(),
             shards[1].clone(),
             shards[2].clone(),
         ];
-        assert_eq!(ShardMap::from_shards(twice), None, "an overlap");
-        let renamed = Shard::new(shards[0].id(), shards[2].span().clone(), shards[2].epoch());
-        let same_id = vec![shards[0].clone(), shards[1].clone(), renamed];
-        assert_eq!(ShardMap::from_shards(same_id), None, "an id twice");
-        let meta = [Shard::whole(ShardId::META)];
-        assert_eq!(ShardMap::from_shards(meta), None, "the meta shard alone");
-        let mut with_meta = shards.clone();
-        with_meta[1] = Shard::new(ShardId::META, shards[1].span().clone(), shards[1].epoch());
         assert_eq!(
-            ShardMap::from_shards(with_meta),
+            ShardMap::from_shards(NamespaceId::DEFAULT, twice),
+            None,
+            "an overlap"
+        );
+        let renamed = Shard::new(
+            NamespaceId::DEFAULT,
+            shards[0].id(),
+            shards[2].span().clone(),
+            shards[2].epoch(),
+        );
+        let same_id = vec![shards[0].clone(), shards[1].clone(), renamed];
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, same_id),
+            None,
+            "an id twice"
+        );
+        let meta = [Shard::whole(NamespaceId::DEFAULT, ShardId::META)];
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, meta),
+            None,
+            "the meta shard alone"
+        );
+        let mut with_meta = shards.clone();
+        with_meta[1] = Shard::new(
+            NamespaceId::DEFAULT,
+            ShardId::META,
+            shards[1].span().clone(),
+            shards[1].epoch(),
+        );
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, with_meta),
             None,
             "the meta shard inside"
         );
+        let other = NamespaceId::new(2);
+        let mut mixed = shards.clone();
+        mixed[2] = Shard::new(
+            other,
+            shards[2].id(),
+            shards[2].span().clone(),
+            shards[2].epoch(),
+        );
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, mixed.clone()),
+            None,
+            "a shard of another namespace leaves a gap"
+        );
+        assert_eq!(ShardMap::from_shards(other, mixed), None, "nor tiles that");
+        let mut beside = shards;
+        beside.push(Shard::whole(other, ShardId::new(1)));
+        let apart = ShardMap::from_shards(other, beside.clone()).unwrap();
+        assert_eq!(apart.namespace(), other, "a namespace's own map");
+        assert_eq!(apart.iter().count(), 1, "its own shard alone");
+        assert_eq!(
+            ShardMap::from_shards(NamespaceId::DEFAULT, beside),
+            Some(map.clone()),
+            "the others pass over it, even with an id it shares"
+        );
+        assert_eq!(map.namespace(), NamespaceId::DEFAULT, "the default's");
     }
 
     #[test]
@@ -312,7 +418,7 @@ mod tests {
             prop_assert_eq!(holders.len(), 1, "exactly one holder");
             prop_assert_eq!(map.locate(&probe), holders[0], "located");
             let shards: Vec<Shard> = map.iter().cloned().collect();
-            prop_assert_eq!(ShardMap::from_shards(shards), Some(map.clone()), "tiled");
+            prop_assert_eq!(ShardMap::from_shards(NamespaceId::DEFAULT, shards), Some(map.clone()), "tiled");
         }
 
         #[test]

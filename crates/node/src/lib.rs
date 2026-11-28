@@ -13,6 +13,7 @@ pub mod args;
 pub mod charter;
 pub mod console;
 pub mod metrics;
+pub mod namespace;
 pub mod report;
 pub mod secret;
 pub mod session;
@@ -53,6 +54,9 @@ pub enum NodeError {
     /// No node told the client where the shards are.
     #[error("no node answered")]
     Unreached,
+    /// The cluster has no namespace of that name.
+    #[error("there is no namespace {0}")]
+    NoNamespace(oleaph_meta::NamespaceName),
     /// A client's operation failed.
     #[error(transparent)]
     Client(#[from] oleaph_client::Error),
