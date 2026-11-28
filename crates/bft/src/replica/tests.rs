@@ -436,3 +436,47 @@ fn a_replica_far_behind_takes_the_certified_state_from_the_others() {
     let after = cluster.run(again.read(Clone::clone)).unwrap();
     assert_eq!(after, before, "it restarts from the state it took");
 }
+
+/// How many parts of a checkpoint's state `node` asked for, in flight.
+fn wants_from(cluster: &Cluster, node: NodeId) -> usize {
+    cluster
+        .wire
+        .lock()
+        .iter()
+        .filter(|(from, _, message)| *from == node && matches!(message, Message::Want(..)))
+        .count()
+}
+
+#[test]
+fn only_a_replica_behind_the_certified_state_asks_for_it() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let node = NodeId::new(4);
+    let away = cluster.replicas.remove(&node).unwrap();
+    for key in ["a", "b"] {
+        let _put = cluster
+            .run(cluster.replica(1).propose(put(key, "1")))
+            .unwrap();
+    }
+    cluster.pump(2000);
+    cluster.wire.lock().clear();
+    let certified = cluster.replica(1).checkpoint().unwrap();
+
+    // One as far as the checkpoint has nothing to ask.
+    let level = NodeId::new(1);
+    cluster
+        .replica(1)
+        .receive(NodeId::new(2), Message::Certified(certified.clone()));
+    assert_eq!(wants_from(&cluster, level), 0, "level");
+
+    // One behind asks for the manifest, once however often it hears.
+    away.receive(level, Message::Certified(certified.clone()));
+    assert_eq!(wants_from(&cluster, node), 1, "the manifest");
+    away.receive(NodeId::new(2), Message::Certified(certified));
+    assert_eq!(wants_from(&cluster, node), 1, "asked already");
+
+    // An expired view asks again: the answer may have been lost.
+    cluster.wire.lock().clear();
+    let armed = away.host.wakes.lock().last().copied().unwrap();
+    away.expire(armed.0);
+    assert_eq!(wants_from(&cluster, node), 1, "asks again");
+}

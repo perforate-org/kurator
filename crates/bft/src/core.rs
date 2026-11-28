@@ -169,15 +169,17 @@ impl Core {
     /// it, and returns the records the journal needs, as
     /// [`Core::compact`] does. The blocks after it it decides as usual.
     pub(crate) fn rebase(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
-        let view = certificate.view();
-        if view > self.committed.1 {
-            self.committed = (certificate.block(), view);
-            self.certified = view
-                .next()
-                .map(|next| self.certified.split_off(&next))
-                .unwrap_or_default();
-            self.wanted.clear();
-        }
+        self.committed = cmp::max_by_key(
+            self.committed,
+            (certificate.block(), certificate.view()),
+            |(_, view)| *view,
+        );
+        self.certified = self
+            .committed
+            .1
+            .next()
+            .map(|next| self.certified.split_off(&next))
+            .unwrap_or_default();
         let _newer = self.tally.adopt(certificate);
         self.compact(certificate)
     }

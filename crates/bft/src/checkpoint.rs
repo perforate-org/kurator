@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
+use std::ops::Range;
 
 use oleaph_codec::{DecodeError, Reader};
 use oleaph_consensus::NodeId;
@@ -481,6 +482,14 @@ impl Tally {
 /// How large a chunk is, the last one aside.
 pub(crate) const CHUNK: usize = 1 << 20;
 
+/// Where chunk `index` lies in a state `length` bytes long, if it has one
+/// of that index.
+pub(crate) fn span(length: u64, index: u32) -> Option<Range<u64>> {
+    let chunk = u64::try_from(CHUNK).ok()?;
+    let start = u64::from(index).checked_mul(chunk)?;
+    (start < length).then(|| start..start.saturating_add(chunk).min(length))
+}
+
 /// The key derivation context of chunk hashes. Fixed forever.
 const CHUNK_CONTEXT: &str = "oleaph 2026-11 bft state chunk";
 
@@ -556,13 +565,6 @@ impl Manifest {
             .is_some_and(|hash| *hash == chunk_hash(bytes))
     }
 
-    /// Where chunk `index` lies in the encoded state, if it is one.
-    pub(crate) fn span(&self, index: u32) -> Option<std::ops::Range<u64>> {
-        let chunk = u64::try_from(CHUNK).ok()?;
-        let start = u64::from(index).checked_mul(chunk)?;
-        (start < self.length).then(|| start..start.saturating_add(chunk).min(self.length))
-    }
-
     pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&self.length.to_le_bytes())?;
         put_count(out, self.chunks.len())?;
@@ -608,7 +610,7 @@ mod tests {
 
     use super::{
         CHUNK, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Own, Share,
-        StateRoot, Tally, Verdict,
+        StateRoot, Tally, Verdict, span,
     };
     use crate::committee::Domain;
     use crate::fixture::{DOMAIN, certify, committee, key};
@@ -829,5 +831,23 @@ mod tests {
             chunks: manifest.chunks.iter().rev().copied().collect(),
         };
         assert_ne!(reordered.root(), manifest.root(), "the order counts");
+    }
+
+    #[test]
+    fn chunks_span_the_state_and_no_more() {
+        let chunk = u64::try_from(CHUNK).unwrap();
+        assert_eq!(span(chunk + 5, 0), Some(0..chunk), "a whole chunk");
+        assert_eq!(
+            span(chunk + 5, 1),
+            Some(chunk..chunk + 5),
+            "the last, short"
+        );
+        assert_eq!(
+            span(chunk * 2, 1),
+            Some(chunk..chunk * 2),
+            "the last, whole"
+        );
+        assert_eq!(span(chunk * 2, 2), None, "past the end");
+        assert_eq!(span(0, 0), None, "an empty state has none");
     }
 }

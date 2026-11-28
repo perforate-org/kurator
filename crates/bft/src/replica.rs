@@ -107,9 +107,6 @@ struct Inner {
     /// The state at it, as the replica takes it from the others when the
     /// blocks up to it are gone.
     catchup: Option<Catchup>,
-    /// The manifest of the state it last served to a replica catching up,
-    /// so that it hashes the state once for all of its chunks.
-    served: Option<(Height, Manifest)>,
     health: Health,
 }
 
@@ -219,11 +216,9 @@ impl Inner {
     /// may or may not be among those blocks: their waiters learn the
     /// outcome is unknown.
     fn install(&mut self, certificate: &CheckpointCertificate, encoded: &[u8]) {
-        if certificate.height() <= self.ledger.height() || self.health.check().is_err() {
-            return;
-        }
-        // A certified state that does not decode: a quorum of the
-        // committee is faulty, and the replica waits for its own blocks.
+        // A state no further than its own, or one that does not decode: a
+        // quorum of the committee is faulty, and the replica waits for
+        // its own blocks.
         let Ok(snapshot) = self.ledger.restart(certificate, encoded) else {
             return;
         };
@@ -243,23 +238,20 @@ impl Inner {
 
     /// Answers a replica catching up with `part` of the state kept at
     /// `height`, if it still keeps it.
-    fn serve(&mut self, height: Height, part: Part) -> Option<Message> {
-        self.health.check().ok()?;
-        let manifest = match self.served.take() {
-            Some((at, manifest)) if at == height => manifest,
-            _ => self.journal.manifest(height).ok()?,
-        };
-        let answer = match part {
-            Part::Manifest => Some(Message::Manifest(height, manifest.clone())),
+    fn serve(&self, height: Height, part: Part) -> Option<Message> {
+        match part {
+            Part::Manifest => self
+                .journal
+                .manifest(height)
+                .ok()
+                .map(|manifest| Message::Manifest(height, manifest)),
             Part::Chunk(index) => self
                 .journal
-                .chunk(height, &manifest, index)
+                .chunk(height, index)
                 .ok()
                 .flatten()
                 .map(|bytes| Message::Chunk(height, index, bytes)),
-        };
-        self.served = Some((height, manifest));
-        answer
+        }
     }
 
     /// Stops the replica: whoever waits learns it stopped.
@@ -355,7 +347,6 @@ impl<H: Host> Replica<H> {
                 own: Own::default(),
                 certified: None,
                 catchup: None,
-                served: None,
                 health: Health::Running,
             }),
         };
@@ -380,6 +371,9 @@ impl<H: Host> Replica<H> {
     /// Takes in `message` from `from`: the parts of a checkpoint's state
     /// here, the rest in the core.
     fn take_in(&self, inner: &mut Inner, from: NodeId, message: Message) {
+        if inner.health.check().is_err() {
+            return;
+        }
         match message {
             Message::Want(height, part) => {
                 if let Some(answer) = inner.serve(height, part) {

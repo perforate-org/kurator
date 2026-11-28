@@ -124,13 +124,19 @@ impl Ledger {
     ///
     /// # Errors
     ///
-    /// When the state does not decode, or encode again; the ledger is then
-    /// as it was.
+    /// When the state is no further than its own, or does not decode, or
+    /// encode again; the ledger is then as it was.
     pub(crate) fn restart(
         &mut self,
         certificate: &CheckpointCertificate,
         encoded: &[u8],
     ) -> io::Result<Snapshot> {
+        if certificate.height() <= self.height {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the state is no further than the ledger's",
+            ));
+        }
         let mut reader = Reader::new(encoded);
         let state = ShardState::decode(&mut reader)
             .and_then(|state| reader.finish().map(|()| state))
@@ -178,13 +184,15 @@ mod tests {
     use oleaph_shard::{Applied, ShardState};
     use oleaph_storage::{Command, Outcome, Version, WriteBatch};
 
+    use std::collections::BTreeMap;
+
     use super::{Ledger, Settled};
     use crate::block::Block;
     use crate::checkpoint::Manifest;
-    use crate::checkpoint::{Height, Interval};
+    use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Interval, StateRoot};
     use crate::step::{Record, Recovered};
     use crate::view::View;
-    use crate::vote::Justify;
+    use crate::vote::{BlockId, Justify};
 
     fn put(key: &str, value: &str) -> Vec<u8> {
         Command::Kv(WriteBatch::new().put(key, value))
@@ -254,5 +262,43 @@ mod tests {
             Manifest::of(&ledger.state).unwrap().root(),
             "of the state"
         );
+    }
+
+    #[test]
+    fn a_restart_moves_only_forward() {
+        let mut theirs = ShardState::default();
+        let _applied = theirs.apply(
+            Version::new(1),
+            Command::Kv(WriteBatch::new().put("t", "1")),
+        );
+        let mut encoded = Vec::new();
+        theirs.encode(&mut encoded).unwrap();
+        let at = |height| {
+            let checkpoint = Checkpoint::new(
+                Height::new(height),
+                BlockId::new([4; 32]),
+                View::new(height),
+                StateRoot::new([0; 32]),
+            );
+            CheckpointCertificate::new(checkpoint, BTreeMap::new())
+        };
+        let mut ledger = Ledger::new(ShardState::default());
+        let first = Block::new(View::new(1), Justify::Genesis, vec![put("a", "1")]);
+        let _first = ledger.apply(&first);
+        let before = ledger.clone();
+        for height in [0, 1] {
+            assert!(ledger.restart(&at(height), &encoded).is_err(), "{height}");
+            assert_eq!(ledger, before, "as it was");
+        }
+        assert!(ledger.restart(&at(3), b"garbage").is_err(), "undecodable");
+        assert_eq!(ledger, before, "as it was");
+        let snapshot = ledger.restart(&at(3), &encoded).unwrap();
+        assert_eq!(
+            snapshot.checkpoint().height(),
+            Height::new(3),
+            "at its height"
+        );
+        assert_eq!(ledger.height(), Height::new(3), "moved on");
+        assert_eq!(ledger.kv().get(b"t"), Some(b"1".as_slice()), "their state");
     }
 }

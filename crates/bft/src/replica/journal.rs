@@ -152,19 +152,14 @@ impl Journal {
         self.states.manifest(height)
     }
 
-    /// Chunk `index` of the state kept at `height`, whose manifest is
-    /// `manifest`, for a replica catching up.
+    /// Chunk `index` of the state kept at `height`, for a replica catching
+    /// up.
     ///
     /// # Errors
     ///
     /// When none was kept.
-    pub(crate) fn chunk(
-        &self,
-        height: Height,
-        manifest: &Manifest,
-        index: u32,
-    ) -> io::Result<Option<Vec<u8>>> {
-        self.states.chunk(height, manifest, index)
+    pub(crate) fn chunk(&self, height: Height, index: u32) -> io::Result<Option<Vec<u8>>> {
+        self.states.chunk(height, index)
     }
 
     /// Writes `records`, all the replica still needs past `certificate`,

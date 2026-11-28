@@ -16,7 +16,7 @@ use oleaph_codec::Reader;
 use oleaph_shard::ShardState;
 use oleaph_wal::sync_dir;
 
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest, span};
 use crate::view::View;
 use crate::vote::BlockId;
 
@@ -128,22 +128,17 @@ impl States {
         Ok(Manifest::over(&fs::read(self.path(height))?))
     }
 
-    /// Chunk `index` of the state kept at `height`, whose manifest is
-    /// `manifest`, if it has one of that index.
+    /// Chunk `index` of the state kept at `height`, if it has one of that
+    /// index.
     ///
     /// # Errors
     ///
     /// When none was kept.
-    pub(crate) fn chunk(
-        &self,
-        height: Height,
-        manifest: &Manifest,
-        index: u32,
-    ) -> io::Result<Option<Vec<u8>>> {
-        let Some(span) = manifest.span(index) else {
+    pub(crate) fn chunk(&self, height: Height, index: u32) -> io::Result<Option<Vec<u8>>> {
+        let mut file = fs::File::open(self.path(height))?;
+        let Some(span) = span(file.metadata()?.len(), index) else {
             return Ok(None);
         };
-        let mut file = fs::File::open(self.path(height))?;
         let _at = file.seek(SeekFrom::Start(span.start))?;
         let length =
             usize::try_from(span.end.saturating_sub(span.start)).map_err(io::Error::other)?;
@@ -209,11 +204,11 @@ mod tests {
         let mut encoded = Vec::new();
         state.encode(&mut encoded).unwrap();
         assert_eq!(
-            states.chunk(height, &manifest, 0).unwrap(),
+            states.chunk(height, 0).unwrap(),
             Some(encoded),
             "its one chunk"
         );
-        assert_eq!(states.chunk(height, &manifest, 1).unwrap(), None, "no more");
+        assert_eq!(states.chunk(height, 1).unwrap(), None, "no more");
         assert!(states.manifest(Height::new(4)).is_err(), "not kept");
     }
 
