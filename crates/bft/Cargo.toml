@@ -20,12 +20,17 @@ kurator-shard.workspace = true
 kurator-storage.workspace = true
 kurator-wal.workspace = true
 parking_lot.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 futures-util.workspace = true
 proptest.workspace = true
-tempfile.workspace = true
+
+[[bench]]
+name = "checkpoint"
+harness = false
 
 [lints]
 workspace = true

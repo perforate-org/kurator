@@ -3,8 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::block::Block;
-use crate::checkpoint::CheckpointCertificate;
+use kurator_shard::ShardState;
+
+use crate::block::{Block, prune};
+use crate::checkpoint::{CheckpointCertificate, Height};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::view::View;
@@ -220,6 +222,9 @@ pub(crate) enum Record {
     Safety(Safety),
     /// The last block it decided, and its view.
     Committed(BlockId, View),
+    /// The newest checkpoint the committee certified that the replica
+    /// keeps the state of: the blocks it decided up to it are forgotten.
+    Checkpoint(CheckpointCertificate),
 }
 
 /// What a replica remembers from before it stopped: enough to rejoin
@@ -230,6 +235,9 @@ pub struct Recovered {
     safety: Safety,
     blocks: BTreeMap<BlockId, Block>,
     committed: (BlockId, View),
+    /// The newest certified checkpoint it keeps the state of, and that
+    /// state once the journal loaded it.
+    base: Option<(CheckpointCertificate, Option<ShardState>)>,
 }
 
 impl Default for Recovered {
@@ -239,6 +247,7 @@ impl Default for Recovered {
             safety: Safety::new(View::GENESIS, Justify::Genesis),
             blocks: BTreeMap::new(),
             committed: (BlockId::GENESIS, View::GENESIS),
+            base: None,
         }
     }
 }
@@ -252,16 +261,51 @@ impl Recovered {
             }
             Record::Safety(safety) => self.safety = safety,
             Record::Committed(block, view) => self.committed = (block, view),
+            Record::Checkpoint(certificate) => {
+                prune(&mut self.blocks, certificate.block());
+                self.base = Some((certificate, None));
+            }
         }
     }
 
-    /// The blocks the replica decided, oldest first, so that a state
-    /// machine can apply them again.
+    /// The certified checkpoint whose state the replica kept, if any.
+    pub(crate) fn checkpoint(&self) -> Option<&CheckpointCertificate> {
+        self.base.as_ref().map(|(certificate, _)| certificate)
+    }
+
+    /// Takes in `state`, the state at its checkpoint.
+    pub(crate) fn rest_on(&mut self, state: ShardState) {
+        if let Some((_, base)) = &mut self.base {
+            *base = Some(state);
+        }
+    }
+
+    /// The state to apply [`Recovered::decided`] to, and the height and
+    /// block it stands at: the kept state at the checkpoint, or else
+    /// `genesis`, before any block.
+    #[must_use]
+    pub fn start(&self, genesis: ShardState) -> (ShardState, Height, BlockId) {
+        match &self.base {
+            Some((certificate, Some(state))) => {
+                (state.clone(), certificate.height(), certificate.block())
+            }
+            Some((_, None)) | None => (genesis, Height::ZERO, BlockId::GENESIS),
+        }
+    }
+
+    /// The blocks the replica decided past its checkpoint, oldest first,
+    /// so that a state machine can apply them again.
     #[must_use]
     pub fn decided(&self) -> Vec<&Block> {
+        let after = self
+            .checkpoint()
+            .map_or(BlockId::GENESIS, CheckpointCertificate::block);
         let mut chain = Vec::new();
         let mut id = self.committed.0;
-        while let Some(block) = self.blocks.get(&id) {
+        while id != after {
+            let Some(block) = self.blocks.get(&id) else {
+                break;
+            };
             chain.push(block);
             id = block.parent();
         }
@@ -269,8 +313,16 @@ impl Recovered {
         chain
     }
 
-    pub(crate) fn into_parts(self) -> (Safety, BTreeMap<BlockId, Block>, (BlockId, View)) {
-        (self.safety, self.blocks, self.committed)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Safety,
+        BTreeMap<BlockId, Block>,
+        (BlockId, View),
+        Option<CheckpointCertificate>,
+    ) {
+        let certified = self.base.map(|(certificate, _)| certificate);
+        (self.safety, self.blocks, self.committed, certified)
     }
 }
 
@@ -298,7 +350,7 @@ impl Step {
     pub fn safety(&self) -> Option<&Safety> {
         self.records.iter().find_map(|record| match record {
             Record::Safety(safety) => Some(safety),
-            Record::Block(_) | Record::Committed(..) => None,
+            Record::Block(_) | Record::Committed(..) | Record::Checkpoint(_) => None,
         })
     }
 

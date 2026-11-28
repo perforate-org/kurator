@@ -332,3 +332,50 @@ fn a_replica_whose_state_differs_stops() {
         .run(cluster.replica(2).propose(put("c", "3")))
         .unwrap();
 }
+
+#[test]
+fn a_replica_restarts_from_its_certified_state() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    for key in ["a", "b", "c"] {
+        let _put = cluster
+            .run(cluster.replica(1).propose(put(key, "1")))
+            .unwrap();
+    }
+    cluster.pump(2000);
+    let node = NodeId::new(4);
+    let before = cluster.run(cluster.replica(4).read(Clone::clone)).unwrap();
+    let certified = cluster.replica(4).checkpoint().unwrap();
+    drop(cluster.replicas.remove(&node));
+    let states = cluster.dir.path().join(node.to_string()).join("states");
+    assert_eq!(
+        std::fs::read_dir(&states).unwrap().count(),
+        1,
+        "the certified state only"
+    );
+    let again = open_on(
+        &cluster.dir,
+        &cluster.wire,
+        node,
+        ShardState::default(),
+        every_block(),
+    );
+    let after = cluster.run(again.read(Clone::clone)).unwrap();
+    assert_eq!(after, before, "the same state");
+    assert!(
+        again
+            .checkpoint()
+            .is_none_or(|known| known.height() >= certified.height()),
+        "no older checkpoint"
+    );
+    drop(cluster.replicas.insert(node, again));
+    let _later = cluster
+        .run(cluster.replica(2).propose(put("d", "1")))
+        .unwrap();
+    cluster.pump(2000);
+    let held = cluster.run(
+        cluster
+            .replica(4)
+            .read(|kv| kv.get(b"d").map(<[u8]>::to_vec)),
+    );
+    assert_eq!(held.unwrap(), Some(b"1".to_vec()), "and goes on deciding");
+}

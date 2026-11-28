@@ -1,5 +1,6 @@
 //! Blocks of commands, and a leader's proposal of one.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use kurator_codec::{DecodeError, Reader};
@@ -15,6 +16,18 @@ use crate::wire::{
     put_commands, put_node, put_signature, put_view, read_commands, read_node, read_signature,
     read_view,
 };
+
+/// Forgets the blocks of `blocks` that can no longer matter once `through`
+/// is decided: those of its view or earlier, other than `through` itself,
+/// where a chain walk back now stops. Its ancestors are decided, and
+/// every other block of those views lost. Knowing nothing of `through`,
+/// it forgets nothing.
+pub(crate) fn prune(blocks: &mut BTreeMap<BlockId, Block>, through: BlockId) {
+    let Some(view) = blocks.get(&through).map(Block::view) else {
+        return;
+    };
+    blocks.retain(|id, block| *id == through || block.view() > view);
+}
 
 /// The key derivation context of block ids. Fixed forever.
 const ID_CONTEXT: &str = "kurator 2026-11 bft block id";

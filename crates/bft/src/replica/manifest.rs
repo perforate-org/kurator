@@ -42,7 +42,7 @@ impl Manifest {
     }
 
     /// The manifest of the encoded state `bytes`.
-    fn over(bytes: &[u8]) -> Self {
+    pub(super) fn over(bytes: &[u8]) -> Self {
         let chunks = bytes
             .chunks(CHUNK)
             .map(|chunk| {

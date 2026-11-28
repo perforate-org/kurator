@@ -38,7 +38,9 @@
 //! [`Share`] of that [`Checkpoint`]. A quorum of equal shares is a
 //! [`CheckpointCertificate`]: the committee's word for the shard's state at
 //! that [`Height`]. A replica whose own checkpoint differs has applied the
-//! same blocks to another state, and stops serving.
+//! same blocks to another state, and stops serving; one whose checkpoint
+//! agrees keeps that state and lets its [`Journal`] forget every record
+//! before it, so that it restarts from the certified state.
 //!
 //! Signatures are [`kurator_crypto`]'s, tagged with their algorithm, so a
 //! certificate is a set of signatures that can move to a post-quantum
@@ -76,6 +78,7 @@ mod fixture {
     use kurator_consensus::NodeId;
     use kurator_crypto::{Algorithm, SigningKey};
 
+    use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
     use crate::committee::{Committee, Domain};
 
     /// The domain every test signs in.
@@ -92,5 +95,16 @@ mod fixture {
             .map(|node| (NodeId::new(node), key(node).verifying_key()))
             .collect();
         Committee::new(members).unwrap()
+    }
+
+    /// A certificate for `checkpoint`, signed by nodes 1 to 3.
+    pub(crate) fn certify(checkpoint: Checkpoint) -> CheckpointCertificate {
+        let mut tally = Tally::default();
+        (1..=3)
+            .find_map(|node| {
+                let share = Share::sign(&key(node), DOMAIN, NodeId::new(node), checkpoint);
+                tally.count(share, 3)
+            })
+            .unwrap()
     }
 }

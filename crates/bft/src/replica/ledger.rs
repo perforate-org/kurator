@@ -5,9 +5,9 @@ use std::io;
 use kurator_shard::{Applied, Shard, ShardState};
 use kurator_storage::{Encoded, KvState, Version};
 
-use super::manifest::Manifest;
+use super::states::Snapshot;
 use crate::block::Block;
-use crate::checkpoint::{Checkpoint, Height, Interval};
+use crate::checkpoint::{Height, Interval};
 use crate::step::Recovered;
 use crate::vote::BlockId;
 
@@ -35,7 +35,7 @@ pub enum Settled {
 /// replicates comes later.
 ///
 /// Every [`Interval`] of blocks, it names the state it holds by a
-/// [`Checkpoint`], for the committee to certify.
+/// [`Checkpoint`](crate::Checkpoint), for the committee to certify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ledger {
     state: ShardState,
@@ -65,11 +65,17 @@ impl Ledger {
         Self { interval, ..self }
     }
 
-    /// The state `state` was before any block was decided, with the blocks
-    /// that `recovered` decided applied again.
+    /// The state that `recovered` kept at its checkpoint, or else `state`,
+    /// the state before any block was decided, with the blocks that
+    /// `recovered` decided past it applied again.
     #[must_use]
     pub fn replay(state: ShardState, recovered: &Recovered) -> Self {
-        let mut ledger = Self::new(state);
+        let (state, height, last) = recovered.start(state);
+        let mut ledger = Self {
+            height,
+            last,
+            ..Self::new(state)
+        };
         for block in recovered.decided() {
             let _settled = ledger.apply(block);
         }
@@ -88,18 +94,16 @@ impl Ledger {
             .collect()
     }
 
-    /// The checkpoint of the state, when one falls at the height it
-    /// reached.
+    /// The state, when a checkpoint falls at the height it reached.
     ///
     /// # Errors
     ///
-    /// When the state does not encode, as [`Manifest::of`].
-    pub fn checkpoint(&self) -> io::Result<Option<Checkpoint>> {
+    /// When the state does not encode, as [`ShardState::encode`].
+    pub(crate) fn checkpoint(&self) -> io::Result<Option<Snapshot>> {
         if !self.interval.at(self.height) {
             return Ok(None);
         }
-        let root = Manifest::of(&self.state)?.root();
-        Ok(Some(Checkpoint::new(self.height, self.last, root)))
+        Snapshot::take(self.height, self.last, &self.state).map(Some)
     }
 
     /// How many blocks it applied.
@@ -136,7 +140,8 @@ mod tests {
     use kurator_shard::{Applied, ShardState};
     use kurator_storage::{Command, Outcome, Version, WriteBatch};
 
-    use super::{Ledger, Manifest, Settled};
+    use super::super::manifest::Manifest;
+    use super::{Ledger, Settled};
     use crate::block::Block;
     use crate::checkpoint::{Height, Interval};
     use crate::step::{Record, Recovered};
@@ -202,7 +207,8 @@ mod tests {
         assert_eq!(ledger.checkpoint().unwrap(), None, "between");
         let second = Block::new(View::new(2), Justify::Genesis, Vec::new());
         let _second = ledger.apply(&second);
-        let checkpoint = ledger.checkpoint().unwrap().unwrap();
+        let snapshot = ledger.checkpoint().unwrap().unwrap();
+        let checkpoint = snapshot.checkpoint();
         assert_eq!(checkpoint.height(), Height::new(2), "at two");
         assert_eq!(checkpoint.block(), second.id(), "after the second");
         assert_eq!(
