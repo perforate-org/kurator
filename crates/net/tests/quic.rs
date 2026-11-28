@@ -396,8 +396,9 @@ async fn a_trusted_client_writes_and_reads_through_the_leader() {
 
 /// Asks node `target` for `call` on the first shard, following the leader
 /// each node names, until one answers otherwise. A call that a leader
-/// dropped when it lost its term is asked again: the calls here write the
-/// same value again or only read, so applying one twice changes nothing.
+/// dropped when it lost its term, or that reached a node not yet holding
+/// the shard, is asked again: the calls here write the same value again
+/// or only read, so applying one twice changes nothing.
 async fn on_leader(
     client: &Quic,
     peers: &BTreeMap<NodeId, Peer>,
@@ -410,7 +411,7 @@ async fn on_leader(
             .reach(target, &peers[&target], &request)
             .await
             .unwrap();
-        let (Reply::NotLeader(hint) | Reply::Discarded(hint)) = reply else {
+        let Some(hint) = reply.redirect() else {
             return reply;
         };
         match hint {

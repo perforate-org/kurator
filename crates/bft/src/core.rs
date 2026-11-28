@@ -6,7 +6,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cmp, mem};
 
-use oleaph_consensus::NodeId;
+use oleaph_consensus::{NodeId, Peer};
 use oleaph_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Order, Proposal, prune};
@@ -388,6 +388,12 @@ impl Core {
     /// What it must not forget across a crash.
     fn safety(&self) -> Safety {
         Safety::new(self.voted, self.proposed, self.lock.clone())
+    }
+
+    /// Where the members of every committee since the charter's are, as
+    /// the changes that started them name them: the newest place of each.
+    pub(crate) fn peers(&self) -> BTreeMap<NodeId, Peer> {
+        self.eras.iter().flat_map(Succession::peers).collect()
     }
 
     /// The node it runs on.

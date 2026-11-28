@@ -9,12 +9,14 @@
 //!
 //! The members of the committees of its BFT shards are trusted too, as
 //! members only: they may take part in those shards' consensus, not in
-//! Raft's, unless a membership lists them as well.
+//! Raft's, unless a membership lists them as well. They are looked up as
+//! each caller arrives, since a committee change brings new members.
 //!
 //! Clients are not in any membership. A node accepts the client keys it
 //! was started with, and serves them only as clients.
 
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 
 use oleaph_crypto::VerifyingKey;
 use oleaph_raft::{Memberships, NodeId};
@@ -28,8 +30,9 @@ pub(crate) struct Roster {
     bootstrap: BTreeMap<NodeId, VerifyingKey>,
     /// The memberships that decide.
     memberships: Memberships<Tokio>,
-    /// The members of the committees of the node's BFT shards.
-    committees: BTreeMap<NodeId, VerifyingKey>,
+    /// The members of the committees of the node's BFT shards, if it may
+    /// hold any.
+    committees: Option<Box<dyn Members>>,
     /// The clients the node serves.
     clients: Vec<VerifyingKey>,
 }
@@ -53,7 +56,7 @@ impl Roster {
     pub(crate) const fn new(
         bootstrap: BTreeMap<NodeId, VerifyingKey>,
         memberships: Memberships<Tokio>,
-        committees: BTreeMap<NodeId, VerifyingKey>,
+        committees: Option<Box<dyn Members>>,
         clients: Vec<VerifyingKey>,
     ) -> Self {
         Self {
@@ -70,7 +73,10 @@ impl Roster {
     pub(crate) fn identify(&self, key: &VerifyingKey) -> Option<Caller> {
         self.node(key)
             .map(Caller::Node)
-            .or_else(|| holder(&self.committees, key).map(Caller::Member))
+            .or_else(|| {
+                let committees = self.committees.as_ref()?;
+                holder(&committees.keys(), key).map(Caller::Member)
+            })
             .or_else(|| self.clients.contains(key).then_some(Caller::Client))
     }
 
@@ -86,6 +92,12 @@ impl Roster {
                 .map(|(id, _)| *id)
         }
     }
+}
+
+/// Those a node trusts as members of its BFT shards' committees.
+pub(crate) trait Members: Debug + Send + Sync {
+    /// The transport key of each, as it stands now.
+    fn keys(&self) -> BTreeMap<NodeId, VerifyingKey>;
 }
 
 /// The node `keys` lists with `key`.

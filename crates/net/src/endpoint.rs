@@ -16,7 +16,7 @@ use quinn::crypto::rustls::QuicServerConfig;
 #[cfg(feature = "bft")]
 use crate::bft::{BftReplica, Committees};
 use crate::connection::{Channel, MAX_MESSAGE, Quic};
-use crate::roster::{Caller, Roster};
+use crate::roster::{Caller, Members, Roster};
 use crate::tls::{Identity, presented_key};
 use crate::{Inbox, Tokio};
 
@@ -131,10 +131,11 @@ impl Endpoint {
     /// When the TLS configuration cannot be built.
     pub fn serve(self, inbox: Inbox) -> Result<Server, NetError> {
         let quic = self.transport();
+        // A build without BFT holds no BFT shard.
         #[cfg(feature = "bft")]
-        let committees = self.committees.keys();
+        let committees: Option<Box<dyn Members>> = Some(Box::new(self.committees.clone()));
         #[cfg(not(feature = "bft"))]
-        let committees = BTreeMap::new();
+        let committees: Option<Box<dyn Members>> = None;
         let roster = Arc::new(Roster::new(
             self.bootstrap,
             inbox.memberships(),

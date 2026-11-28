@@ -5,13 +5,15 @@
 //! A shard's committees follow one another in epochs. The charter names
 //! the first, in epoch 0. A [`ChangeCertificate`], a quorum of one epoch's
 //! committee signing the next one's, ends the epoch at the block that
-//! carries it.
+//! carries it. The change names where each member of the next committee
+//! listens and the key it proves itself with, so that every node learns
+//! whom to reach, and whom to trust, from what the committee decided.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use oleaph_codec::{DecodeError, Reader, put_bytes};
-use oleaph_consensus::NodeId;
+use oleaph_consensus::{NodeId, Peer};
 use oleaph_crypto::{Algorithm, Signature, SigningKey, VerifyingKey};
 use oleaph_shard::ShardId;
 
@@ -192,18 +194,29 @@ const LEADER_CONTEXT: &str = "oleaph 2026-11 bft leader schedule";
 /// What a signature on a change is over, after the domain.
 const CHANGE: &[u8] = b"oleaph-bft change";
 
-/// The committee that decides a shard from `epoch` on.
+/// The committee that decides a shard from `epoch` on, and where its
+/// members are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     epoch: Epoch,
     committee: Committee,
+    peers: BTreeMap<NodeId, Peer>,
 }
 
 impl Change {
-    /// `committee` decides from `epoch` on.
+    /// `committee` decides from `epoch` on, its members at `peers`; or
+    /// `None` unless `peers` names every member and no one else.
     #[must_use]
-    pub const fn new(epoch: Epoch, committee: Committee) -> Self {
-        Self { epoch, committee }
+    pub fn new(epoch: Epoch, committee: Committee, peers: BTreeMap<NodeId, Peer>) -> Option<Self> {
+        peers
+            .keys()
+            .copied()
+            .eq(committee.members())
+            .then_some(Self {
+                epoch,
+                committee,
+                peers,
+            })
     }
 
     /// The epoch it starts.
@@ -218,12 +231,19 @@ impl Change {
         &self.committee
     }
 
+    /// Where each member of that committee listens, and the key it
+    /// proves itself with.
+    #[must_use]
+    pub const fn peers(&self) -> &BTreeMap<NodeId, Peer> {
+        &self.peers
+    }
+
     /// The bytes that name it, after the domain and [`CHANGE`].
     fn statement(&self) -> Vec<u8> {
-        let mut bytes = self.epoch.get().to_le_bytes().to_vec();
+        let mut bytes = Vec::new();
         // Writing to a vector does not fail, and a committee holds fewer
         // members than a `u32` counts.
-        let _written = self.committee.encode(&mut bytes);
+        let _written = self.encode(&mut bytes);
         bytes
     }
 
@@ -234,13 +254,26 @@ impl Change {
 
     pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&self.epoch.get().to_le_bytes())?;
-        self.committee.encode(out)
+        self.committee.encode(out)?;
+        // In the committee's order, so each peer needs no id of its own.
+        self.peers.values().try_for_each(|peer| {
+            let mut bytes = Vec::new();
+            peer.encode(&mut bytes);
+            out.write_all(&bytes)
+        })
     }
 
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let epoch = Epoch::new(reader.read()?);
+        let committee = Committee::decode(reader)?;
+        let peers = committee
+            .members()
+            .map(|node| Ok((node, Peer::decode(reader)?)))
+            .collect::<Result<_, DecodeError>>()?;
         Ok(Self {
-            epoch: Epoch::new(reader.read()?),
-            committee: Committee::decode(reader)?,
+            epoch,
+            committee,
+            peers,
         })
     }
 }
@@ -305,6 +338,14 @@ impl ChangeCertificate {
     #[must_use]
     pub const fn committee(&self) -> &Committee {
         &self.change.committee
+    }
+
+    /// Where each member of that committee is.
+    pub(crate) fn peers(&self) -> impl Iterator<Item = (NodeId, Peer)> + '_ {
+        self.change
+            .peers
+            .iter()
+            .map(|(node, peer)| (*node, peer.clone()))
     }
 
     /// Checks that a quorum of `committee`, which decides `epoch` in
@@ -379,15 +420,16 @@ const fn quorum(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::net::SocketAddr;
 
-    use oleaph_consensus::NodeId;
+    use oleaph_consensus::{NodeId, Peer};
     use oleaph_crypto::{Algorithm, SigningKey};
 
     use oleaph_shard::ShardId;
 
     use oleaph_codec::{DecodeError, Reader, put_bytes};
 
-    use super::{ChangeCertificate, Committee, Domain, Endorsement, faults, quorum};
+    use super::{Change, ChangeCertificate, Committee, Domain, Endorsement, faults, quorum};
     use crate::fixture::{self, DOMAIN, change_to, key};
     use crate::rejection::Rejection;
     use crate::view::{Epoch, View};
@@ -534,6 +576,40 @@ mod tests {
             Committee::decode(&mut Reader::new(&twice)),
             Err(DecodeError::Invalid),
             "a member twice"
+        );
+    }
+
+    #[test]
+    fn a_change_names_where_every_member_is_and_no_one_else() {
+        let committee = fixture::committee();
+        let change = |members: &[u64]| {
+            Change::new(Epoch::new(1), committee.clone(), fixture::peers(members))
+        };
+        let named = change(&[1, 2, 3, 4]).unwrap();
+        assert_eq!(
+            named.peers(),
+            &fixture::peers(&[1, 2, 3, 4]),
+            "every member"
+        );
+        assert_eq!(change(&[1, 2, 3]), None, "one missing");
+        assert_eq!(change(&[1, 2, 3, 4, 5]), None, "one more");
+        // Where a member listens is signed with the committee.
+        let elsewhere = Change::new(
+            Epoch::new(1),
+            committee,
+            fixture::peers(&[1, 2, 3, 4])
+                .into_iter()
+                .map(|(node, peer)| {
+                    let addr = SocketAddr::from(([10, 0, 0, 1], peer.addr().port()));
+                    (node, Peer::new(addr, peer.key().clone()))
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_ne!(
+            named.signed(DOMAIN),
+            elsewhere.signed(DOMAIN),
+            "the addresses signed"
         );
     }
 

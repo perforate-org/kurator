@@ -27,7 +27,7 @@ use std::num::NonZeroU64;
 use std::ops::Range;
 
 use oleaph_codec::{DecodeError, Reader};
-use oleaph_consensus::NodeId;
+use oleaph_consensus::{NodeId, Peer};
 use oleaph_crypto::{Signature, SigningKey};
 use oleaph_shard::ShardState;
 
@@ -463,6 +463,11 @@ impl Succession {
     #[must_use]
     pub const fn change(&self) -> &ChangeCertificate {
         &self.change
+    }
+
+    /// Where each member of the committee it starts is.
+    pub(crate) fn peers(&self) -> impl Iterator<Item = (NodeId, Peer)> + '_ {
+        self.change.peers()
     }
 
     /// The state the epoch starts from.
