@@ -55,9 +55,10 @@ for main in n4f0 n4f1; do
 done
 # Random runs seldom end the epoch, so one that does is sought: a run that
 # breaks `not(endedEverywhere)` is one in which every correct replica ends
-# it, some of them steps before the others.
+# it, some of them steps before the others. The search stops at the first,
+# usually within some thousands of runs, so it may take many.
 if quint run "${backend[@]}" --main n4f1 --invariant 'not(endedEverywhere)' --mbt \
-  --max-samples "$samples" --max-steps "$steps" \
+  --max-samples 200000 --max-steps "$steps" \
   --out-itf "$scratch/traces/n4f1-ended.itf.json" "$spec" > /dev/null; then
   echo "no run of n4f1 ends the epoch"
   exit 1

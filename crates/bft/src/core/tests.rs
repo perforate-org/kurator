@@ -8,6 +8,7 @@ use oleaph_wal::Options;
 use super::{Config, Core, Event};
 use crate::block::{Block, Order, Proposal};
 use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot};
+use crate::committee::ChangeCertificate;
 use crate::fixture::{DOMAIN, change_to, committee, key};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -952,8 +953,11 @@ fn a_quorum_of_shares_certifies_a_checkpoint() {
     );
 }
 
-#[test]
-fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
+/// Four replicas, each with a command of its own, that run until the
+/// committee decided the change node 2 submitted, which ends the epoch.
+/// Node 1 submitted a change for an epoch that does not follow. Returns the
+/// replicas, the blocks node 1 decided and the change.
+fn end_epoch() -> (BTreeMap<NodeId, Core>, Vec<Block>, ChangeCertificate) {
     let nodes: Vec<NodeId> = (1..=4).map(NodeId::new).collect();
     let mut cores: BTreeMap<NodeId, Core> = nodes.iter().map(|node| (*node, core(*node))).collect();
     let ends = change_to(1, &[1, 2, 3]);
@@ -983,7 +987,16 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
             network.take(*node, &expired, &nodes);
         }
     }
-    let first = &network.decided[&NodeId::new(1)];
+    let decided = network.decided.remove(&NodeId::new(1)).unwrap();
+    for (node, blocks) in &network.decided {
+        assert_eq!(blocks, &decided, "{node}: the same blocks");
+    }
+    (cores, decided, ends)
+}
+
+#[test]
+fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
+    let (mut cores, first, ends) = end_epoch();
     let last = first.last().unwrap();
     assert!(
         last.commands()
@@ -991,20 +1004,10 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
         "the last decided block holds the change"
     );
     for (node, core) in &mut cores {
-        assert_eq!(&network.decided[node], first, "{node}: the same blocks");
         assert_eq!(core.ending(), Some(&ends), "{node}: ended");
         let late = core.handle(Event::Submitted(b"late".to_vec())).persisted();
         assert!(late.messages().is_empty(), "{node}: proposes no more");
     }
-
-    // Restarted, a replica knows the epoch ended.
-    let mut recovered = Recovered::default();
-    for block in first {
-        recovered.note(Record::Block(block.clone()));
-    }
-    recovered.note(Record::Committed(last.id(), last.view()));
-    let restarted = Core::recover(config(NodeId::new(4)), recovered);
-    assert_eq!(restarted.ending(), Some(&ends), "ended after a restart");
 
     // The committee certifies the checkpoint at that block, and the next
     // epoch starts afresh.
@@ -1013,6 +1016,7 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
             Checkpoint::new(Height::new(7), block, last.view(), StateRoot::new([6; 32]));
         certified(checkpoint)
     };
+
     let core = cores.get_mut(&NodeId::new(3)).unwrap();
     assert_eq!(
         core.succeed(&at(BlockId::new([9; 32]))),
@@ -1053,4 +1057,36 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
         panic!("{records:?}");
     };
     assert_eq!(*domain, DOMAIN.next(&ends), "a domain of its own");
+}
+
+#[test]
+fn a_replica_restarted_at_the_end_of_its_epoch_takes_the_state_there_again() {
+    let (_cores, first, ends) = end_epoch();
+    let last = first.last().unwrap();
+    // Restarted, a replica knows the epoch ended.
+    let mut recovered = Recovered::default();
+    for block in &first {
+        recovered.note(Record::Block(block.clone()));
+    }
+    recovered.note(Record::Committed(last.id(), last.view()));
+    let restarted = Core::recover(config(NodeId::new(4)), recovered.clone());
+    assert_eq!(restarted.ending(), Some(&ends), "ended after a restart");
+
+    // Restarted, it takes the state at the end again, and moves on if the
+    // journal holds that checkpoint certified already.
+    // An older checkpoint, of a block before the change.
+    let older = (BlockId::new([9; 32]), View::GENESIS);
+    for ((block, view), moves_on) in [((last.id(), last.view()), true), (older, false)] {
+        let checkpoint = Checkpoint::new(Height::new(1), block, view, StateRoot::new([6; 32]));
+        let mut kept = recovered.clone();
+        kept.note(Record::Checkpoint(certified(checkpoint)));
+        let mut again = Core::recover(config(NodeId::new(4)), kept);
+        let started = again.handle(Event::Start).persisted();
+        assert_eq!(started.ended(), Some(last.id()), "the state at the end");
+        assert_eq!(
+            started.certified().is_some(),
+            moves_on,
+            "certified at {block}"
+        );
+    }
 }

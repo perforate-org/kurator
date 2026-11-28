@@ -225,6 +225,12 @@ impl Effects {
         self.certified.as_ref()
     }
 
+    /// The block that ends the epoch, if the step reached it.
+    #[cfg(test)]
+    pub(crate) const fn ended(&self) -> Option<BlockId> {
+        self.end
+    }
+
     /// The blocks decided, in the order to apply them.
     #[cfg(test)]
     pub(crate) fn decided(&self) -> &[Block] {

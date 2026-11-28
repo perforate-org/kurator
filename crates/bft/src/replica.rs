@@ -10,7 +10,7 @@
 //! decide proposes nothing, and its views time out. Reads see the
 //! replica's own decided state ([`Reads::Decided`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use std::ops::Bound;
 use std::time::Duration;
@@ -108,7 +108,9 @@ struct Inner {
     /// each to apply.
     waiting: BTreeMap<Vec<u8>, Vec<oneshot::Sender<Settled>>>,
     /// The checkpoints its state reached, for the core to share.
-    reached: Vec<Checkpoint>,
+    /// The same checkpoint reached twice, by the interval and by the end
+    /// of the epoch, is shared once.
+    reached: BTreeSet<Checkpoint>,
     /// Those past the newest certified one, to judge against the
     /// certificates to come.
     own: Own,
@@ -166,7 +168,7 @@ impl Inner {
             return;
         };
         self.own.take(checkpoint);
-        self.reached.push(checkpoint);
+        let _new = self.reached.insert(checkpoint);
         self.judge();
     }
 
@@ -343,9 +345,8 @@ impl<H: Host> Act for Acting<'_, H> {
         let Ok(snapshot) = self.inner.ledger.snapshot() else {
             return;
         };
-        let checkpoint = snapshot.checkpoint();
-        // Not yet there, or there already, the interval falling on it.
-        if checkpoint.block() != block || self.inner.reached.contains(checkpoint) {
+        // The state is at the block that ends the epoch, decided first.
+        if snapshot.checkpoint().block() != block {
             return;
         }
         self.inner.reach(&snapshot);
@@ -401,7 +402,7 @@ impl<H: Host> Replica<H> {
                 journal,
                 ledger,
                 waiting: BTreeMap::new(),
-                reached: Vec::new(),
+                reached: BTreeSet::new(),
                 own: Own::default(),
                 certified: None,
                 catchup: None,
