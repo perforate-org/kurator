@@ -9,15 +9,15 @@
 //! files are removed on open.
 
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
 
 use oleaph_codec::Reader;
 use oleaph_shard::ShardState;
 use oleaph_wal::sync_dir;
 
-use super::manifest::Manifest;
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest};
+use crate::view::View;
 use crate::vote::BlockId;
 
 const SUFFIX: &str = ".state";
@@ -31,17 +31,22 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    /// The state `state`, which block `block` left at `height`.
+    /// The state `state`, which block `block`, of its view, left at
+    /// `height`.
     ///
     /// # Errors
     ///
     /// When the state does not encode, as [`Manifest::of`].
-    pub(crate) fn take(height: Height, block: BlockId, state: &ShardState) -> io::Result<Self> {
+    pub(crate) fn take(
+        height: Height,
+        (block, view): (BlockId, View),
+        state: &ShardState,
+    ) -> io::Result<Self> {
         let mut encoded = Vec::new();
         state.encode(&mut encoded)?;
         let root = Manifest::over(&encoded).root();
         Ok(Self {
-            checkpoint: Checkpoint::new(height, block, root),
+            checkpoint: Checkpoint::new(height, block, view, root),
             encoded,
         })
     }
@@ -114,6 +119,39 @@ impl States {
         Ok(state)
     }
 
+    /// The manifest of the state kept at `height`.
+    ///
+    /// # Errors
+    ///
+    /// When none was kept.
+    pub(crate) fn manifest(&self, height: Height) -> io::Result<Manifest> {
+        Ok(Manifest::over(&fs::read(self.path(height))?))
+    }
+
+    /// Chunk `index` of the state kept at `height`, whose manifest is
+    /// `manifest`, if it has one of that index.
+    ///
+    /// # Errors
+    ///
+    /// When none was kept.
+    pub(crate) fn chunk(
+        &self,
+        height: Height,
+        manifest: &Manifest,
+        index: u32,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let Some(span) = manifest.span(index) else {
+            return Ok(None);
+        };
+        let mut file = fs::File::open(self.path(height))?;
+        let _at = file.seek(SeekFrom::Start(span.start))?;
+        let length =
+            usize::try_from(span.end.saturating_sub(span.start)).map_err(io::Error::other)?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes)?;
+        Ok(Some(bytes))
+    }
+
     /// Deletes the states below `height`.
     pub(crate) fn forget_below(&self, height: Height) -> io::Result<()> {
         for entry in fs::read_dir(&self.dir)? {
@@ -146,7 +184,38 @@ fn parse(name: &str) -> Option<Height> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Height, parse};
+    use oleaph_shard::ShardState;
+    use oleaph_storage::{Command, Version, WriteBatch};
+
+    use super::{Height, Snapshot, States, parse};
+    use crate::view::View;
+    use crate::vote::BlockId;
+
+    #[test]
+    fn a_kept_state_is_served_by_its_manifest_and_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let states = States::open(dir.path().join("states")).unwrap();
+        let mut state = ShardState::default();
+        let _applied = state.apply(
+            Version::new(1),
+            Command::Kv(WriteBatch::new().put("k", "v")),
+        );
+        let height = Height::new(3);
+        let snapshot =
+            Snapshot::take(height, (BlockId::new([1; 32]), View::new(2)), &state).unwrap();
+        let checkpoint = states.keep(&snapshot).unwrap();
+        let manifest = states.manifest(height).unwrap();
+        assert_eq!(manifest.root(), checkpoint.root(), "its manifest");
+        let mut encoded = Vec::new();
+        state.encode(&mut encoded).unwrap();
+        assert_eq!(
+            states.chunk(height, &manifest, 0).unwrap(),
+            Some(encoded),
+            "its one chunk"
+        );
+        assert_eq!(states.chunk(height, &manifest, 1).unwrap(), None, "no more");
+        assert!(states.manifest(Height::new(4)).is_err(), "not kept");
+    }
 
     #[test]
     fn only_state_files_name_a_height() {

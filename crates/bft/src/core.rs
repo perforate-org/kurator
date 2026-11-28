@@ -117,6 +117,9 @@ pub struct Core {
     timeouts: BTreeMap<NodeId, (View, Signature)>,
     /// Commands submitted and not yet decided.
     pending: Vec<Vec<u8>>,
+    /// The certified checkpoint its blocks start after: those before it
+    /// it let go, its state kept instead.
+    base: Option<CheckpointCertificate>,
     /// The checkpoint shares it collects.
     tally: Tally,
     /// Blocks the event in hand taught it, to write down.
@@ -154,10 +157,29 @@ impl Core {
             votes: BTreeMap::new(),
             timeouts: BTreeMap::new(),
             pending: Vec::new(),
+            base: certified.clone(),
             tally: Tally::since(certified),
             learned: Vec::new(),
             effects: Effects::default(),
         }
+    }
+
+    /// Moves on to `certificate`, a certified checkpoint whose state the
+    /// replica took from the others instead of deciding the blocks up to
+    /// it, and returns the records the journal needs, as
+    /// [`Core::compact`] does. The blocks after it it decides as usual.
+    pub(crate) fn rebase(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
+        let view = certificate.view();
+        if view > self.committed.1 {
+            self.committed = (certificate.block(), view);
+            self.certified = view
+                .next()
+                .map(|next| self.certified.split_off(&next))
+                .unwrap_or_default();
+            self.wanted.clear();
+        }
+        let _newer = self.tally.adopt(certificate);
+        self.compact(certificate)
     }
 
     /// Forgets the blocks that `certificate`, a certified checkpoint whose
@@ -165,7 +187,8 @@ impl Core {
     /// records that the journal needs to remember all it still knows:
     /// with these written, every record before them can go.
     pub(crate) fn compact(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
-        prune(&mut self.blocks, certificate.block());
+        prune(&mut self.blocks, certificate.block(), certificate.view());
+        self.base = Some(certificate.clone());
         let mut records: Vec<Record> = self.blocks.values().cloned().map(Record::Block).collect();
         records.push(Record::Safety(Safety::new(self.voted, self.lock.clone())));
         records.push(Record::Committed(self.committed.0, self.committed.1));
@@ -266,9 +289,17 @@ impl Core {
             Message::Vote(vote) => self.on_vote(vote),
             Message::Timeout(timeout) => self.on_timeout(timeout),
             Message::Fetch(id) => {
-                if let Some(block) = self.blocks.get(&id).filter(|_| from != self.node()) {
-                    self.effects
-                        .send(To::One(from), Message::Deliver(block.clone()));
+                if from == self.node() {
+                    return Ok(());
+                }
+                // A block it no longer holds may be one a checkpoint let
+                // go: the asker can take the state at it instead.
+                let answer = self.blocks.get(&id).map_or_else(
+                    || self.base.clone().map(Message::Certified),
+                    |block| Some(Message::Deliver(block.clone())),
+                );
+                if let Some(answer) = answer {
+                    self.effects.send(To::One(from), answer);
                 }
                 Ok(())
             }
@@ -290,6 +321,17 @@ impl Core {
                 share.verify(&self.config.committee, self.config.domain)?;
                 self.count(share);
                 Ok(())
+            }
+            Message::Certified(certificate) => {
+                certificate.verify(&self.config.committee, self.config.domain)?;
+                if self.tally.adopt(&certificate) {
+                    self.effects.certify(certificate);
+                }
+                Ok(())
+            }
+            // The state at a checkpoint is the replica's to send and take.
+            Message::Want(..) | Message::Manifest(..) | Message::Chunk(..) => {
+                Err(Rejection::Unwanted)
             }
             Message::Deliver(block) => {
                 if !self.wanted.remove(&block.id()) {

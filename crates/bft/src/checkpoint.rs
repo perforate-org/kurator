@@ -12,6 +12,13 @@
 //! A vote certifies a block before anyone applies it, so it cannot speak
 //! for the state after it. Checkpoints speak for the state, apart from the
 //! votes, every so often.
+//!
+//! A root names the state as [`ShardState::encode`] writes it, which every
+//! replica holding the same state writes byte for byte alike, cut into
+//! chunks of [`CHUNK`] bytes. Each chunk is named by its hash, and the
+//! state by the root over its length and its chunks' hashes, its
+//! [`Manifest`], so that a replica catching up can take each chunk from
+//! anyone and check it.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,11 +28,15 @@ use std::num::NonZeroU64;
 use oleaph_codec::{DecodeError, Reader};
 use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
+use oleaph_shard::ShardState;
 
 use crate::committee::{Committee, Domain};
 use crate::rejection::Rejection;
+use crate::view::View;
 use crate::vote::{BlockId, check};
-use crate::wire::{put_count, put_node, put_signature, read_count, read_node, read_signature};
+use crate::wire::{
+    put_count, put_node, put_signature, put_view, read_count, read_node, read_signature, read_view,
+};
 
 /// What a checkpoint share's signature is over, after the domain.
 const SHARE: &[u8] = b"oleaph-bft checkpoint";
@@ -93,7 +104,7 @@ impl Interval {
 }
 
 /// Names a shard's state: a hash of all of it, as
-/// [`Manifest`](crate::Manifest) computes it.
+/// [`Manifest`] computes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StateRoot([u8; 32]);
 
@@ -111,22 +122,25 @@ impl StateRoot {
     }
 }
 
-/// The state of a shard once it decided `block`, its block at `height`:
-/// the state named by `root`.
+/// The state of a shard once it decided `block`, of `view`, its block at
+/// `height`: the state named by `root`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Checkpoint {
     height: Height,
     block: BlockId,
+    view: View,
     root: StateRoot,
 }
 
 impl Checkpoint {
-    /// The state named by `root`, after `block`, decided at `height`.
+    /// The state named by `root`, after `block` of `view`, decided at
+    /// `height`.
     #[must_use]
-    pub const fn new(height: Height, block: BlockId, root: StateRoot) -> Self {
+    pub const fn new(height: Height, block: BlockId, view: View, root: StateRoot) -> Self {
         Self {
             height,
             block,
+            view,
             root,
         }
     }
@@ -143,6 +157,12 @@ impl Checkpoint {
         self.block
     }
 
+    /// The view of the last of them.
+    #[must_use]
+    pub const fn view(&self) -> View {
+        self.view
+    }
+
     /// The state they made.
     #[must_use]
     pub const fn root(&self) -> StateRoot {
@@ -156,6 +176,7 @@ impl Checkpoint {
             SHARE,
             &self.height.0.to_le_bytes(),
             self.block.as_bytes(),
+            &self.view.get().to_le_bytes(),
             &self.root.0,
         ]
         .concat()
@@ -164,14 +185,16 @@ impl Checkpoint {
     fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
         out.write_all(&self.height.0.to_le_bytes())?;
         self.block.encode(out)?;
+        put_view(out, self.view)?;
         out.write_all(&self.root.0)
     }
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let height = Height(reader.read()?);
         let block = BlockId::decode(reader)?;
+        let view = read_view(reader)?;
         let root = StateRoot(reader.read()?);
-        Ok(Self::new(height, block, root))
+        Ok(Self::new(height, block, view, root))
     }
 }
 
@@ -264,6 +287,12 @@ impl CheckpointCertificate {
     #[must_use]
     pub const fn block(&self) -> BlockId {
         self.checkpoint.block
+    }
+
+    /// The view of that block.
+    #[must_use]
+    pub const fn view(&self) -> View {
+        self.checkpoint.view
     }
 
     /// The root of the state it certifies.
@@ -379,6 +408,18 @@ impl Tally {
         }
     }
 
+    /// Takes in `certificate`, already verified, when it is newer than any
+    /// it knows, and says whether it was.
+    pub(crate) fn adopt(&mut self, certificate: &CheckpointCertificate) -> bool {
+        if certificate.height() <= self.last() {
+            return false;
+        }
+        self.shares = self.shares.split_off(&certificate.height());
+        let _done = self.shares.remove(&certificate.height());
+        self.certified = Some(certificate.clone());
+        true
+    }
+
     /// The height of the newest certified checkpoint.
     fn last(&self) -> Height {
         self.certified
@@ -406,12 +447,8 @@ impl Tally {
         if signatures.len() < quorum {
             return None;
         }
-        let mut later = self.shares.split_off(&height);
-        let _done = later.remove(&height);
-        self.shares = later;
         let certified = CheckpointCertificate::new(checkpoint, signatures);
-        self.certified = Some(certified.clone());
-        Some(certified)
+        self.adopt(&certified).then_some(certified)
     }
 
     /// Whether `signer` may have a share at `height` counted: it has fewer
@@ -441,6 +478,124 @@ impl Tally {
     }
 }
 
+/// How large a chunk is, the last one aside.
+pub(crate) const CHUNK: usize = 1 << 20;
+
+/// The key derivation context of chunk hashes. Fixed forever.
+const CHUNK_CONTEXT: &str = "oleaph 2026-11 bft state chunk";
+
+/// The key derivation context of state roots. Fixed forever.
+const ROOT_CONTEXT: &str = "oleaph 2026-11 bft state root";
+
+/// A part of the state at a checkpoint, as a replica catching up asks for
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Part {
+    /// Its manifest.
+    Manifest,
+    /// Its chunk of this index, from 0.
+    Chunk(u32),
+}
+
+/// The hash of one chunk of an encoded state.
+fn chunk_hash(chunk: &[u8]) -> [u8; 32] {
+    *blake3::Hasher::new_derive_key(CHUNK_CONTEXT)
+        .update(chunk)
+        .finalize()
+        .as_bytes()
+}
+
+/// The hash of each chunk of a shard's encoded state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    length: u64,
+    chunks: Vec<[u8; 32]>,
+}
+
+impl Manifest {
+    /// The manifest of `state`.
+    ///
+    /// # Errors
+    ///
+    /// When a key or value is too long for its length prefix, which a
+    /// state that took it in never holds.
+    pub fn of(state: &ShardState) -> io::Result<Self> {
+        let mut encoded = Vec::new();
+        state.encode(&mut encoded)?;
+        Ok(Self::over(&encoded))
+    }
+
+    /// The manifest of the encoded state `bytes`.
+    pub(crate) fn over(bytes: &[u8]) -> Self {
+        let chunks = bytes.chunks(CHUNK).map(chunk_hash).collect();
+        Self {
+            length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            chunks,
+        }
+    }
+
+    /// The hash of each chunk, in order.
+    #[must_use]
+    pub fn chunks(&self) -> &[[u8; 32]] {
+        &self.chunks
+    }
+
+    /// How many chunks the state takes.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Whether `bytes` are chunk `index` of the state.
+    #[must_use]
+    pub fn holds(&self, index: u32, bytes: &[u8]) -> bool {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.chunks.get(index))
+            .is_some_and(|hash| *hash == chunk_hash(bytes))
+    }
+
+    /// Where chunk `index` lies in the encoded state, if it is one.
+    pub(crate) fn span(&self, index: u32) -> Option<std::ops::Range<u64>> {
+        let chunk = u64::try_from(CHUNK).ok()?;
+        let start = u64::from(index).checked_mul(chunk)?;
+        (start < self.length).then(|| start..start.saturating_add(chunk).min(self.length))
+    }
+
+    pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
+        out.write_all(&self.length.to_le_bytes())?;
+        put_count(out, self.chunks.len())?;
+        self.chunks.iter().try_for_each(|hash| out.write_all(hash))
+    }
+
+    /// Reads a manifest, which must have as many chunks as its length
+    /// takes.
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let length: u64 = reader.read()?;
+        let count = read_count(reader)?;
+        let chunk = u64::try_from(CHUNK).map_err(|_| DecodeError::Invalid)?;
+        if u64::from(count) != length.div_ceil(chunk) {
+            return Err(DecodeError::Invalid);
+        }
+        let chunks = (0..count)
+            .map(|_| reader.read::<[u8; 32]>())
+            .collect::<Result<_, _>>()?;
+        Ok(Self { length, chunks })
+    }
+
+    /// The root that names the state.
+    #[must_use]
+    pub fn root(&self) -> StateRoot {
+        let mut hasher = blake3::Hasher::new_derive_key(ROOT_CONTEXT);
+        let _length = hasher.update(&self.length.to_le_bytes());
+        for chunk in &self.chunks {
+            let _chunk = hasher.update(chunk);
+        }
+        StateRoot::new(*hasher.finalize().as_bytes())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
@@ -448,19 +603,25 @@ mod tests {
     use oleaph_codec::Reader;
     use oleaph_consensus::NodeId;
 
+    use oleaph_shard::ShardState;
+    use oleaph_storage::{Version, WriteBatch};
+
     use super::{
-        Checkpoint, CheckpointCertificate, Height, Interval, Own, Share, StateRoot, Tally, Verdict,
+        CHUNK, Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Own, Share,
+        StateRoot, Tally, Verdict,
     };
     use crate::committee::Domain;
     use crate::fixture::{DOMAIN, certify, committee, key};
     use crate::rejection::Rejection;
     use crate::step::Effects;
+    use crate::view::View;
     use crate::vote::BlockId;
 
     fn checkpoint(height: u64, root: u8) -> Checkpoint {
         Checkpoint::new(
             Height::new(height),
             BlockId::new([7; 32]),
+            View::new(3),
             StateRoot::new([root; 32]),
         )
     }
@@ -634,5 +795,39 @@ mod tests {
         last.certify(older);
         last.certify(newer.clone());
         assert_eq!(last.certified(), Some(&newer), "takes the newer");
+    }
+
+    #[test]
+    fn the_root_names_the_state() {
+        let empty = Manifest::of(&ShardState::default()).unwrap();
+        assert_eq!(
+            empty,
+            Manifest::of(&ShardState::default()).unwrap(),
+            "fixed"
+        );
+        assert_eq!(empty.chunks().len(), 1, "one short chunk");
+        let mut state = ShardState::default();
+        let _applied = state.apply(
+            Version::new(1),
+            oleaph_storage::Command::Kv(WriteBatch::new().put("a", "1")),
+        );
+        let written = Manifest::of(&state).unwrap();
+        assert_ne!(written.root(), empty.root(), "another state");
+    }
+
+    #[test]
+    fn large_states_take_many_chunks() {
+        let bytes = vec![7_u8; CHUNK.saturating_mul(2).saturating_add(1)];
+        let manifest = Manifest::over(&bytes);
+        assert_eq!(manifest.chunks().len(), 3, "two whole and one byte");
+        assert_eq!(manifest.chunks()[0], manifest.chunks()[1], "same bytes");
+        assert_ne!(manifest.chunks()[1], manifest.chunks()[2], "one byte");
+        let shorter = Manifest::over(&bytes[..CHUNK.saturating_mul(2)]);
+        assert_ne!(shorter.root(), manifest.root(), "the length counts");
+        let reordered = Manifest {
+            length: manifest.length,
+            chunks: manifest.chunks.iter().rev().copied().collect(),
+        };
+        assert_ne!(reordered.root(), manifest.root(), "the order counts");
     }
 }

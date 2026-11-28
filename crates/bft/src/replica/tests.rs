@@ -379,3 +379,60 @@ fn a_replica_restarts_from_its_certified_state() {
     );
     assert_eq!(held.unwrap(), Some(b"1".to_vec()), "and goes on deciding");
 }
+
+#[test]
+fn a_replica_far_behind_takes_the_certified_state_from_the_others() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let node = NodeId::new(4);
+    // It hears nothing while the others decide, certify and let the
+    // blocks go.
+    let away = cluster.replicas.remove(&node).unwrap();
+    for key in ["a", "b", "c"] {
+        let _put = cluster
+            .run(cluster.replica(1).propose(put(key, "1")))
+            .unwrap();
+    }
+    cluster.pump(2000);
+    let certified = cluster.replica(1).checkpoint().unwrap();
+    assert!(certified.height() >= Height::new(3), "certified");
+    drop(cluster.replicas.insert(node, away));
+    let _put = cluster
+        .run(cluster.replica(2).propose(put("d", "1")))
+        .unwrap();
+    for _ in 0..20 {
+        cluster.pump(2000);
+        cluster.expire();
+    }
+    let theirs = cluster.run(cluster.replica(1).read(Clone::clone)).unwrap();
+    let mine = cluster.run(cluster.replica(4).read(Clone::clone)).unwrap();
+    assert_eq!(mine, theirs, "the same state");
+    assert!(
+        cluster
+            .replica(4)
+            .checkpoint()
+            .is_some_and(|known| known.height() >= certified.height()),
+        "the certified checkpoint"
+    );
+    let _later = cluster
+        .run(cluster.replica(4).propose(put("e", "1")))
+        .unwrap();
+    cluster.pump(2000);
+    let held = cluster.run(
+        cluster
+            .replica(1)
+            .read(|kv| kv.get(b"e").map(<[u8]>::to_vec)),
+    );
+    assert_eq!(held.unwrap(), Some(b"1".to_vec()), "and goes on deciding");
+    cluster.pump(2000);
+    let before = cluster.run(cluster.replica(4).read(Clone::clone)).unwrap();
+    drop(cluster.replicas.remove(&node));
+    let again = open_on(
+        &cluster.dir,
+        &cluster.wire,
+        node,
+        ShardState::default(),
+        every_block(),
+    );
+    let after = cluster.run(again.read(Clone::clone)).unwrap();
+    assert_eq!(after, before, "it restarts from the state it took");
+}

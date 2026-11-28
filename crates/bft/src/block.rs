@@ -17,15 +17,11 @@ use crate::wire::{
     read_view,
 };
 
-/// Forgets the blocks of `blocks` that can no longer matter once `through`
-/// is decided: those of its view or earlier, other than `through` itself,
-/// where a chain walk back now stops. Its ancestors are decided, and
-/// every other block of those views lost. Knowing nothing of `through`,
-/// it forgets nothing.
-pub(crate) fn prune(blocks: &mut BTreeMap<BlockId, Block>, through: BlockId) {
-    let Some(view) = blocks.get(&through).map(Block::view) else {
-        return;
-    };
+/// Forgets the blocks of `blocks` that can no longer matter once
+/// `through`, of `view`, is decided: those of its view or earlier, other
+/// than `through` itself, where a chain walk back now stops. Its
+/// ancestors are decided, and every other block of those views lost.
+pub(crate) fn prune(blocks: &mut BTreeMap<BlockId, Block>, through: BlockId, view: View) {
     blocks.retain(|id, block| *id == through || block.view() > view);
 }
 
@@ -378,14 +374,11 @@ mod tests {
             .into_iter()
             .map(|each| (each.id(), each.clone()))
             .collect();
-        let mut blocks = all.clone();
-        prune(&mut blocks, through.id());
+        let mut blocks = all;
+        prune(&mut blocks, through.id(), through.view());
         let kept: Vec<BlockId> = blocks.into_keys().collect();
         let mut expected = vec![through.id(), later.id()];
         expected.sort_unstable();
         assert_eq!(kept, expected, "it and what came after");
-        let mut unknown = all.clone();
-        prune(&mut unknown, BlockId::new([9; 32]));
-        assert_eq!(unknown, all, "nothing to go by");
     }
 }

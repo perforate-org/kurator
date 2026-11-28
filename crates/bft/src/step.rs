@@ -262,7 +262,7 @@ impl Recovered {
             Record::Safety(safety) => self.safety = safety,
             Record::Committed(block, view) => self.committed = (block, view),
             Record::Checkpoint(certificate) => {
-                prune(&mut self.blocks, certificate.block());
+                prune(&mut self.blocks, certificate.block(), certificate.view());
                 self.base = Some((certificate, None));
             }
         }
@@ -280,16 +280,18 @@ impl Recovered {
         }
     }
 
-    /// The state to apply [`Recovered::decided`] to, and the height and
-    /// block it stands at: the kept state at the checkpoint, or else
-    /// `genesis`, before any block.
+    /// The state to apply [`Recovered::decided`] to, its height, and the
+    /// block it stands after with that block's view: the kept state at
+    /// the checkpoint, or else `genesis`, before any block.
     #[must_use]
-    pub fn start(&self, genesis: ShardState) -> (ShardState, Height, BlockId) {
+    pub fn start(&self, genesis: ShardState) -> (ShardState, Height, (BlockId, View)) {
         match &self.base {
-            Some((certificate, Some(state))) => {
-                (state.clone(), certificate.height(), certificate.block())
-            }
-            Some((_, None)) | None => (genesis, Height::ZERO, BlockId::GENESIS),
+            Some((certificate, Some(state))) => (
+                state.clone(),
+                certificate.height(),
+                (certificate.block(), certificate.view()),
+            ),
+            Some((_, None)) | None => (genesis, Height::ZERO, (BlockId::GENESIS, View::GENESIS)),
         }
     }
 

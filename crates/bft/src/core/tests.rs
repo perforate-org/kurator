@@ -7,7 +7,7 @@ use oleaph_wal::Options;
 
 use super::{Config, Core, Event};
 use crate::block::{Block, Proposal};
-use crate::checkpoint::{Checkpoint, Height, Share, StateRoot};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot};
 use crate::fixture::{DOMAIN, committee, key};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -518,6 +518,66 @@ fn blocks_are_delivered_only_to_who_asked() {
     assert!(unknown.messages().is_empty(), "nothing to deliver");
 }
 
+/// The certificate that shares of `checkpoint` from nodes 1 to 3 make, as
+/// a replica that counted them took it.
+fn certified(checkpoint: Checkpoint) -> CheckpointCertificate {
+    let mut replica = started(NodeId::new(4));
+    let mut certificate = None;
+    for node in 1..=3 {
+        let share = Share::sign(&key(node), DOMAIN, NodeId::new(node), checkpoint);
+        let effects = receive(&mut replica, Message::Checkpoint(share));
+        certificate = certificate.or_else(|| effects.certified().cloned());
+    }
+    certificate.unwrap()
+}
+
+#[test]
+fn a_block_let_go_is_answered_with_the_checkpoint_after_it() {
+    let checkpoint = Checkpoint::new(
+        Height::new(5),
+        BlockId::new([5; 32]),
+        View::new(5),
+        StateRoot::new([1; 32]),
+    );
+    let certificate = certified(checkpoint);
+    let asker = leader(1);
+    let mut replica = started(NodeId::new(1));
+    let before = receive(&mut replica, Message::Fetch(BlockId::new([3; 32])));
+    assert!(before.messages().is_empty(), "nothing certified yet");
+    let taken = receive(&mut replica, Message::Certified(certificate.clone()));
+    assert_eq!(taken.certified(), Some(&certificate), "taken");
+    let again = receive(&mut replica, Message::Certified(certificate.clone()));
+    assert_eq!(again.certified(), None, "once");
+    let kept = receive(&mut replica, Message::Fetch(BlockId::new([3; 32])));
+    assert!(kept.messages().is_empty(), "the blocks before it are kept");
+    let _records = replica.compact(&certificate);
+    let answer = receive(&mut replica, Message::Fetch(BlockId::new([3; 32])));
+    assert_eq!(
+        answer.messages()[0].message(),
+        &Message::Certified(certificate),
+        "the checkpoint"
+    );
+    assert_eq!(answer.messages()[0].to(), To::One(asker), "to who asked");
+    let forged = CheckpointCertificate::new(checkpoint, BTreeMap::new());
+    assert!(
+        receive(&mut replica, Message::Certified(forged))
+            .rejected()
+            .is_some(),
+        "needs a quorum"
+    );
+    let parts = [
+        Message::Want(Height::new(5), Part::Manifest),
+        Message::Chunk(Height::new(5), 0, Vec::new()),
+    ];
+    for part in parts {
+        assert_eq!(
+            receive(&mut replica, part).rejected(),
+            Some(Rejection::Unwanted),
+            "the replica's to handle"
+        );
+    }
+}
+
 /// A network that delivers every message, in the order sent.
 #[derive(Default)]
 struct Lossless {
@@ -826,6 +886,7 @@ fn a_quorum_of_shares_certifies_a_checkpoint() {
     let checkpoint = Checkpoint::new(
         Height::new(1000),
         BlockId::new([5; 32]),
+        View::new(900),
         StateRoot::new([6; 32]),
     );
     let mut ours = core(NodeId::new(1));
