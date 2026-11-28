@@ -15,7 +15,7 @@ use oleaph_client::{Call, Reach as _, Reply, Request};
 use oleaph_consensus::{NodeId, Peer, Replicated as _};
 use oleaph_crypto::{KeyPurpose, NodeSecret};
 use oleaph_net::{BftReplica, Endpoint, Quic, Server, Store, Wiring};
-use oleaph_shard::{Shard, ShardId, ShardState};
+use oleaph_shard::{NamespaceId, Shard, ShardId, ShardState};
 use oleaph_storage::{Command, KvState, Outcome, WriteBatch};
 use tempfile::TempDir;
 
@@ -75,7 +75,10 @@ async fn committee(dir: &TempDir) -> BTreeMap<u64, Node> {
         let home = dir.path().join(id.to_string());
         let (journal, recovered) =
             Journal::open(home.join("bft"), oleaph_wal::Options::default()).unwrap();
-        let state = ShardState::new(Shard::whole(SHARD), KvState::default());
+        let state = ShardState::new(
+            Shard::whole(NamespaceId::DEFAULT, SHARD),
+            KvState::default(),
+        );
         let ledger = Ledger::replay(state, &recovered);
         let key = secret(id).signing_key(KeyPurpose::Consensus);
         let config = Config::new(node, key, committee.clone(), domain);

@@ -137,14 +137,14 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
         std::thread::sleep(Duration::from_millis(50));
         shards = ask("shards", 1);
     }
-    assert_eq!(shards, "s1 [, ..) at e0 on n1", "one shard");
+    assert_eq!(shards, "s1 [, ..) at e0 in ns0 on n1", "one shard");
     let members = ask("members", 4);
     assert!(
-        members.starts_with("s0 [, ..) at e0\nvoter 1 127.0.0.1:"),
+        members.starts_with("s0 [, ..) at e0 in ns0\nvoter 1 127.0.0.1:"),
         "the meta shard: {members}"
     );
     assert!(
-        members.contains("\ns1 [, ..) at e0\nvoter 1 127.0.0.1:"),
+        members.contains("\ns1 [, ..) at e0 in ns0\nvoter 1 127.0.0.1:"),
         "the first shard: {members}"
     );
     assert!(
@@ -153,7 +153,7 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     );
     assert_eq!(
         ask("split m", 1),
-        "ok: s1 [, m) at e1 | s2 [m, ..) at e1",
+        "ok: s1 [, m) at e1 in ns0 | s2 [m, ..) at e1 in ns0",
         "split"
     );
     let split = Instant::now();
@@ -172,8 +172,42 @@ fn a_single_node_cluster_takes_writes_and_reads_them_back() {
     assert_eq!(ask("get greeting", 1), "hello", "still in the first");
     assert_eq!(
         ask("shards", 2),
-        "s1 [, m) at e1 on n1\ns2 [m, ..) at e1 on n1",
+        "s1 [, m) at e1 in ns0 on n1\ns2 [m, ..) at e1 in ns0 on n1",
         "the registry records both halves"
+    );
+    assert_eq!(
+        ask("namespace payments cft", 1),
+        "ok: payments starts as s3 [, ..) at e0 in ns1",
+        "a namespace of its own"
+    );
+    assert_eq!(
+        ask("namespace payments cft", 1),
+        "error: there is a namespace of that name already: ns1 cft",
+        "a name once"
+    );
+    let made = Instant::now();
+    loop {
+        let answer = ask("put melon red in payments", 1);
+        if answer.starts_with("ok at") {
+            break;
+        }
+        assert!(
+            made.elapsed() < Duration::from_secs(20),
+            "the namespace's shard never elected a leader: {answer}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(ask("get melon in payments", 1), "red", "its own value");
+    assert_eq!(ask("get melon", 1), "green", "the default's, apart");
+    assert_eq!(
+        ask("get melon in ledger", 1),
+        "error: there is no namespace ledger",
+        "no such namespace"
+    );
+    assert_eq!(
+        ask("namespaces", 2),
+        "default ns0 cft\npayments ns1 cft",
+        "both namespaces"
     );
     assert!(console.quit().is_empty(), "says nothing after quit");
 }
@@ -327,8 +361,8 @@ fn a_node_splits_a_shard_that_outgrows_its_ceiling() {
     // next check, and the halves are under the ceiling.
     loop {
         let shards = console.ask("shards", 1);
-        if shards.starts_with("s1 [, d) at e1") {
-            assert_eq!(console.read(1), "s2 [d, ..) at e1 on n1", "{shards}");
+        if shards.starts_with("s1 [, d) at e1 in ns0") {
+            assert_eq!(console.read(1), "s2 [d, ..) at e1 in ns0 on n1", "{shards}");
             break;
         }
         assert!(
@@ -405,13 +439,13 @@ fn a_backup_restores_as_a_new_cluster() {
     );
     drop(ask_until(&mut second, "put kiwi brown", 1, "ok at"));
     assert_eq!(
-        ask_until(&mut second, "shards", 2, "s1 [, m) at e1 on n2"),
-        "s1 [, m) at e1 on n2\ns2 [m, ..) at e1 on n2",
+        ask_until(&mut second, "shards", 2, "s1 [, m) at e1 in ns0 on n2"),
+        "s1 [, m) at e1 in ns0 on n2\ns2 [m, ..) at e1 in ns0 on n2",
         "the new node holds every shard"
     );
     assert_eq!(
         ask_until(&mut second, "split t", 1, "ok"),
-        "ok: s2 [m, t) at e2 | s3 [t, ..) at e2",
+        "ok: s2 [m, t) at e2 in ns0 | s3 [t, ..) at e2 in ns0",
         "ids go on from the backup's"
     );
     assert!(second.quit().is_empty(), "nothing more");

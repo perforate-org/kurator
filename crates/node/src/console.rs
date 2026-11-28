@@ -2,15 +2,20 @@
 //!
 //! Reads and writes go to the node's replica of the shard that holds the
 //! key; membership changes go to every shard the node holds, the meta
-//! shard among them. A split and `shards` ask the meta shard's leader,
-//! found through this node's replica of the meta shard, wherever it is.
+//! shard among them. A split, `shards`, the namespace commands and
+//! `in <namespace>` ask the meta shard's leader, found through this node's
+//! replica of the meta shard, wherever it is.
+//!
+//! A key is a key of the default namespace, or of the one `in` names.
 //!
 //! ```text
-//! put <key> <value>        write through this node, which must lead the key's shard
-//! del <key>
-//! get <key>                a linearizable read through the leader
-//! split <key>              split the shard that holds <key> there, under an id the meta shard allocates
-//! shards                   every shard the meta shard records, with its span, epoch and replicas
+//! put <key> <value> [in <namespace>]   write through this node, which must lead the key's shard
+//! del <key> [in <namespace>]
+//! get <key> [in <namespace>]           a linearizable read through the leader
+//! split <key> [in <namespace>]         split the shard that holds <key> there, under an id the meta shard allocates
+//! shards                   every shard the meta shard records, with its span, epoch, namespace and replicas
+//! namespace <name> cft     make a namespace whose shards are crash fault tolerant, on the meta shard's voters
+//! namespaces               every namespace by name, with its id and assurance
 //! status                   role, term, leader and log positions, by shard
 //! members                  voters and learners with their peers, by shard
 //! add <id> <addr> <key>    add a learner to every shard
@@ -31,13 +36,39 @@ use std::sync::Arc;
 
 use oleaph_client::Collected;
 use oleaph_consensus::{Members, NodeId, Peer, Replicated as _};
-use oleaph_meta::Meta;
+use oleaph_meta::{Assurance, Meta, NamespaceName};
 use oleaph_net::{Quic, Replica, Store};
-use oleaph_shard::ShardId;
+use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_storage::WriteBatch;
 
 use crate::args::{addr, key, node_id};
-use crate::report;
+use crate::{namespace, report};
+
+/// A key the console names: the key, and the namespace it is a key of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Key {
+    namespace: NamespaceName,
+    key: String,
+}
+
+impl Key {
+    /// `key` of the namespace called `namespace`.
+    #[must_use]
+    pub const fn new(namespace: NamespaceName, key: String) -> Self {
+        Self { namespace, key }
+    }
+
+    /// Reads `key`, then `in <namespace>` or nothing for the default
+    /// namespace.
+    fn parse(key: &str, rest: &[&str]) -> Option<Self> {
+        let namespace = match rest {
+            [] => NamespaceName::default_name(),
+            ["in", name] => name.parse().ok()?,
+            _ => return None,
+        };
+        Some(Self::new(namespace, key.to_owned()))
+    }
+}
 
 /// One console command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,18 +77,22 @@ pub enum Command {
     /// Writes a value.
     Put {
         /// The key.
-        key: String,
+        key: Key,
         /// The value.
         value: String,
     },
     /// Deletes a key.
-    Delete(String),
+    Delete(Key),
     /// Reads a key.
-    Get(String),
+    Get(Key),
     /// Splits the shard that holds a key there.
-    Split(String),
+    Split(Key),
     /// Lists the shards the registry records.
     Shards,
+    /// Makes a namespace.
+    Namespace(NamespaceName, Assurance),
+    /// Lists the namespaces the registry records.
+    Namespaces,
     /// Shows where each replica stands.
     Status,
     /// Shows the membership.
@@ -86,7 +121,8 @@ pub enum Reply {
     Quit,
 }
 
-const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k> | shards \
+const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k>, each [in <namespace>] \
+                    | shards | namespace <name> cft | namespaces \
                     | status | members | add <id> <addr> <key> | promote <id> \
                     | remove <id> | collect | backup <dir> | quit";
 
@@ -96,14 +132,18 @@ impl Command {
     pub fn parse(line: &str) -> Option<Self> {
         let words: Vec<&str> = line.split_whitespace().collect();
         let command = match words.as_slice() {
-            ["put", key, value] => Self::Put {
-                key: (*key).to_owned(),
+            ["put", key, value, rest @ ..] => Self::Put {
+                key: Key::parse(key, rest)?,
                 value: (*value).to_owned(),
             },
-            ["del", key] => Self::Delete((*key).to_owned()),
-            ["get", key] => Self::Get((*key).to_owned()),
-            ["split", at] => Self::Split((*at).to_owned()),
+            ["del", key, rest @ ..] => Self::Delete(Key::parse(key, rest)?),
+            ["get", key, rest @ ..] => Self::Get(Key::parse(key, rest)?),
+            ["split", at, rest @ ..] => Self::Split(Key::parse(at, rest)?),
             ["shards"] => Self::Shards,
+            ["namespace", name, assurance] => {
+                Self::Namespace(name.parse().ok()?, assurance.parse().ok()?)
+            }
+            ["namespaces"] => Self::Namespaces,
             ["status"] => Self::Status,
             ["members"] => Self::Members,
             ["add", id, at, public] => Self::Add(node_id(id)?, Peer::new(addr(at)?, key(public)?)),
@@ -124,23 +164,27 @@ pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
         return Reply::Show(HELP.to_owned());
     };
     let shown = match command {
-        Command::Put { key, value } => {
-            let batch = WriteBatch::new().put(key.clone(), value);
-            match holder(store, &key) {
-                Some(replica) => logged(replica.write(batch).await),
-                None => unheld(),
-            }
-        }
-        Command::Delete(key) => match holder(store, &key) {
-            Some(replica) => logged(replica.write(WriteBatch::new().delete(key)).await),
-            None => unheld(),
+        Command::Put { key, value } => match holder(store, ask, &key).await {
+            Ok(replica) => logged(replica.write(WriteBatch::new().put(key.key, value)).await),
+            Err(error) => error,
         },
-        Command::Get(key) => match holder(store, &key) {
-            Some(replica) => get(&replica, &key).await,
-            None => unheld(),
+        Command::Delete(key) => match holder(store, ask, &key).await {
+            Ok(replica) => logged(replica.write(WriteBatch::new().delete(key.key)).await),
+            Err(error) => error,
+        },
+        Command::Get(key) => match holder(store, ask, &key).await {
+            Ok(replica) => get(&replica, &key.key).await,
+            Err(error) => error,
         },
         Command::Split(at) => split(store, ask, &at).await,
         Command::Shards => shards(store, ask).await,
+        Command::Namespace(name, assurance) => {
+            match Box::pin(namespace::create(store, ask, &name, assurance)).await {
+                Ok(shard) => format!("ok: {name} starts as {shard}"),
+                Err(error) => format!("error: {error}"),
+            }
+        }
+        Command::Namespaces => namespaces(store, ask).await,
         Command::Status => by_shard(store, |replica| format!(": {:?}", replica.status())),
         Command::Members => by_shard(store, |replica| members(&replica.members())),
         Command::Add(id, peer) => {
@@ -192,11 +236,25 @@ fn held(store: &Store) -> impl Iterator<Item = Arc<Replica>> {
         .filter(|replica| replica.is_initialized())
 }
 
-/// The replica of the shard that holds `key`, as this node knows it. The
-/// meta shard holds none of the cluster's keys.
-fn holder(store: &Store, key: &str) -> Option<Arc<Replica>> {
+/// The replica of the shard that holds `key`, as this node knows it, or
+/// what to show instead. The meta shard holds none of the cluster's keys.
+async fn holder(store: &Store, ask: &Quic, key: &Key) -> Result<Arc<Replica>, String> {
+    // Boxed: the meta shard's calls nest deeper than the console's
+    // future can lay out.
+    let namespace = Box::pin(namespace::resolve(store, ask, &key.namespace))
+        .await
+        .map_err(|error| format!("error: {error}"))?;
+    held_in(store, namespace, &key.key).ok_or_else(unheld)
+}
+
+/// The replica of the shard of `namespace` that holds `key`, if this node
+/// holds one.
+fn held_in(store: &Store, namespace: NamespaceId, key: &str) -> Option<Arc<Replica>> {
     held(store).find(|replica| {
-        replica.shard_id() != ShardId::META && replica.shard().span().contains(key.as_bytes())
+        let shard = replica.shard();
+        replica.shard_id() != ShardId::META
+            && shard.namespace() == namespace
+            && shard.span().contains(key.as_bytes())
     })
 }
 
@@ -229,11 +287,12 @@ async fn get(replica: &Replica, key: &str) -> String {
 }
 
 /// Splits the shard that holds `at` there; see [`crate::split::split`].
-async fn split(store: &Store, ask: &Quic, at: &str) -> String {
-    let Some(replica) = holder(store, at) else {
-        return unheld();
+async fn split(store: &Store, ask: &Quic, at: &Key) -> String {
+    let replica = match holder(store, ask, at).await {
+        Ok(replica) => replica,
+        Err(error) => return error,
     };
-    match crate::split::split(store, ask, replica.shard_id(), at.as_bytes()).await {
+    match crate::split::split(store, ask, replica.shard_id(), at.key.as_bytes()).await {
         Ok(halves) => format!("ok: {} | {}", halves.left(), halves.right()),
         Err(error) => format!("error: {error}"),
     }
@@ -251,6 +310,23 @@ async fn shards(store: &Store, ask: &Quic) -> String {
     match Meta::new(&meta, ask).registry().await {
         Ok(registry) => {
             let lines: Vec<String> = registry.placements().map(ToString::to_string).collect();
+            lines.join("\n")
+        }
+        Err(error) => format!("error: {error}"),
+    }
+}
+
+/// Lists the namespaces the meta shard records, one a line.
+async fn namespaces(store: &Store, ask: &Quic) -> String {
+    let Some(meta) = meta(store) else {
+        return no_meta();
+    };
+    match Meta::new(&meta, ask).registry().await {
+        Ok(registry) => {
+            let lines: Vec<String> = registry
+                .namespaces()
+                .map(|(name, namespace)| format!("{name} {namespace}"))
+                .collect();
             lines.join("\n")
         }
         Err(error) => format!("error: {error}"),
@@ -308,7 +384,14 @@ mod tests {
     use oleaph_consensus::{Members, NodeId, Peer};
     use oleaph_crypto::{KeyPurpose, NodeSecret};
 
-    use super::{Command, members};
+    use oleaph_meta::{Assurance, NamespaceName};
+
+    use super::{Command, Key, members};
+
+    /// `key` of the default namespace.
+    fn default(key: &str) -> Key {
+        Key::new(NamespaceName::default_name(), key.to_owned())
+    }
 
     fn peer(id: u8) -> Peer {
         let key = NodeSecret::from_seed([id; 32]).public_key(KeyPurpose::Transport);
@@ -318,19 +401,41 @@ mod tests {
     #[test]
     fn lines_parse_into_commands() {
         let key = peer(4).key().to_string();
+        let payments: NamespaceName = "payments".parse().unwrap();
         for (line, command) in [
             (
                 "put k v",
                 Some(Command::Put {
-                    key: "k".to_owned(),
+                    key: default("k"),
                     value: "v".to_owned(),
                 }),
             ),
-            ("del k", Some(Command::Delete("k".to_owned()))),
-            ("split m", Some(Command::Split("m".to_owned()))),
+            (
+                "put k v in payments",
+                Some(Command::Put {
+                    key: Key::new(payments.clone(), "k".to_owned()),
+                    value: "v".to_owned(),
+                }),
+            ),
+            ("del k", Some(Command::Delete(default("k")))),
+            ("split m", Some(Command::Split(default("m")))),
+            (
+                "get k in payments",
+                Some(Command::Get(Key::new(payments.clone(), "k".to_owned()))),
+            ),
+            ("get k in Payments", None),
+            ("get k payments", None),
+            ("get k in", None),
             ("shards", Some(Command::Shards)),
+            (
+                "namespace payments cft",
+                Some(Command::Namespace(payments, Assurance::Cft)),
+            ),
+            ("namespace payments raft", None),
+            ("namespace payments", None),
+            ("namespaces", Some(Command::Namespaces)),
             ("split m 2", None),
-            ("  get   k ", Some(Command::Get("k".to_owned()))),
+            ("  get   k ", Some(Command::Get(default("k")))),
             ("status", Some(Command::Status)),
             ("members", Some(Command::Members)),
             (

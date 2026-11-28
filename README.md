@@ -110,7 +110,8 @@ $K run --id 3 --dir n3 --listen 127.0.0.1:7003 --peer $P1 --peer $P2
 全シャード(メタシャード `s0` を含む)に適用される。
 
 ```text
-put <key> <value> | del <key> | get <key> | split <key> | shards
+put <key> <value> | del <key> | get <key> | split <key>    (どれも末尾に in <名前空間> を付けられる)
+shards | namespace <名前> cft | namespaces
 status | members | add <id> <addr> <key> | promote <id> | remove <id> | collect | quit
 ```
 
@@ -119,6 +120,34 @@ ID はメタシャードが割り当て、分割後の両半分を登録簿に�
 率いるシャードの配置を報告してから、登録簿にある全シャードの範囲・エポック・レプリカを
 表示する。どちらもメタシャードのレプリカを持つノードならどこからでも実行でき、呼び出しは
 メタシャードのリーダーに届く。
+
+### 名前空間
+
+名前空間はキー空間の独立した区画で、合意方式(assurance)は作るときに決まる。シャードは
+必ずどれか 1 つの名前空間に属し、分割もその中でしか起きない。同じキー `user/1` でも
+名前空間が違えば別のデータになる。名前空間を指定しないキーは、クラスタ創設時からある
+`default`(`ns0`)のキーになるので、名前空間を使わなければ今までどおり動く。
+
+方式の名前は、耐える故障の種類で呼ぶ(アルゴリズム名とは分ける)。
+
+- `cft`(Crash Fault Tolerant、中身は Raft): 速度重視。レプリカは全部 1 人の運営者が
+  持ち、過半数が生きていれば止まらないが、レプリカの不正には耐えない。
+- `bft`(Byzantine Fault Tolerant、中身は HotStuff-2): BFT 耐性・分散化重視。
+  まだ名前空間としては作れない(下の「BFT シャードを動かす」を参照)。
+
+```text
+namespace payments cft       # 名前空間 payments を作り、最初のシャードをメタシャードの投票者で立てる
+put melon red in payments
+get melon in payments        # red
+get melon                    # default の melon(別のデータ)
+namespaces                   # default ns0 cft / payments ns1 cft
+```
+
+名前は英小文字・数字・`-` の 1〜63 文字(英字で始まり `-` で終わらない)。メタシャードが
+名前空間の ID と最初のシャードの ID を 1 つのトランザクションで取り、そのシャードを
+投票者の上に登録してから、コマンドを打ったノードが自分のレプリカを種から始める。その
+ノードが選挙を始め、他の投票者はリーダーからシャードを受け取る。トランザクションは 1 つの
+名前空間の中で閉じる(名前空間をまたぐトランザクションは後で入れる)。
 
 4 台目を足すには、既存ノードを `--peer` に並べて `--found` なしで起動し、リーダーで
 `add 4 127.0.0.1:7004 <4 の公開鍵>` を実行する。スナップショットとログで追いついた後に
@@ -136,7 +165,8 @@ $K client --dir client --peer $P1 get apple get melon
 ```
 
 `oleaph client` は並べた操作(`get <key>`・`put <key> <value>`・`del <key>`)を
-1 つのトランザクションとして実行する。シャードをまたぐときは二相コミットになる。
+1 つのトランザクションとして実行する。キーは `--namespace <名前>` の名前空間のもの
+(省略時は `default`)。シャードをまたぐときは二相コミットになる。
 `--peer` のノードからシャード地図を受け取り、各シャードのリーダーへ直接送る。
 `committed at <版>` なら書き込みは確定、`aborted` は競合なので再実行すればよい。
 

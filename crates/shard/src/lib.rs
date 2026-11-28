@@ -1,10 +1,13 @@
 //! Shards for OleaphDB: the keys split into spans, each held by its own
 //! Raft group, in the manner of `TiKV`'s regions.
 //!
-//! A [`Shard`] is an id, a [`Span`](oleaph_storage::Span) of keys
-//! `[start, end)`, and an [`Epoch`] that counts how often the span
-//! changed. A [`ShardMap`] tiles every key with shards, so a client finds
-//! the shard of any key. A [`ShardState`] is what one shard's replicas
+//! A [`Shard`] is the [`NamespaceId`] of the key space it belongs to, an
+//! id, a [`Span`](oleaph_storage::Span) of keys `[start, end)` of that
+//! namespace, and an [`Epoch`] that counts how often the span changed.
+//! Each namespace is a key space of its own: the same key in two
+//! namespaces is two keys, and a shard and both halves of its splits stay
+//! in its namespace. A [`ShardMap`] tiles every key of one namespace with
+//! shards, so a client finds the shard of any key. A [`ShardState`] is what one shard's replicas
 //! hold: the shard and the [`KvState`](oleaph_storage::KvState) of its
 //! keys.
 //!
@@ -40,7 +43,7 @@ mod shard;
 mod state;
 
 pub use ceiling::Ceiling;
-pub use id::{Epoch, ShardId};
+pub use id::{Epoch, NamespaceId, ShardId};
 pub use map::{ShardMap, Stale};
 pub use shard::{Halves, Shard, Split};
 pub use state::{Applied, ShardState, Unsplit};

@@ -5,7 +5,7 @@ use std::io;
 use std::sync::Arc;
 
 use futures_util::{Stream, TryStreamExt as _};
-use oleaph_shard::{Applied, Shard, ShardId, ShardState, Split};
+use oleaph_shard::{Applied, NamespaceId, Shard, ShardId, ShardState, Split};
 use oleaph_storage::{KvState, Outcome, Version};
 use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder};
@@ -66,7 +66,10 @@ impl StateMachine {
                 home,
             },
             None => Machine {
-                state: ShardState::new(Shard::whole(shard), KvState::default()),
+                state: ShardState::new(
+                    Shard::whole(NamespaceId::DEFAULT, shard),
+                    KvState::default(),
+                ),
                 applied: None,
                 membership: StoredMembership::default(),
                 snapshots,

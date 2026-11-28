@@ -12,12 +12,14 @@ use std::time::Duration;
 use oleaph_client::{Call, Lock, Reply, Shards, Transacted, answer, resolve_expired};
 use oleaph_consensus::{Duty, Replicated as _, Route, Transaction as _};
 use oleaph_crypto::NodeSecret;
-use oleaph_meta::{MetaError, Placement, Registry, Reported, allocate};
+use oleaph_meta::{
+    Assurance, Created, MetaError, NamespaceName, Placement, Registry, Reported, allocate,
+};
 use oleaph_raft::openraft::{self, AsyncRuntime as _, Instant as _, SnapshotPolicy};
 use oleaph_raft::{
     Error, Member, Membership, NodeId, Peer, Progress, Replica, Role, Status, Store, Txn,
 };
-use oleaph_shard::{Halves, Shard, ShardId, ShardMap, ShardState};
+use oleaph_shard::{Halves, NamespaceId, Shard, ShardId, ShardMap, ShardState};
 use oleaph_storage::{Deadline, KvOp, KvState, TxnId, WriteBatch};
 use openraft_rt_sim::{SimInstant, SimRuntime};
 use parking_lot::Mutex;
@@ -70,7 +72,7 @@ pub enum Outcome {
 /// What a client asks a shard's leader to do.
 #[derive(Debug, Clone)]
 enum Op {
-    Write(WriteBatch),
+    Write(NamespaceId, WriteBatch),
     Split { at: Vec<u8>, right: ShardId },
     AddLearner(ShardId, NodeId, Peer),
     Promote(ShardId, NodeId),
@@ -140,8 +142,8 @@ pub struct Cluster {
     members: BTreeMap<NodeId, Member>,
     /// The stores that are up. A crashed node keeps its directory.
     up: BTreeMap<NodeId, SimStore>,
-    /// Where the client thinks each key is.
-    map: Mutex<ShardMap>,
+    /// Where the client thinks each key of each namespace is.
+    maps: Mutex<BTreeMap<NamespaceId, ShardMap>>,
     /// The id of the last transaction across shards it coordinated.
     txns: Mutex<u128>,
 }
@@ -191,7 +193,7 @@ impl Cluster {
             network: Network::new(seed, faults),
             members,
             up: BTreeMap::new(),
-            map: Mutex::new(ShardMap::new()),
+            maps: Mutex::new(BTreeMap::from([(NamespaceId::DEFAULT, ShardMap::new())])),
             txns: Mutex::new(0),
         };
         for id in cluster.ids() {
@@ -233,10 +235,12 @@ impl Cluster {
             .collect()
     }
 
-    /// The shards as the client last saw them.
+    /// The shards of every namespace as the client last saw them, by
+    /// namespace and then by key.
     #[must_use]
     pub fn shards(&self) -> Vec<Shard> {
-        self.map.lock().iter().cloned().collect()
+        let maps = self.maps.lock();
+        maps.values().flat_map(ShardMap::iter).cloned().collect()
     }
 
     /// Stops `id`: it answers nothing until it is restarted, and comes back
@@ -297,13 +301,48 @@ impl Cluster {
     /// seconds of simulated time. A batch whose keys lie in different
     /// shards is rejected.
     pub async fn write(&self, batch: WriteBatch) -> Outcome {
-        self.submit(Op::Write(batch)).await
+        self.write_in(NamespaceId::DEFAULT, batch).await
+    }
+
+    /// Writes `batch`, whose keys are keys of `namespace`, as
+    /// [`Cluster::write`] does.
+    pub async fn write_in(&self, namespace: NamespaceId, batch: WriteBatch) -> Outcome {
+        self.submit(Op::Write(namespace, batch)).await
+    }
+
+    /// Makes a crash fault tolerant namespace called `name` on the meta
+    /// shard's voters, as a node's console does: the meta shard records
+    /// it and its first shard, and the meta shard's leader starts that
+    /// shard. The shard, or `None` when the name is taken or a step failed.
+    pub async fn create_namespace(&self, name: &NamespaceName) -> Option<Shard> {
+        let leader = self.leader_of(ShardId::META)?;
+        let members = self.leader_replica(ShardId::META)?.members();
+        let voters: BTreeMap<NodeId, Peer> = members
+            .peers()
+            .filter(|(id, _)| members.votes(*id))
+            .map(|(id, peer)| (id, peer.clone()))
+            .collect();
+        let replicas = voters.keys().copied().collect();
+        let created = self
+            .on_leader(ShardId::META, |meta| {
+                let replicas = &replicas;
+                async move { oleaph_meta::create(&meta, name, Assurance::Cft, replicas, 0).await }
+            })
+            .await?;
+        let Created::Founded(shard) = created else {
+            return None;
+        };
+        let store = self.up.get(&leader)?;
+        store.found_shard(shard.clone(), voters).await.ok()?;
+        self.adopt().await;
+        Some(shard)
     }
 
     /// Writes `batch` through `id` alone, without following leader hints.
     /// Gives up after three seconds of simulated time.
     pub async fn write_to(&self, id: NodeId, batch: WriteBatch) -> Outcome {
-        self.submit_to(id, Op::Write(batch)).await
+        self.submit_to(id, Op::Write(NamespaceId::DEFAULT, batch))
+            .await
     }
 
     /// Splits the shard that holds `at`, so that the keys from `at` on
@@ -493,7 +532,7 @@ impl Cluster {
         match SimRuntime::timeout(CLIENT_TIMEOUT, attempt).await {
             Ok(Ok(version)) => Transacted::Committed(version),
             Ok(Err(oleaph_consensus::Error::Storage(oleaph_storage::Error::Aborted(abort)))) => {
-                let _resolved: bool = resolve_expired(self, ShardId::FIRST, &abort).await;
+                let _resolved: bool = resolve_expired(self, &replica.shard(), &abort).await;
                 Transacted::Aborted
             }
             Ok(Err(oleaph_consensus::Error::Discarded { .. })) | Err(_) => Transacted::Unknown,
@@ -653,23 +692,26 @@ impl Cluster {
     /// holds prepared past its deadline.
     async fn resolve(&self) {
         let now = now();
-        let expired: Vec<(ShardId, Lock)> = self
+        let expired: Vec<(Shard, Lock)> = self
             .shards()
-            .iter()
-            .filter_map(|shard| Some((shard.id(), self.leader_replica(shard.id())?)))
+            .into_iter()
+            .filter_map(|shard| {
+                let replica = self.leader_replica(shard.id())?;
+                Some((shard, replica))
+            })
             .flat_map(|(shard, replica)| {
                 replica.read_local(|state| {
                     state
                         .kv()
                         .pending()
                         .filter(|prepared| prepared.deadline().has_passed(now))
-                        .map(|prepared| (shard, Lock::of(prepared)))
+                        .map(|prepared| (shard.clone(), Lock::of(prepared)))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
         for (shard, lock) in expired {
-            lock.resolve(self, shard).await;
+            lock.resolve(self, &shard).await;
         }
     }
 
@@ -693,7 +735,7 @@ impl Cluster {
     /// The meta shard, then every shard the client knows of.
     fn groups(&self) -> Vec<ShardId> {
         std::iter::once(ShardId::META)
-            .chain(self.map.lock().iter().map(Shard::id))
+            .chain(self.shards().iter().map(Shard::id))
             .collect()
     }
 
@@ -762,7 +804,7 @@ impl Cluster {
     /// holds, as that replica holds it. Replicas a membership change left
     /// behind, which no leader updates any more, do not count.
     fn mapped(&self, memberships: &BTreeMap<ShardId, Membership>) -> bool {
-        let map = self.map.lock();
+        let maps = self.maps.lock();
         self.up.iter().all(|(id, store)| {
             store
                 .replicas()
@@ -774,7 +816,11 @@ impl Cluster {
                             .get(&replica.shard_id())
                             .is_none_or(|membership| membership.get_node(id).is_some())
                 })
-                .all(|replica| map.get(replica.shard_id()) == Some(&replica.shard()))
+                .all(|replica| {
+                    let shard = replica.shard();
+                    let map = maps.get(&shard.namespace());
+                    map.and_then(|map| map.get(shard.id())) == Some(&shard)
+                })
         })
     }
 
@@ -790,11 +836,18 @@ impl Cluster {
         self.adopt().await;
     }
 
-    /// Routes by the registry from now on, once it tiles every key. The
-    /// client knows where shards are only from the registry.
+    /// Routes each namespace by the registry from now on, once it tiles
+    /// every key of the namespace. The client knows where shards are only
+    /// from the registry.
     async fn adopt(&self) {
-        if let Some(map) = self.registry().await.and_then(|registry| registry.map()) {
-            *self.map.lock() = map;
+        let Some(registry) = self.registry().await else {
+            return;
+        };
+        let mut maps = self.maps.lock();
+        for (_, namespace) in registry.namespaces() {
+            if let Some(map) = registry.map(namespace.id()) {
+                drop(maps.insert(namespace.id(), map));
+            }
         }
     }
 
@@ -963,16 +1016,19 @@ impl Cluster {
         Outcome::Acked
     }
 
-    /// The shard `op` is for.
-    fn shard_of(&self, op: &Op) -> ShardId {
-        let key = match op {
+    /// The shard `op` is for, if the client knows the shards of its
+    /// namespace. The simulated client splits in the default namespace.
+    fn shard_of(&self, op: &Op) -> Option<ShardId> {
+        let (namespace, key) = match op {
             Op::AddLearner(shard, ..) | Op::Promote(shard, _) | Op::Remove(shard, _) => {
-                return *shard;
+                return Some(*shard);
             }
-            Op::Write(batch) => batch.ops().first().map_or(&[][..], KvOp::key),
-            Op::Split { at, .. } => at,
+            Op::Write(namespace, batch) => {
+                (*namespace, batch.ops().first().map_or(&[][..], KvOp::key))
+            }
+            Op::Split { at, .. } => (NamespaceId::DEFAULT, at.as_slice()),
         };
-        self.locate(key)
+        self.locate(namespace, key)
     }
 
     /// Routes `op` to its shard's leader. Gives up after three seconds of
@@ -1009,7 +1065,9 @@ impl Cluster {
     async fn route(&self, op: Op) -> Outcome {
         let mut hint = None;
         for _ in 0..ROUTE_TRIES {
-            let shard = self.shard_of(&op);
+            let Some(shard) = self.shard_of(&op) else {
+                break;
+            };
             let target = hint
                 .or_else(|| self.leader_of(shard))
                 .or_else(|| self.up.keys().next().copied());
@@ -1032,7 +1090,7 @@ impl Cluster {
     /// Submits `op` to `id`: the outcome when it took, logged or refused
     /// `op` for good, otherwise what to try next.
     async fn attempt(&self, id: NodeId, op: Op) -> Result<Outcome, Retry> {
-        let shard = self.shard_of(&op);
+        let shard = self.shard_of(&op).ok_or(Retry::Reroute)?;
         let store = self
             .up
             .get(&id)
@@ -1042,7 +1100,7 @@ impl Cluster {
         };
         let splits = matches!(op, Op::Split { .. });
         let result = match op {
-            Op::Write(batch) => replica.write(batch).await.map(drop),
+            Op::Write(_, batch) => replica.write(batch).await.map(drop),
             Op::Split { at, right } => match store.split(shard, &at, right).await {
                 Ok(halves) => {
                     self.report_split(store, &halves).await;
@@ -1066,7 +1124,7 @@ impl Cluster {
             // A lock whose coordinator gave up is resolved, and the write
             // tried again.
             Err(Error::Storage(oleaph_storage::Error::Aborted(abort)))
-                if resolve_expired(self, shard, &abort).await =>
+                if resolve_expired(self, &replica.shard(), &abort).await =>
             {
                 Err(Retry::To(Some(id)))
             }
@@ -1116,14 +1174,14 @@ fn peer(member: &Member) -> Peer {
 /// The client reaches each shard's leader directly, answering its calls
 /// as a node would.
 impl Shards for Cluster {
-    /// As the client's map has it.
-    fn locate(&self, key: &[u8]) -> ShardId {
-        self.map.lock().locate(key).id()
+    /// As the client's map of the namespace has it.
+    fn locate(&self, namespace: NamespaceId, key: &[u8]) -> Option<ShardId> {
+        Some(self.maps.lock().get(&namespace)?.locate(key).id())
     }
 
-    async fn refresh(&self) -> Vec<ShardId> {
+    async fn refresh(&self) -> Vec<Shard> {
         self.learn().await;
-        self.shards().iter().map(Shard::id).collect()
+        self.shards()
     }
 
     async fn call(&self, shard: ShardId, call: Call) -> Option<Reply> {
