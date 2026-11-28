@@ -31,6 +31,10 @@ const HANDOFF: u8 = 13;
 const PART_MANIFEST: u8 = 0;
 const PART_CHUNK: u8 = 1;
 
+/// Whether a handoff carries the sender's newest certified checkpoint.
+const NO_CHECKPOINT: u8 = 0;
+const CHECKPOINT_FOLLOWS: u8 = 1;
+
 /// A message between the replicas of a shard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -63,9 +67,12 @@ pub enum Message {
     /// A chunk of the state at the checkpoint of this height: its index
     /// and its bytes.
     Chunk(Height, u32, Vec<u8>),
-    /// How each epoch since the charter's succeeded the one before, for a
-    /// replica that sent what only an epoch the sender left can check.
-    Handoff(Vec<Succession>),
+    /// How each epoch since the charter's succeeded the one before, and
+    /// the newest checkpoint the sender's committee certified, for a
+    /// replica that sent what only another epoch can check: the receiver
+    /// follows them if it is behind, and answers with its own if the
+    /// sender is.
+    Handoff(Vec<Succession>, Option<CheckpointCertificate>),
 }
 
 impl Message {
@@ -134,12 +141,19 @@ impl Message {
                 out.write_all(&index.to_le_bytes())?;
                 put_bytes(out, bytes)
             }
-            Self::Handoff(successions) => {
+            Self::Handoff(successions, newest) => {
                 out.write_all(&[HANDOFF])?;
                 put_count(out, successions.len())?;
                 successions
                     .iter()
-                    .try_for_each(|succession| succession.encode(out))
+                    .try_for_each(|succession| succession.encode(out))?;
+                match newest {
+                    Some(certificate) => {
+                        out.write_all(&[CHECKPOINT_FOLLOWS])?;
+                        certificate.encode(out)
+                    }
+                    None => out.write_all(&[NO_CHECKPOINT]),
+                }
             }
         })
     }
@@ -191,7 +205,12 @@ impl Message {
                 let successions = (0..count)
                     .map(|_| Succession::decode(reader))
                     .collect::<Result<_, _>>()?;
-                Ok(Self::Handoff(successions))
+                let newest = match reader.read::<u8>()? {
+                    NO_CHECKPOINT => None,
+                    CHECKPOINT_FOLLOWS => Some(CheckpointCertificate::decode(reader)?),
+                    other => return Err(DecodeError::Tag(other)),
+                };
+                Ok(Self::Handoff(successions, newest))
             }
             other => Err(DecodeError::Tag(other)),
         }
@@ -265,6 +284,30 @@ mod tests {
             proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..12), 0..4),
         )
             .prop_map(|(view, justify, commands)| Block::new(View::new(view), justify, commands))
+    }
+
+    /// Handoffs of up to two epochs, with or without a newest checkpoint.
+    fn handoff() -> impl Strategy<Value = Message> {
+        (
+            proptest::collection::vec(any::<[u8; 32]>(), 0..3),
+            proptest::option::of(any::<u64>()),
+        )
+            .prop_map(|(blocks, newest)| {
+                Message::Handoff(
+                    (1..)
+                        .zip(blocks)
+                        .map(|(epoch, block)| succession_to(epoch, &[1, 2, 3], BlockId::new(block)))
+                        .collect(),
+                    newest.map(|height| {
+                        certify(Checkpoint::new(
+                            Height::new(height),
+                            BlockId::new([7; 32]),
+                            View::new(height),
+                            StateRoot::new([8; 32]),
+                        ))
+                    }),
+                )
+            })
     }
 
     fn message() -> impl Strategy<Value = Message> {
@@ -346,14 +389,7 @@ mod tests {
                     index,
                     bytes
                 )),
-            proptest::collection::vec(any::<[u8; 32]>(), 0..3).prop_map(|blocks| {
-                Message::Handoff(
-                    (1..)
-                        .zip(blocks)
-                        .map(|(epoch, block)| succession_to(epoch, &[1, 2, 3], BlockId::new(block)))
-                        .collect(),
-                )
-            }),
+            handoff(),
         ]
     }
 

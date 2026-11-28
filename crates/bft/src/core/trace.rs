@@ -25,7 +25,7 @@ use std::{cmp, env, fs};
 use oleaph_consensus::NodeId;
 use serde_json::Value;
 
-use super::{Config, Core, Event};
+use super::{Config, Core, Event, Following};
 use crate::block::{Block as RealBlock, Order, Proposal as RealProposal};
 use crate::checkpoint::{Checkpoint, Height, StateRoot, Succession};
 use crate::fixture::{DOMAIN, certify, change_to, committee, key};
@@ -319,7 +319,7 @@ impl Replay {
             | Message::Want(..)
             | Message::Manifest(..)
             | Message::Chunk(..)
-            | Message::Handoff(_) => {}
+            | Message::Handoff(..) => {}
         }
         None
     }
@@ -345,7 +345,7 @@ impl Replay {
             .map(|node| (node.decided, node.followed))
             .unwrap_or_default();
         if let Some(succession) = &followed {
-            let _again = core.follow(std::slice::from_ref(succession));
+            let _again = core.follow(std::slice::from_ref(succession), None);
         }
         drop(self.nodes.insert(
             name.to_owned(),
@@ -445,10 +445,10 @@ impl Replay {
         let ids: BTreeSet<BlockId> = decided.iter().map(|block| self.id(*block)).collect();
         let at = self.at("handOff");
         let node = self.nodes.get_mut(name).unwrap();
-        let followed = node.core.follow(std::slice::from_ref(&succession));
+        let followed = node.core.follow(std::slice::from_ref(&succession), None);
         assert_eq!(
             followed,
-            Ok(Some(succession.end().clone())),
+            Ok(Some(Following::End(succession.end().clone()))),
             "{at}: follows on"
         );
         node.decided = ids;

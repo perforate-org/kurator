@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, VecDeque};
 use oleaph_consensus::NodeId;
 use oleaph_wal::Options;
 
-use super::{Config, Core, Event};
+use super::{Config, Core, Event, Following};
 use crate::block::{Block, Order, Proposal};
 use crate::checkpoint::{
-    Boundary, Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot,
+    Boundary, Checkpoint, CheckpointCertificate, Height, Part, Share, StateRoot, Succession,
 };
 use crate::committee::{ChangeCertificate, Domain};
-use crate::fixture::{DOMAIN, change_to, committee, key, succession_in, succession_to};
+use crate::fixture::{DOMAIN, certify_in, change_to, committee, key, succession_in, succession_to};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::replica::Journal;
@@ -1078,7 +1078,7 @@ fn a_change_the_committee_admits_ends_the_epoch_at_its_block() {
             | Message::Want(..)
             | Message::Manifest(..)
             | Message::Chunk(..)
-            | Message::Handoff(_) => false,
+            | Message::Handoff(..) => false,
         });
     assert!(handed_on, "the command it held goes on: {started:?}");
     let Some(Record::Epoch(succession)) = records.get(1) else {
@@ -1128,15 +1128,15 @@ fn a_replica_follows_only_successions_its_committees_made() {
     let mut behind = core(NodeId::new(4));
     let first = succession_to(1, &[1, 2, 3], BlockId::new([1; 32]));
     let second = succession_in(first.domain(), 2, &[1, 2, 3], BlockId::new([2; 32]));
-    assert_eq!(behind.follow(&[]), Ok(None), "nothing to follow");
+    assert_eq!(behind.follow(&[], None), Ok(None), "nothing to follow");
     assert_eq!(
-        behind.follow(std::slice::from_ref(&second)),
+        behind.follow(std::slice::from_ref(&second), None),
         Err(Rejection::OtherEpoch(Epoch::new(2), Epoch::FIRST)),
         "an epoch after the next"
     );
     let unsigned = succession_in(Domain::new([4; 32]), 1, &[1, 2, 3], BlockId::new([1; 32]));
     assert_eq!(
-        behind.follow(&[unsigned, second.clone()]),
+        behind.follow(&[unsigned, second.clone()], None),
         Err(Rejection::Forged(NodeId::new(1))),
         "a change its committee did not make"
     );
@@ -1144,11 +1144,102 @@ fn a_replica_follows_only_successions_its_committees_made() {
 
     // Two epochs on: it starts the first, and ends that one at the
     // second's change, to take the state the second starts from.
-    let end = behind.follow(&[first.clone(), second.clone()]);
-    assert_eq!(end, Ok(Some(second.end().clone())), "the state to take");
+    let end = behind.follow(&[first.clone(), second.clone()], None);
+    assert_eq!(
+        end,
+        Ok(Some(Following::End(second.end().clone()))),
+        "the state to take"
+    );
     assert_eq!(behind.epoch(), Epoch::new(1), "the epoch between");
     assert_eq!(behind.ending(), Some(second.change()), "ended");
-    assert_eq!(behind.follow(&[first]), Ok(None), "none newer");
+    assert_eq!(behind.follow(&[first], None), Ok(None), "none newer");
+}
+
+#[test]
+fn a_replica_takes_the_newest_state_of_the_epoch_it_follows_to() {
+    let first = succession_to(1, &[1, 2, 3], BlockId::new([1; 32]));
+    let at = |height: u64| {
+        Checkpoint::new(
+            Height::new(height),
+            BlockId::new([5; 32]),
+            View::new(4),
+            StateRoot::new([7; 32]),
+        )
+    };
+    let newest = certify_in(first.domain(), at(2));
+    // Signed in the epoch before, or no newer than the end: the end it is.
+    for (stale, why) in [
+        (certified(at(2)), "another epoch's"),
+        (certify_in(first.domain(), at(1)), "no newer than the end"),
+    ] {
+        let mut behind = core(NodeId::new(4));
+        assert_eq!(
+            behind.follow(std::slice::from_ref(&first), Some(&stale)),
+            Ok(Some(Following::End(first.end().clone()))),
+            "{why}"
+        );
+    }
+    let mut behind = core(NodeId::new(4));
+    assert_eq!(
+        behind.follow(std::slice::from_ref(&first), Some(&newest)),
+        Ok(Some(Following::Past(
+            Box::new(first.clone()),
+            newest.clone()
+        ))),
+        "the newer state"
+    );
+    assert_eq!(behind.epoch(), Epoch::FIRST, "not yet in the next epoch");
+
+    // Once it holds that state, it starts the epoch there.
+    let records = behind.leap(first.clone(), &newest);
+    assert_eq!(behind.epoch(), Epoch::new(1), "in the next epoch");
+    assert_eq!(behind.ending(), None, "deciding again");
+    assert_eq!(behind.committee(), first.change().committee());
+    assert_eq!(
+        records.first(),
+        Some(&Record::Epoch(first)),
+        "the epoch on record"
+    );
+    assert_eq!(
+        records.last(),
+        Some(&Record::Checkpoint(newest.clone())),
+        "and the state it starts from"
+    );
+    let mut recovered = Recovered::default();
+    for record in records {
+        recovered.note(record);
+    }
+    assert_eq!(recovered.checkpoint(), Some(&newest), "after a restart");
+}
+
+#[test]
+fn a_replica_answers_a_handoff_from_one_further_behind() {
+    let first = succession_to(1, &[1, 2, 3], BlockId::new([1; 32]));
+    let mut recovered = Recovered::default();
+    recovered.note(Record::Epoch(first.clone()));
+    let mut ahead = Core::recover(config(NodeId::new(1)), recovered);
+    let _started = ahead.handle(Event::Start).persisted();
+    let handoff = |eras: Vec<Succession>| Event::Received {
+        from: NodeId::new(4),
+        message: Message::Handoff(eras, None),
+    };
+    let answers = |core: &mut Core, event| {
+        core.handle(event)
+            .persisted()
+            .messages()
+            .iter()
+            .filter(|outgoing| {
+                matches!(outgoing.message(), Message::Handoff(eras, _) if eras.len() == 1)
+            })
+            .count()
+    };
+    assert_eq!(answers(&mut ahead, handoff(vec![first])), 0, "level");
+    assert_eq!(answers(&mut ahead, handoff(Vec::new())), 1, "behind");
+    assert_eq!(
+        answers(&mut ahead, handoff(Vec::new())),
+        0,
+        "once a timeout"
+    );
 }
 
 #[test]
@@ -1174,7 +1265,7 @@ fn a_replica_shows_one_that_missed_an_epoch_how_it_ended_once_a_timeout() {
         let step = core.handle(event).persisted();
         step.messages()
             .iter()
-            .filter(|outgoing| matches!(outgoing.message(), Message::Handoff(chain) if chain.len() == 1))
+            .filter(|outgoing| matches!(outgoing.message(), Message::Handoff(chain, _) if chain.len() == 1))
             .count()
     };
     assert_eq!(handed(&mut ahead, stale(2)), 1, "a member");

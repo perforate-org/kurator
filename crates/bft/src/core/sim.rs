@@ -325,7 +325,7 @@ impl Sim {
                 | Message::Want(..)
                 | Message::Manifest(..)
                 | Message::Chunk(..)
-                | Message::Handoff(_) => continue,
+                | Message::Handoff(..) => continue,
             };
             let first = *replica.signed.entry((view, kind)).or_insert(block);
             if first != block {

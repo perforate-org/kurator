@@ -580,3 +580,88 @@ fn a_member_that_missed_the_end_of_an_epoch_follows_on() {
         assert_eq!(state.get(b"b"), Some(b"2".as_slice()), "{node} decided");
     }
 }
+
+/// Decides `command` through `node` and waits until every member of the
+/// shard's newest epoch certified a checkpoint past the one that started
+/// it.
+fn certify_past_the_start(cluster: &Cluster, node: u64, command: Command) {
+    let start = cluster.replica(node).checkpoint().unwrap();
+    let _decided = cluster.run(cluster.replica(node).propose(command)).unwrap();
+    cluster.until(|cluster| {
+        cluster
+            .replica(node)
+            .checkpoint()
+            .is_some_and(|newest| newest.supersedes(&start))
+    });
+}
+
+#[test]
+fn a_newcomer_takes_the_newest_state_and_joins() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let left = NodeId::new(4);
+    let away = cluster.replicas.remove(&left).unwrap();
+    let _put = cluster
+        .run(cluster.replica(1).propose(put("a", "1")))
+        .unwrap();
+    let epoch = cluster.run(cluster.replica(1).change(change_to(1, &[1, 2, 3, 5])));
+    assert_eq!(epoch.unwrap(), Epoch::new(1), "the next epoch");
+    cluster.until(|cluster| (1..=3).all(|node| cluster.replica(node).epoch() == Epoch::new(1)));
+    // The state at the end is gone once the new committee certifies one
+    // of its own.
+    certify_past_the_start(&cluster, 1, put("b", "2"));
+
+    // Started with the charter, a newcomer knows only the first epoch.
+    // The members show it how the epochs succeeded and the newest state,
+    // and it takes that state and joins.
+    let newcomer = NodeId::new(5);
+    let joining = open_on(
+        &cluster.dir,
+        &cluster.wire,
+        newcomer,
+        ShardState::default(),
+        every_block(),
+    );
+    assert_eq!(joining.epoch(), Epoch::FIRST, "the charter's epoch");
+    drop(cluster.replicas.insert(newcomer, joining));
+    cluster.until(|cluster| cluster.replica(5).epoch() == Epoch::new(1));
+    let _joined = cluster
+        .run(cluster.replica(5).propose(put("c", "3")))
+        .unwrap();
+    cluster.pump(2000);
+    let state = cluster.run(cluster.replica(5).read(Clone::clone)).unwrap();
+    for (key, value) in [("a", "1"), ("b", "2"), ("c", "3")] {
+        assert_eq!(state.get(key.as_bytes()), Some(value.as_bytes()), "{key}");
+    }
+
+    // A member left out that missed it all retires, with nothing to take.
+    drop(cluster.replicas.insert(left, away));
+    cluster.until(|cluster| {
+        cluster
+            .run(cluster.replica(4).propose(put("x", "1")))
+            .is_err()
+    });
+}
+
+#[test]
+fn a_member_that_missed_the_first_checkpoint_of_an_epoch_takes_it() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let late = NodeId::new(3);
+    let away = cluster.replicas.remove(&late).unwrap();
+    let _put = cluster
+        .run(cluster.replica(1).propose(put("a", "1")))
+        .unwrap();
+    // The same members, in an epoch of their own, decide without it.
+    let epoch = cluster.run(cluster.replica(1).change(change_to(1, &[1, 2, 3, 4])));
+    assert_eq!(epoch.unwrap(), Epoch::new(1), "the next epoch");
+    cluster.until(|cluster| {
+        [1, 2, 4]
+            .iter()
+            .all(|node| cluster.replica(*node).epoch() == Epoch::new(1))
+    });
+    certify_past_the_start(&cluster, 1, put("b", "2"));
+
+    drop(cluster.replicas.insert(late, away));
+    cluster.until(|cluster| cluster.replica(3).epoch() == Epoch::new(1));
+    let state = cluster.run(cluster.replica(3).read(Clone::clone)).unwrap();
+    assert_eq!(state.get(b"b"), Some(b"2".as_slice()), "the newest state");
+}
