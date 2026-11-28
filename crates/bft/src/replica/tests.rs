@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::task::noop_waker_ref;
-use oleaph_consensus::{Duty, NodeId, Reads, Replicated, Route, Transaction as _};
+use oleaph_consensus::{Duty, NodeId, Peer, Reads, Replicated, Route, Transaction as _};
 use oleaph_shard::ShardState;
 use oleaph_storage::{Command, KvState, Outcome, WriteBatch};
 use oleaph_wal::Options;
@@ -19,7 +19,7 @@ use super::{Host, Journal, Ledger, Replica, Settled};
 use crate::block::Order;
 use crate::checkpoint::{Height, Interval};
 use crate::core::{Config, Core};
-use crate::fixture::{DOMAIN, change_to, committee, key};
+use crate::fixture::{self, DOMAIN, change_to, committee, key};
 use crate::message::Message;
 use crate::rejection::Rejection;
 use crate::view::Epoch;
@@ -34,6 +34,8 @@ struct Loopback {
     wire: Wire,
     /// The timers armed, oldest first.
     wakes: Arc<Mutex<Vec<(View, Duration)>>>,
+    /// The members it learned of, and where they are.
+    met: Arc<Mutex<BTreeMap<NodeId, Peer>>>,
 }
 
 impl Host for Loopback {
@@ -43,6 +45,10 @@ impl Host for Loopback {
 
     fn wake(&self, view: View, after: Duration) {
         self.wakes.lock().push((view, after));
+    }
+
+    fn meet(&self, node: NodeId, peer: &Peer) {
+        drop(self.met.lock().insert(node, peer.clone()));
     }
 }
 
@@ -74,6 +80,7 @@ fn open_on(
         node,
         wire: Arc::clone(wire),
         wakes: Arc::default(),
+        met: Arc::default(),
     };
     Replica::start(core, journal, ledger, BTreeMap::new(), host)
 }
@@ -622,6 +629,15 @@ fn a_newcomer_takes_the_newest_state_and_joins() {
         every_block(),
     );
     assert_eq!(joining.epoch(), Epoch::FIRST, "the charter's epoch");
+    // The members learned where it is from the change.
+    for node in 1..=3 {
+        let met = cluster.replica(node).host.met.lock().clone();
+        assert_eq!(
+            met,
+            fixture::peers(&[1, 2, 3, 5]),
+            "{node} met the committee"
+        );
+    }
     drop(cluster.replicas.insert(newcomer, joining));
     cluster.until(|cluster| cluster.replica(5).epoch() == Epoch::new(1));
     let _joined = cluster

@@ -16,7 +16,7 @@ use quinn::crypto::rustls::QuicServerConfig;
 #[cfg(feature = "bft")]
 use crate::bft::{BftReplica, Committees};
 use crate::connection::{Channel, MAX_MESSAGE, Quic};
-use crate::roster::{Caller, Roster};
+use crate::roster::{Caller, Members, Roster};
 use crate::tls::{Identity, presented_key};
 use crate::{Inbox, Tokio};
 
@@ -132,9 +132,9 @@ impl Endpoint {
     pub fn serve(self, inbox: Inbox) -> Result<Server, NetError> {
         let quic = self.transport();
         #[cfg(feature = "bft")]
-        let committees = self.committees.keys();
+        let committees: Box<dyn Members> = Box::new(self.committees.clone());
         #[cfg(not(feature = "bft"))]
-        let committees = BTreeMap::new();
+        let committees: Box<dyn Members> = Box::new(BTreeMap::new());
         let roster = Arc::new(Roster::new(
             self.bootstrap,
             inbox.memberships(),

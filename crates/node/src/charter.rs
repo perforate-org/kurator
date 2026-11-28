@@ -19,8 +19,12 @@
 //! operator runs two members: a committee tolerates a third of its
 //! members failing only when they fail apart.
 //!
-//! Until committees change in consensus, a charter is all a node knows of
-//! its BFT shard: change it on every member at once, or not at all.
+//! A charter names the shard's first committee, and stays the same
+//! however the committee changes: the committee decides each change, with
+//! where its new members are, and a node learns the committee of today
+//! from what was decided. A node that joins a later committee starts with
+//! the same charter, though it is not a member of the first: the members
+//! show it how the committees changed, and hand it the state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -64,9 +68,6 @@ pub enum CharterError {
     /// No line names a member.
     #[error("no `member` line")]
     NoMembers,
-    /// The node is not a member.
-    #[error("{0} is not a member of the committee")]
-    Absent(NodeId),
     /// The node's secret derives other keys than the charter lists for it.
     #[error("the charter lists other keys for {0} than its secret derives")]
     OtherKeys(NodeId),
@@ -224,18 +225,19 @@ impl Charter {
         &self.peers
     }
 
-    /// Seats node `node`, which `secret` signs for, in the committee.
+    /// Seats node `node`, which `secret` signs for, at the shard: in the
+    /// first committee if the charter names it, or else as one a later
+    /// committee holds, or will.
     ///
     /// # Errors
     ///
-    /// When the node is not a member under the keys `secret` derives.
+    /// When the charter names the node under other keys than `secret`
+    /// derives.
     pub fn seat(self, node: NodeId, secret: &NodeSecret) -> Result<Seat<'_>, CharterError> {
-        let (Some(consensus), Some(peer)) = (self.committee.key(node), self.peers.get(&node))
-        else {
-            return Err(CharterError::Absent(node));
-        };
-        let mine = *consensus == secret.public_key(KeyPurpose::Consensus)
-            && *peer.key() == secret.public_key(KeyPurpose::Transport);
+        let consensus = self.committee.key(node);
+        let transport = self.peers.get(&node).map(Peer::key);
+        let mine = consensus.is_none_or(|key| *key == secret.public_key(KeyPurpose::Consensus))
+            && transport.is_none_or(|key| *key == secret.public_key(KeyPurpose::Transport));
         if mine {
             Ok(Seat {
                 charter: self,
@@ -335,8 +337,8 @@ mod tests {
         );
         assert_eq!(
             seated(3, &secret(3)),
-            Err(CharterError::Absent(NodeId::new(3))),
-            "not a member"
+            Ok(()),
+            "one to join a later committee"
         );
         // One key of its own is not enough.
         let transport = secret(1).public_key(KeyPurpose::Transport);

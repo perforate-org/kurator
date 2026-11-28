@@ -5,6 +5,9 @@
 //! sends the queue on that peer's persistent connection, one message at a
 //! time, on the BFT channel. A message that finds its queue full, or its
 //! peer unreachable, is lost: the protocol asks again for what it needs.
+//! The peers are the charter's committee's at first; the replica tells
+//! its wire of each member a later committee brings, as the change that
+//! starts it names them.
 //!
 //! The server hands what a committee's member sends to the shard's
 //! replica, and answers once the replica took it in. Taking a message in
@@ -28,6 +31,7 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use crate::connection::{Channel, Quic, QuicLink};
+use crate::roster::Members;
 
 /// A BFT replica whose host is QUIC.
 pub type BftReplica = oleaph_bft::Replica<Wire>;
@@ -73,24 +77,19 @@ impl Wiring {
         ledger: Ledger,
         peers: BTreeMap<NodeId, Peer>,
     ) -> Arc<BftReplica> {
-        let queues = peers
-            .iter()
-            .filter(|(node, _)| **node != core.node())
-            .map(|(node, peer)| {
-                let (queue, waiting) = mpsc::channel(QUEUE);
-                let link = self.quic.connect(*node, peer);
-                drop(self.runtime.spawn(carry(link, waiting)));
-                (*node, queue)
-            })
-            .collect();
         Arc::new_cyclic(|replica| {
             let wire = Wire {
+                node: core.node(),
                 shard: self.shard,
-                queues,
+                quic: self.quic,
+                queues: Mutex::new(BTreeMap::new()),
                 timer: Mutex::new(None),
                 replica: Weak::clone(replica),
                 runtime: self.runtime,
             };
+            for (node, peer) in &peers {
+                wire.meet(*node, peer);
+            }
             oleaph_bft::Replica::start(core, journal, ledger, peers, wire)
         })
     }
@@ -108,9 +107,12 @@ async fn carry(mut link: QuicLink, mut waiting: mpsc::Receiver<Vec<u8>>) {
 /// The QUIC [`Host`] of one BFT replica.
 #[derive(Debug)]
 pub struct Wire {
+    /// The node it runs on, which sends itself nothing.
+    node: NodeId,
     shard: ShardId,
-    /// The queue to each other member.
-    queues: BTreeMap<NodeId, mpsc::Sender<Vec<u8>>>,
+    quic: Quic,
+    /// The queue to each other member of every committee it knows.
+    queues: Mutex<BTreeMap<NodeId, mpsc::Sender<Vec<u8>>>>,
     /// The timer armed last.
     timer: Mutex<Option<AbortHandle>>,
     /// The replica the timer expires, once it runs.
@@ -120,11 +122,25 @@ pub struct Wire {
 
 impl Host for Wire {
     fn send(&self, to: NodeId, message: &Message) {
-        let (Some(queue), Ok(frame)) = (self.queues.get(&to), frame(self.shard, message)) else {
+        let Ok(frame) = frame(self.shard, message) else {
             return;
         };
         // A full queue drops the message: the peer is behind or gone.
-        let _queued = queue.try_send(frame);
+        if let Some(queue) = self.queues.lock().get(&to) {
+            let _queued = queue.try_send(frame);
+        }
+    }
+
+    /// Opens a queue to `node` at `peer`, in place of any it had: the
+    /// queue it replaces closes, and its task ends.
+    fn meet(&self, node: NodeId, peer: &Peer) {
+        if node == self.node {
+            return;
+        }
+        let (queue, waiting) = mpsc::channel(QUEUE);
+        let link = self.quic.connect(node, peer);
+        drop(self.runtime.spawn(carry(link, waiting)));
+        drop(self.queues.lock().insert(node, queue));
     }
 
     fn wake(&self, view: View, after: Duration) {
@@ -168,20 +184,6 @@ impl Committees {
         Self { replicas }
     }
 
-    /// The transport key of every member of every committee.
-    pub(crate) fn keys(&self) -> BTreeMap<NodeId, VerifyingKey> {
-        self.replicas
-            .values()
-            .flat_map(|replica| {
-                replica
-                    .members()
-                    .peers()
-                    .map(|(node, peer)| (node, peer.key().clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
     /// Hands the message `frame` holds to its shard's replica, when
     /// `sender` is a member of that shard's committee. Frames that are not
     /// are dropped, as a lost message would be.
@@ -189,10 +191,12 @@ impl Committees {
         let Some((shard, message)) = unframe(frame) else {
             return;
         };
+        // A member of any committee it knows, which may be behind or
+        // ahead of this one's.
         let Some(replica) = self
             .replicas
             .get(&shard)
-            .filter(|replica| replica.members().votes(sender))
+            .filter(|replica| replica.members().peer(sender).is_some())
         else {
             return;
         };
@@ -207,6 +211,23 @@ impl Committees {
             Some(replica) => Ok(oleaph_client::answer(&**replica, call).await),
             None => Err(call),
         }
+    }
+}
+
+impl Members for Committees {
+    /// The transport key of every member of every committee each replica
+    /// knows.
+    fn keys(&self) -> BTreeMap<NodeId, VerifyingKey> {
+        self.replicas
+            .values()
+            .flat_map(|replica| {
+                replica
+                    .members()
+                    .peers()
+                    .map(|(node, peer)| (node, peer.key().clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 }
 

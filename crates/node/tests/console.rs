@@ -548,8 +548,9 @@ fn a_node_runs_the_bft_shards_its_charters_seat_it_in() {
     let charter = dir.path().join("charter");
     let seat = |node| format!("member {node} 127.0.0.1:1 {transport} {consensus} alice\n");
 
-    // A charter that seats another node.
-    std::fs::write(&charter, format!("shard 40\n{}", seat(2))).unwrap();
+    // A charter that seats the node under keys not its own.
+    let swapped = format!("member 1 127.0.0.1:1 {consensus} {transport} alice\n");
+    std::fs::write(&charter, format!("shard 40\n{swapped}")).unwrap();
     let output = Command::new(OLEAPH)
         .args(["run", "--id", "1", "--listen", "127.0.0.1:0", "--bft"])
         .arg(&charter)
@@ -559,7 +560,7 @@ fn a_node_runs_the_bft_shards_its_charters_seat_it_in() {
         .unwrap();
     assert!(!output.status.success(), "fails");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("not a member"), "explains: {stderr}");
+    assert!(stderr.contains("other keys"), "explains: {stderr}");
 
     // A committee of one runs, and runs again from its journal.
     std::fs::write(&charter, format!("shard 40\n{}", seat(1))).unwrap();

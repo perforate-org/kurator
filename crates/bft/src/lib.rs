@@ -78,7 +78,10 @@ pub use vote::{BlockId, Certificate, Justify, Vote};
 /// domain.
 #[cfg(test)]
 mod fixture {
-    use oleaph_consensus::NodeId;
+    use std::collections::BTreeMap;
+    use std::net::SocketAddr;
+
+    use oleaph_consensus::{NodeId, Peer};
     use oleaph_crypto::{Algorithm, SigningKey};
 
     use crate::checkpoint::{
@@ -104,6 +107,22 @@ mod fixture {
         Committee::new(members).unwrap()
     }
 
+    /// Where each of `members` listens: on its own port of the loopback
+    /// address, proving itself with its key.
+    pub(crate) fn peers(members: &[u64]) -> BTreeMap<NodeId, Peer> {
+        members
+            .iter()
+            .map(|node| {
+                let port = u16::try_from(*node).unwrap().checked_add(7000).unwrap();
+                let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                (
+                    NodeId::new(*node),
+                    Peer::new(addr, key(*node).verifying_key()),
+                )
+            })
+            .collect()
+    }
+
     /// The change to a committee of `members` in `epoch`, which nodes 1
     /// to 3 endorse in [`DOMAIN`].
     pub(crate) fn change_to(epoch: u64, members: &[u64]) -> ChangeCertificate {
@@ -117,7 +136,12 @@ mod fixture {
             .iter()
             .map(|node| (NodeId::new(*node), key(*node).verifying_key()))
             .collect();
-        let change = Change::new(Epoch::new(epoch), Committee::new(keys).unwrap());
+        let change = Change::new(
+            Epoch::new(epoch),
+            Committee::new(keys).unwrap(),
+            peers(members),
+        )
+        .unwrap();
         let endorsements: Vec<_> = (1..=3)
             .map(|node| Endorsement::sign(&key(node), domain, NodeId::new(node), &change))
             .collect();

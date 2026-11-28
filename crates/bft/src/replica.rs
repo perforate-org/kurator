@@ -63,6 +63,11 @@ pub trait Host: Send + Sync {
     /// Calls [`Replica::expire`] with `view` once `after` has passed. A
     /// later call replaces the timer.
     fn wake(&self, view: View, after: Duration);
+
+    /// Learns that `node`, a member of a committee the replica follows,
+    /// is at `peer`, in place of wherever it was: [`Host::send`] reaches
+    /// it there from now on.
+    fn meet(&self, node: NodeId, peer: &Peer);
 }
 
 /// Whether a replica still runs.
@@ -125,6 +130,9 @@ struct Inner {
     /// The epoch a handoff showed it, which it starts once it holds the
     /// state of the newest checkpoint that epoch's committee certified.
     leap: Option<Succession>,
+    /// Where the members of every committee it knows are: the charter's,
+    /// then each epoch's, the newest last.
+    peers: BTreeMap<NodeId, Peer>,
     health: Health,
 }
 
@@ -236,6 +244,20 @@ impl Inner {
             .members()
             .filter(|member| *member != node)
             .collect()
+    }
+
+    /// Takes the members of the epochs the core started, and of the one
+    /// it leaps to, into `peers`, and tells `host` of those it did not
+    /// know there.
+    fn learn(&mut self, host: &impl Host) {
+        let mut known = self.core.peers();
+        known.extend(self.leap.iter().flat_map(Succession::peers));
+        for (node, peer) in known {
+            if self.peers.get(&node) != Some(&peer) {
+                host.meet(node, &peer);
+                drop(self.peers.insert(node, peer));
+            }
+        }
     }
 
     /// The committee of the epoch it leaps to, or else of its own.
@@ -433,14 +455,14 @@ impl<H: Host> Act for Acting<'_, H> {
 #[derive(Debug)]
 pub struct Replica<H> {
     host: H,
-    peers: BTreeMap<NodeId, Peer>,
     inner: Mutex<Inner>,
 }
 
 impl<H: Host> Replica<H> {
     /// Starts `core`, which `journal` recovered, with `ledger` holding the
-    /// state its decided blocks made, on `host`. `peers` are how the
-    /// layers above reach the committee's members.
+    /// state its decided blocks made, on `host`. `peers` are where the
+    /// charter's committee is; where later ones are, the changes that
+    /// start them tell.
     pub fn start(
         core: Core,
         journal: Journal,
@@ -450,7 +472,6 @@ impl<H: Host> Replica<H> {
     ) -> Self {
         let replica = Self {
             host,
-            peers,
             inner: Mutex::new(Inner {
                 core,
                 journal,
@@ -461,6 +482,7 @@ impl<H: Host> Replica<H> {
                 certified: None,
                 catchup: None,
                 leap: None,
+                peers,
                 health: Health::Running,
             }),
         };
@@ -523,6 +545,8 @@ impl<H: Host> Replica<H> {
             | Message::Forward(_)
             | Message::Checkpoint(_)) => self.handle(inner, Event::Received { from, message }),
         }
+        // The state it took in may have started an epoch.
+        inner.learn(&self.host);
         self.ask(inner);
     }
 
@@ -558,6 +582,7 @@ impl<H: Host> Replica<H> {
         if inner.core.view() == View::GENESIS {
             self.handle(inner, Event::Start);
         }
+        inner.learn(&self.host);
     }
 
     /// The epoch it decides in.
@@ -650,11 +675,12 @@ impl<H: Host> Replicated for Replica<H> {
         }
     }
 
-    /// The committee's members, all of them voters, fixed for the life of
-    /// the shard until committees change.
+    /// The committee's members, all of them voters, with the peers of
+    /// every committee it knows: one behind may still need to reach them.
     fn members(&self) -> Members {
-        let voters = self.inner.lock().core.committee().members().collect();
-        Members::new(voters, self.peers.clone(), 0)
+        let inner = self.inner.lock();
+        let voters = inner.core.committee().members().collect();
+        Members::new(voters, inner.peers.clone(), 0)
     }
 
     async fn begin(&self) -> Result<Txn<'_, H>> {
