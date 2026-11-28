@@ -7,6 +7,7 @@ use kurator_wal::Options;
 
 use super::{Config, Core, Event};
 use crate::block::{Block, Proposal};
+use crate::checkpoint::{Checkpoint, Height, Share, StateRoot};
 use crate::fixture::{DOMAIN, committee, key};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -818,4 +819,50 @@ fn a_leader_that_proposed_hands_later_commands_on() {
     };
     // Its own block is not certified yet: its commands go along too.
     assert!(commands.contains(&late), "the command: {commands:?}");
+}
+
+#[test]
+fn a_quorum_of_shares_certifies_a_checkpoint() {
+    let checkpoint = Checkpoint::new(
+        Height::new(1000),
+        BlockId::new([5; 32]),
+        StateRoot::new([6; 32]),
+    );
+    let mut ours = core(NodeId::new(1));
+    let reached = ours.handle(Event::Reached(checkpoint)).persisted();
+    let [sent] = reached.messages() else {
+        panic!("one share: {:?}", reached.messages());
+    };
+    assert_eq!(sent.to(), To::Others, "to the others");
+    let Message::Checkpoint(share) = sent.message() else {
+        panic!("a share: {:?}", sent.message());
+    };
+    assert_eq!(share.verify(&committee(), DOMAIN), Ok(()), "signed");
+    assert!(reached.certified().is_none(), "one of three");
+
+    // A share signed with another's key counts for nothing.
+    let forged = Share::sign(&key(3), DOMAIN, NodeId::new(2), checkpoint);
+    let refused = receive(&mut ours, Message::Checkpoint(forged));
+    assert_eq!(
+        refused.rejected(),
+        Some(Rejection::Forged(NodeId::new(2))),
+        "forged"
+    );
+
+    let second = Share::sign(&key(2), DOMAIN, NodeId::new(2), checkpoint);
+    assert!(
+        receive(&mut ours, Message::Checkpoint(second))
+            .certified()
+            .is_none(),
+        "two"
+    );
+    let third = Share::sign(&key(3), DOMAIN, NodeId::new(3), checkpoint);
+    let certified = receive(&mut ours, Message::Checkpoint(third));
+    let certificate = certified.certified().unwrap();
+    assert_eq!(certificate.checkpoint(), &checkpoint, "certified");
+    assert_eq!(
+        certificate.verify(&committee(), DOMAIN),
+        Ok(()),
+        "by a quorum"
+    );
 }

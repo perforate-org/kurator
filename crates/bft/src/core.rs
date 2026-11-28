@@ -10,6 +10,7 @@ use kurator_consensus::NodeId;
 use kurator_crypto::{Signature, SigningKey};
 
 use crate::block::{Block, Proposal};
+use crate::checkpoint::{Checkpoint, Share, Tally};
 use crate::committee::{Committee, Domain};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -59,6 +60,9 @@ pub enum Event {
     Expired(View),
     /// A client asks for a command to be decided.
     Submitted(Vec<u8>),
+    /// The replica's state reached a checkpoint, for the committee to
+    /// certify.
+    Reached(Checkpoint),
 }
 
 /// One replica of a shard: `HotStuff` with a two-chain commit and a leader
@@ -113,6 +117,8 @@ pub struct Core {
     timeouts: BTreeMap<NodeId, (View, Signature)>,
     /// Commands submitted and not yet decided.
     pending: Vec<Vec<u8>>,
+    /// The checkpoint shares it collects.
+    tally: Tally,
     /// Blocks the event in hand taught it, to write down.
     learned: Vec<Block>,
     /// What the event in hand asks of the driver.
@@ -148,6 +154,7 @@ impl Core {
             votes: BTreeMap::new(),
             timeouts: BTreeMap::new(),
             pending: Vec::new(),
+            tally: Tally::default(),
             learned: Vec::new(),
             effects: Effects::default(),
         }
@@ -202,6 +209,18 @@ impl Core {
                 self.offer(self.lock.block());
                 Ok(())
             }
+            Event::Reached(checkpoint) => {
+                let share = Share::sign(
+                    &self.config.key,
+                    self.config.domain,
+                    self.node(),
+                    checkpoint,
+                );
+                self.effects
+                    .send(To::Others, Message::Checkpoint(share.clone()));
+                self.count(share);
+                Ok(())
+            }
         };
         if let Err(rejection) = handled {
             self.effects.reject(rejection);
@@ -254,6 +273,11 @@ impl Core {
                 }
                 Ok(())
             }
+            Message::Checkpoint(share) => {
+                share.verify(&self.config.committee, self.config.domain)?;
+                self.count(share);
+                Ok(())
+            }
             Message::Deliver(block) => {
                 if !self.wanted.remove(&block.id()) {
                     return Err(Rejection::Unwanted);
@@ -261,6 +285,14 @@ impl Core {
                 self.store(block);
                 Ok(())
             }
+        }
+    }
+
+    /// Counts a valid checkpoint share, and has the driver take in the
+    /// certificate it completes.
+    fn count(&mut self, share: Share) {
+        if let Some(certificate) = self.tally.count(share, self.config.committee.quorum()) {
+            self.effects.certify(certificate);
         }
     }
 

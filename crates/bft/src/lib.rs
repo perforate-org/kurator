@@ -33,15 +33,21 @@
 //! [`Replicated`](kurator_consensus::Replicated) replica, so the layers
 //! above see a BFT shard as they see a Raft one.
 //!
+//! Every [`Interval`] of decided blocks, each replica names its state by a
+//! [`StateRoot`], the root of its [`Manifest`], and shares a signed
+//! [`Share`] of that [`Checkpoint`]. A quorum of equal shares is a
+//! [`CheckpointCertificate`]: the committee's word for the shard's state at
+//! that [`Height`]. A replica whose own checkpoint differs has applied the
+//! same blocks to another state, and stops serving.
+//!
 //! Signatures are [`kurator_crypto`]'s, tagged with their algorithm, so a
 //! certificate is a set of signatures that can move to a post-quantum
 //! algorithm as a whole.
 
 mod block;
+mod checkpoint;
 mod committee;
 mod core;
-#[cfg(test)]
-mod fixture;
 mod message;
 mod rejection;
 mod replica;
@@ -52,12 +58,39 @@ mod vote;
 mod wire;
 
 pub use block::{Block, Proposal};
+pub use checkpoint::{Checkpoint, CheckpointCertificate, Height, Interval, Share, StateRoot};
 pub use committee::{Committee, Domain};
 pub use core::{Config, Core, Event};
 pub use message::Message;
 pub use rejection::Rejection;
-pub use replica::{Host, Journal, Ledger, Replica, Settled, Txn};
+pub use replica::{Host, Journal, Ledger, Manifest, Replica, Settled, Txn};
 pub use step::{Act, Effects, Recovered, Safety, Step, Timer, To};
 pub use timeout::{Timeout, TimeoutCertificate};
 pub use view::View;
 pub use vote::{BlockId, Certificate, Justify, Vote};
+
+/// What the tests share: four members with keys from their ids, in one
+/// domain.
+#[cfg(test)]
+mod fixture {
+    use kurator_consensus::NodeId;
+    use kurator_crypto::{Algorithm, SigningKey};
+
+    use crate::committee::{Committee, Domain};
+
+    /// The domain every test signs in.
+    pub(crate) const DOMAIN: Domain = Domain::new([1; 32]);
+
+    /// The key of `node`, seeded by its id.
+    pub(crate) fn key(node: u64) -> SigningKey {
+        SigningKey::from_seed(Algorithm::Ed25519, [u8::try_from(node).unwrap(); 32])
+    }
+
+    /// Nodes 1 to 4.
+    pub(crate) fn committee() -> Committee {
+        let members = (1..=4)
+            .map(|node| (NodeId::new(node), key(node).verifying_key()))
+            .collect();
+        Committee::new(members).unwrap()
+    }
+}
