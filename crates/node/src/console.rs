@@ -16,7 +16,8 @@
 //! shards                   every shard the meta shard records, with its span, epoch, namespace and replicas
 //! namespace <name> cft     make a namespace whose shards are crash fault tolerant, on the meta shard's voters;
 //!                          a bft one is made by its committee's charter
-//! namespaces               every namespace by name, with its id and assurance
+//! namespaces               every namespace by name, with its id and assurance, then each pair that may mix
+//! mix <name> <name>        let one transaction span a cft and a bft namespace: only as safe as the cft side
 //! status                   role, term, leader and log positions, by shard
 //! members                  voters and learners with their peers, by shard
 //! add <id> <addr> <key>    add a learner to every shard
@@ -37,7 +38,7 @@ use std::sync::Arc;
 
 use oleaph_client::Collected;
 use oleaph_consensus::{Members, NodeId, Peer, Replicated as _};
-use oleaph_meta::{Assurance, Meta, NamespaceName};
+use oleaph_meta::{Assurance, Meta, Mixing, NamespaceName};
 use oleaph_net::{Quic, Replica, Store};
 use oleaph_shard::{NamespaceId, ShardId};
 use oleaph_storage::WriteBatch;
@@ -94,6 +95,8 @@ pub enum Command {
     Namespace(NamespaceName, Assurance),
     /// Lists the namespaces the registry records.
     Namespaces,
+    /// Lets one transaction span two namespaces of different assurances.
+    Mix(NamespaceName, NamespaceName),
     /// Shows where each replica stands.
     Status,
     /// Shows the membership.
@@ -123,7 +126,7 @@ pub enum Reply {
 }
 
 const HELP: &str = "commands: put <k> <v> | del <k> | get <k> | split <k>, each [in <namespace>] \
-                    | shards | namespace <name> cft | namespaces \
+                    | shards | namespace <name> cft | namespaces | mix <name> <name> \
                     | status | members | add <id> <addr> <key> | promote <id> \
                     | remove <id> | collect | backup <dir> | quit";
 
@@ -145,6 +148,7 @@ impl Command {
                 Self::Namespace(name.parse().ok()?, assurance.parse().ok()?)
             }
             ["namespaces"] => Self::Namespaces,
+            ["mix", one, other] => Self::Mix(one.parse().ok()?, other.parse().ok()?),
             ["status"] => Self::Status,
             ["members"] => Self::Members,
             ["add", id, at, public] => Self::Add(node_id(id)?, Peer::new(addr(at)?, key(public)?)),
@@ -186,6 +190,7 @@ pub async fn execute(store: &Store, ask: &Quic, line: &str) -> Reply {
             }
         }
         Command::Namespaces => namespaces(store, ask).await,
+        Command::Mix(one, other) => mix(store, ask, one, other).await,
         Command::Status => by_shard(store, |replica| format!(": {:?}", replica.status())),
         Command::Members => by_shard(store, |replica| members(&replica.members())),
         Command::Add(id, peer) => {
@@ -324,11 +329,29 @@ async fn namespaces(store: &Store, ask: &Quic) -> String {
     };
     match Meta::new(&meta, ask).registry().await {
         Ok(registry) => {
-            let lines: Vec<String> = registry
+            let named = registry
                 .namespaces()
-                .map(|(name, namespace)| format!("{name} {namespace}"))
-                .collect();
-            lines.join("\n")
+                .map(|(name, namespace)| format!("{name} {namespace}"));
+            let mixed = registry.mixed().map(|mix| format!("mix {mix}"));
+            named.chain(mixed).collect::<Vec<String>>().join("\n")
+        }
+        Err(error) => format!("error: {error}"),
+    }
+}
+
+/// Gives one transaction leave to span the namespaces `one` and `other`.
+async fn mix(store: &Store, ask: &Quic, one: NamespaceName, other: NamespaceName) -> String {
+    let Some(meta) = meta(store) else {
+        return no_meta();
+    };
+    let (shown_one, shown_other) = (one.to_string(), other.to_string());
+    match Box::pin(Meta::new(&meta, ask).mix(one, other)).await {
+        Ok(Mixing::Allowed(mix)) => {
+            format!("ok: {shown_one} and {shown_other} may share a transaction, as {mix}")
+        }
+        Ok(Mixing::Unknown(name)) => format!("error: there is no namespace {name}"),
+        Ok(Mixing::Alike | _) => {
+            format!("ok: {shown_one} and {shown_other} share a transaction without leave")
         }
         Err(error) => format!("error: {error}"),
     }
@@ -430,11 +453,17 @@ mod tests {
             ("shards", Some(Command::Shards)),
             (
                 "namespace payments cft",
-                Some(Command::Namespace(payments, Assurance::Cft)),
+                Some(Command::Namespace(payments.clone(), Assurance::Cft)),
             ),
             ("namespace payments raft", None),
             ("namespace payments", None),
             ("namespaces", Some(Command::Namespaces)),
+            (
+                "mix default payments",
+                Some(Command::Mix(NamespaceName::default_name(), payments)),
+            ),
+            ("mix default", None),
+            ("mix default Payments", None),
             ("split m 2", None),
             ("  get   k ", Some(Command::Get(default("k")))),
             ("status", Some(Command::Status)),

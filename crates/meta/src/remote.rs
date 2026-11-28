@@ -13,12 +13,14 @@
 //! call   = 1 allocate | 2 report bytes(placement) | 3 registry
 //!        | 4 create bytes(name) membership u64 nodes
 //!        | 5 charter bytes(name) namespace u32 shard u64 nodes
+//!        | 6 mix bytes(name) bytes(name)
 //! answer = 1 allocated u64 | 2 reported u8 | 3 registry registry
 //!        | 4 not-leader option(u64) | 5 failed bytes(utf-8)
-//!        | 6 created created
+//!        | 6 created created | 7 mixing mixing
 //! nodes    = count u32 u64*, strictly ascending
 //! reported = 1 recorded | 2 stale
 //! created  = 1 founded shard | 2 taken bytes(namespace) | 3 spent
+//! mixing   = 1 allowed low u32 high u32 | 2 alike | 3 unknown bytes(name)
 //! ```
 //!
 //! `placement`, `registry`, `shard` and `namespace` are as
@@ -33,8 +35,9 @@ use oleaph_codec::{DecodeError, Reader, put_bytes};
 use oleaph_consensus::{NodeId, Peer, Replicated};
 use oleaph_shard::{NamespaceId, Shard, ShardId};
 
-use crate::client::{Created, allocate, charter, create, registry, report};
+use crate::client::{Created, Mixing, allocate, charter, create, mix, registry, report};
 use crate::error::{MetaError, Result};
+use crate::mix::Mix;
 use crate::namespace::{Namespace, NamespaceName};
 use crate::placement::{Placement, Reported};
 use crate::registry::Registry;
@@ -44,6 +47,7 @@ const REPORT: u8 = 2;
 const REGISTRY: u8 = 3;
 const CREATE: u8 = 4;
 const CHARTER: u8 = 5;
+const MIX: u8 = 6;
 
 const ALLOCATED: u8 = 1;
 const REPORTED: u8 = 2;
@@ -51,6 +55,7 @@ const REGISTERED: u8 = 3;
 const NOT_LEADER: u8 = 4;
 const FAILED: u8 = 5;
 const CREATED: u8 = 6;
+const MIXING: u8 = 7;
 
 const RECORDED: u8 = 1;
 const STALE: u8 = 2;
@@ -58,6 +63,10 @@ const STALE: u8 = 2;
 const FOUNDED: u8 = 1;
 const TAKEN: u8 = 2;
 const SPENT: u8 = 3;
+
+const ALLOWED: u8 = 1;
+const ALIKE: u8 = 2;
+const UNKNOWN: u8 = 3;
 
 const NONE: u8 = 0;
 const SOME: u8 = 1;
@@ -80,6 +89,8 @@ pub enum Call {
     Create(Creation),
     /// Record the namespace a [`charter`] names.
     Charter(Chartered),
+    /// Give the two namespaces so called leave to [`mix`].
+    Mix(NamespaceName, NamespaceName),
 }
 
 /// What [`create`] is asked to make: a crash fault tolerant namespace's
@@ -209,8 +220,10 @@ pub enum Answer {
     NotLeader(Option<NodeId>),
     /// The call failed on the leader, for this reason.
     Failed(String),
-    /// What [`Call::Create`] did.
+    /// What [`Call::Create`] or [`Call::Charter`] did.
     Created(Created),
+    /// What [`Call::Mix`] did.
+    Mixing(Mixing),
 }
 
 impl Call {
@@ -238,6 +251,11 @@ impl Call {
                 out.push(CHARTER);
                 chartered.encode(&mut out)?;
             }
+            Self::Mix(one, other) => {
+                out.push(MIX);
+                put_bytes(&mut out, one.as_str().as_bytes())?;
+                put_bytes(&mut out, other.as_str().as_bytes())?;
+            }
         }
         Ok(out)
     }
@@ -255,6 +273,10 @@ impl Call {
             REGISTRY => Self::Registry,
             CREATE => Self::Create(Creation::decode(&mut reader)?),
             CHARTER => Self::Charter(Chartered::decode(&mut reader)?),
+            MIX => Self::Mix(
+                NamespaceName::from_bytes(reader.bytes()?)?,
+                NamespaceName::from_bytes(reader.bytes()?)?,
+            ),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -311,6 +333,15 @@ impl Answer {
                 put_bytes(&mut out, &encoded)?;
             }
             Self::Created(Created::Spent) => out.extend_from_slice(&[CREATED, SPENT]),
+            Self::Mixing(Mixing::Allowed(mix)) => {
+                out.extend_from_slice(&[MIXING, ALLOWED]);
+                mix.encode(&mut out);
+            }
+            Self::Mixing(Mixing::Alike) => out.extend_from_slice(&[MIXING, ALIKE]),
+            Self::Mixing(Mixing::Unknown(name)) => {
+                out.extend_from_slice(&[MIXING, UNKNOWN]);
+                put_bytes(&mut out, name.as_str().as_bytes())?;
+            }
         }
         Ok(out)
     }
@@ -344,6 +375,12 @@ impl Answer {
                 SPENT => Created::Spent,
                 other => return Err(DecodeError::Tag(other)),
             }),
+            MIXING => Self::Mixing(match reader.read::<u8>()? {
+                ALLOWED => Mixing::Allowed(Mix::decode(&mut reader)?),
+                ALIKE => Mixing::Alike,
+                UNKNOWN => Mixing::Unknown(NamespaceName::from_bytes(reader.bytes()?)?),
+                other => return Err(DecodeError::Tag(other)),
+            }),
             other => return Err(DecodeError::Tag(other)),
         };
         reader.finish()?;
@@ -375,6 +412,7 @@ pub async fn answer(meta: &impl Replicated, call: &Call) -> Answer {
         )
         .await
         .map(Answer::Created),
+        Call::Mix(one, other) => mix(meta, one, other).await.map(Answer::Mixing),
     };
     answered.unwrap_or_else(|error| {
         if let MetaError::Consensus(oleaph_consensus::Error::NotLeader { leader }) = &error {
@@ -470,6 +508,19 @@ impl<'node, R: Replicated, A: Ask> Meta<'node, R, A> {
         self.created(Call::Charter(chartered)).await
     }
 
+    /// [`mix`] on the meta shard's leader.
+    ///
+    /// # Errors
+    ///
+    /// As [`mix`], and as [`Meta::call`].
+    pub async fn mix(&self, one: NamespaceName, other: NamespaceName) -> Result<Mixing> {
+        let answer = self.call(Call::Mix(one, other)).await?;
+        let Answer::Mixing(mixing) = answer else {
+            return Err(unanswered(answer));
+        };
+        Ok(mixing)
+    }
+
     /// Runs `call`, which makes a namespace, and returns what it made.
     async fn created(&self, call: Call) -> Result<Created> {
         let answer = self.call(call).await?;
@@ -537,9 +588,11 @@ fn unanswered(answer: Answer) -> MetaError {
     match answer {
         Answer::NotLeader(_) => MetaError::NoLeader,
         Answer::Failed(reason) => MetaError::Remote(reason),
-        Answer::Allocated(_) | Answer::Reported(_) | Answer::Registry(_) | Answer::Created(_) => {
-            MetaError::Mismatch
-        }
+        Answer::Allocated(_)
+        | Answer::Reported(_)
+        | Answer::Registry(_)
+        | Answer::Created(_)
+        | Answer::Mixing(_) => MetaError::Mismatch,
     }
 }
 
@@ -556,7 +609,8 @@ mod tests {
     use oleaph_shard::NamespaceId;
 
     use super::{Answer, Call, Chartered, Creation, HOPS, follow};
-    use crate::client::Created;
+    use crate::client::{Created, Mixing};
+    use crate::mix::tests::mixes;
     use crate::namespace::tests::{names, namespaces};
     use crate::placement::Reported;
     use crate::placement::tests::{placements, shards};
@@ -577,7 +631,7 @@ mod tests {
             placement.encode(&mut encoded).unwrap();
             put_bytes(&mut out, &encoded).unwrap();
         }
-        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.extend_from_slice(&[0_u32.to_le_bytes(), 0_u32.to_le_bytes()].concat());
         Registry::decode(&mut Reader::new(&out)).unwrap()
     }
 
@@ -618,6 +672,7 @@ mod tests {
             placements().prop_map(Call::Report),
             creations().prop_map(Call::Create),
             charters().prop_map(Call::Charter),
+            (names(), names()).prop_map(|(one, other)| Call::Mix(one, other)),
         ]
     }
 
@@ -634,6 +689,9 @@ mod tests {
             shards().prop_map(|shard| Answer::Created(Created::Founded(shard))),
             namespaces().prop_map(|namespace| Answer::Created(Created::Taken(namespace))),
             Just(Answer::Created(Created::Spent)),
+            mixes().prop_map(|mix| Answer::Mixing(Mixing::Allowed(mix))),
+            Just(Answer::Mixing(Mixing::Alike)),
+            names().prop_map(|name| Answer::Mixing(Mixing::Unknown(name))),
         ]
     }
 
@@ -700,6 +758,7 @@ mod tests {
         );
         assert_eq!(Answer::decode(&[4, 9]), Err(DecodeError::Tag(9)), "leader");
         assert_eq!(Answer::decode(&[6, 9]), Err(DecodeError::Tag(9)), "created");
+        assert_eq!(Answer::decode(&[7, 9]), Err(DecodeError::Tag(9)), "mixing");
         let mut twice = vec![4, 1, 0, 0, 0, b'a'];
         twice.extend_from_slice(&0_u64.to_le_bytes());
         twice.extend_from_slice(&2_u32.to_le_bytes());
@@ -733,7 +792,7 @@ mod tests {
         for _ in 0..2 {
             put_bytes(&mut out, &placement).unwrap();
         }
-        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.extend_from_slice(&[0_u32.to_le_bytes(), 0_u32.to_le_bytes()].concat());
         assert_eq!(
             Registry::decode(&mut Reader::new(&out)),
             Err(DecodeError::Invalid),

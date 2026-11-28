@@ -2,8 +2,9 @@
 //! voters with a first shard of its own, and kept apart from the default
 //! namespace through crashes; and namespaces a charter names, which take
 //! the ids the charter fixes only where the meta shard never handed them
-//! out.
+//! out; and transactions across namespaces.
 
+use oleaph_client::{Coordinator, Transacted};
 use oleaph_meta::{Assurance, Created, Namespace, NamespaceName};
 use oleaph_raft::openraft::AsyncRuntime as _;
 use oleaph_shard::{NamespaceId, Shard, ShardId};
@@ -143,4 +144,52 @@ fn a_chartered_namespace_takes_only_ids_never_handed_out() {
         assert_eq!(made.id(), ShardId::new(42), "after the chartered shards");
         cluster.shutdown().await.expect("shutdown");
     });
+}
+
+#[test]
+fn a_transaction_spans_namespaces_alike_in_assurance() {
+    SimRuntime::with_seed(33).block_on(async {
+        let mut cluster = Cluster::start(33, 3, Faults::default())
+            .await
+            .expect("start");
+        cluster.settle().await.expect("settle");
+        let payments: NamespaceName = "payments".parse().expect("a name");
+        let id = cluster
+            .create_namespace(&payments)
+            .await
+            .expect("created")
+            .namespace();
+        cluster.settle().await.expect("settle");
+        let mut committed = Transacted::Rejected;
+        for _ in 0..5 {
+            committed = here_and_there(&cluster, id).await;
+            if matches!(committed, Transacted::Committed(_)) {
+                break;
+            }
+        }
+        assert!(
+            matches!(committed, Transacted::Committed(_)),
+            "commits: {committed:?}"
+        );
+        cluster.settle().await.expect("settle");
+        for (node, holdings) in cluster.states() {
+            assert_eq!(holdings.get(b"k"), Some(b"here".as_slice()), "{node}: here");
+            assert_eq!(
+                holdings.get_in(id, b"k"),
+                Some(b"there".as_slice()),
+                "{node}: there"
+            );
+        }
+        assert!(cluster.unlocked(), "no lock left");
+        cluster.shutdown().await.expect("shutdown");
+    });
+}
+
+/// Writes `k` in the default namespace and in `other` in one transaction.
+async fn here_and_there(cluster: &Cluster, other: NamespaceId) -> Transacted {
+    let mut txn = Coordinator::new(cluster).begin(NamespaceId::DEFAULT);
+    if txn.put(b"k", "here").await.is_err() || txn.put_in(other, b"k", "there").await.is_err() {
+        return Transacted::Rejected;
+    }
+    txn.commit().await
 }

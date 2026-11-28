@@ -5,9 +5,9 @@
 //! ```text
 //! outcome = 1 committed version | 2 prepared version | 3 aborted abort
 //! abort   = 1 conflict bytes(key) version
-//!         | 2 locked bytes(key) txn bytes(primary) deadline
+//!         | 2 locked bytes(key) txn primary deadline
 //!         | 3 rolled-back txn | 4 fenced txn
-//!         | 5 held txn bytes(primary) deadline
+//!         | 5 held txn primary deadline
 //!         | 6 unreadable unreadable
 //! unreadable = 1 forgotten version version | 2 ahead version version
 //! version = u64, txn = u128, deadline = u64
@@ -17,7 +17,7 @@ use std::io;
 
 use oleaph_codec::{DecodeError, Reader, put_bytes};
 
-use crate::across::{Deadline, TxnId};
+use crate::across::{Deadline, Primary, TxnId};
 use crate::version::Version;
 
 const COMMITTED: u8 = 1;
@@ -108,16 +108,15 @@ pub enum Abort {
     },
     /// A transaction across shards that is prepared but not decided yet
     /// holds `key`: it may write it, or it read it. Running again once the
-    /// transaction `by`, whose primary key is `primary`, is decided may
-    /// succeed.
+    /// transaction `by` is decided at `primary` may succeed.
     #[error("{key:?} is locked by {by}, prepared but not decided yet")]
     Locked {
         /// The key.
         key: Vec<u8>,
         /// The transaction that holds it.
         by: TxnId,
-        /// Its primary key, where it is decided.
-        primary: Vec<u8>,
+        /// Where it is decided.
+        primary: Primary,
         /// Until when its coordinator may still be at work on it; past
         /// it, the transaction may be resolved at its primary.
         deadline: Deadline,
@@ -131,15 +130,15 @@ pub enum Abort {
     /// more.
     #[error("{0} is past the fence")]
     Fenced(TxnId),
-    /// A fence found the transaction `by`, whose primary key is `primary`,
-    /// prepared with a deadline before the fence. Fencing again once it
+    /// A fence found the transaction `by`, decided at `primary`, prepared
+    /// with a deadline before the fence. Fencing again once it
     /// is decided may succeed.
     #[error("{by} is prepared from before the fence")]
     Held {
         /// The transaction.
         by: TxnId,
-        /// Its primary key, where it is decided.
-        primary: Vec<u8>,
+        /// Where it is decided.
+        primary: Primary,
         /// Its deadline.
         deadline: Deadline,
     },
@@ -170,7 +169,7 @@ impl Abort {
                 out.push(LOCKED);
                 put_bytes(out, key)?;
                 by.encode(out);
-                put_bytes(out, primary)?;
+                primary.encode(out)?;
                 deadline.encode(out);
             }
             Self::RolledBack(id) => {
@@ -188,7 +187,7 @@ impl Abort {
             } => {
                 out.push(HELD);
                 by.encode(out);
-                put_bytes(out, primary)?;
+                primary.encode(out)?;
                 deadline.encode(out);
             }
             Self::Unreadable(unreadable) => {
@@ -218,14 +217,14 @@ impl Abort {
             LOCKED => Self::Locked {
                 key: reader.bytes()?.to_vec(),
                 by: TxnId::decode(reader)?,
-                primary: reader.bytes()?.to_vec(),
+                primary: Primary::decode(reader)?,
                 deadline: Deadline::decode(reader)?,
             },
             ROLLED_BACK => Self::RolledBack(TxnId::decode(reader)?),
             FENCED => Self::Fenced(TxnId::decode(reader)?),
             HELD => Self::Held {
                 by: TxnId::decode(reader)?,
-                primary: reader.bytes()?.to_vec(),
+                primary: Primary::decode(reader)?,
                 deadline: Deadline::decode(reader)?,
             },
             UNREADABLE => Self::Unreadable(match reader.read::<u8>()? {
@@ -283,7 +282,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{Abort, Outcome, Unreadable};
-    use crate::across::{Deadline, TxnId};
+    use crate::across::{Deadline, Primary, TxnId};
+    use crate::span::NamespaceId;
     use crate::version::Version;
 
     fn abort() -> impl Strategy<Value = Abort> {
@@ -291,10 +291,12 @@ mod tests {
         let version = any::<u64>().prop_map(Version::new);
         let txn = any::<u128>().prop_map(TxnId::new);
         let deadline = any::<u64>().prop_map(Deadline::new);
+        let primary = (any::<u32>(), key.clone())
+            .prop_map(|(namespace, key)| Primary::new(NamespaceId::new(namespace), key));
         prop_oneof![
             (key.clone(), version.clone())
                 .prop_map(|(key, version)| Abort::Conflict { key, version }),
-            (key.clone(), txn.clone(), key.clone(), deadline.clone()).prop_map(
+            (key, txn.clone(), primary.clone(), deadline.clone()).prop_map(
                 |(key, by, primary, deadline)| Abort::Locked {
                     key,
                     by,
@@ -304,7 +306,7 @@ mod tests {
             ),
             txn.clone().prop_map(Abort::RolledBack),
             txn.clone().prop_map(Abort::Fenced),
-            (txn, key, deadline).prop_map(|(by, primary, deadline)| Abort::Held {
+            (txn, primary, deadline).prop_map(|(by, primary, deadline)| Abort::Held {
                 by,
                 primary,
                 deadline

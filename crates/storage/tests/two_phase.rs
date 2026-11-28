@@ -11,9 +11,14 @@ use std::ops::Bound::{Excluded, Included};
 use criterion as _;
 use oleaph_codec::Reader;
 use oleaph_storage::{
-    Abort, Collect, Command, Deadline, Decide, Decided, Decision, Draft, KvState, Outcome, Prepare,
-    TxnId, Version, WriteBatch,
+    Abort, Collect, Command, Deadline, Decide, Decided, Decision, Draft, KvState, NamespaceId,
+    Outcome, Prepare, Primary, TxnId, Version, WriteBatch,
 };
+
+/// `key` of the default namespace, as a primary.
+fn primary(key: &str) -> Primary {
+    Primary::new(NamespaceId::DEFAULT, key)
+}
 use proptest as _;
 use tempfile as _;
 
@@ -34,13 +39,13 @@ fn part(state: &KvState, id: u128) -> Prepare {
     let mut draft = Draft::new(state.version());
     let _a = draft.get(state, b"a").unwrap();
     draft.put("b", "3");
-    draft.into_prepare(TxnId::new(id), b"a".to_vec(), DEADLINE)
+    draft.into_prepare(TxnId::new(id), primary("a"), DEADLINE)
 }
 
 fn decide(id: u128, decision: Decision) -> Command {
     Command::Decide(Decide::new(
         TxnId::new(id),
-        b"a".to_vec(),
+        primary("a"),
         DEADLINE,
         decision,
     ))
@@ -50,7 +55,7 @@ fn locked(key: &str, id: u128) -> Outcome {
     Outcome::Aborted(Abort::Locked {
         key: key.as_bytes().to_vec(),
         by: TxnId::new(id),
-        primary: b"a".to_vec(),
+        primary: primary("a"),
         deadline: DEADLINE,
     })
 }
@@ -70,14 +75,14 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
         .map(|prepared| {
             (
                 prepared.id(),
-                prepared.primary().to_vec(),
+                prepared.primary().clone(),
                 prepared.deadline(),
             )
         })
         .collect();
     assert_eq!(
         pending,
-        [(TxnId::new(7), b"a".to_vec(), DEADLINE)],
+        [(TxnId::new(7), primary("a"), DEADLINE)],
         "pending"
     );
     assert_eq!(state.get(b"b"), Some(b"2".as_slice()), "held back");
@@ -138,7 +143,7 @@ fn a_prepared_transaction_locks_what_it_read_and_writes() {
 #[test]
 fn a_split_hands_each_decision_to_the_half_of_its_primary_key() {
     let mut state = state();
-    let elsewhere = Decide::new(TxnId::new(9), b"z".to_vec(), DEADLINE, Decision::Abort);
+    let elsewhere = Decide::new(TxnId::new(9), primary("z"), DEADLINE, Decision::Abort);
     let _decided = state.apply(Version::new(2), Command::Decide(elsewhere));
     let _here = state.apply(Version::new(3), decide(8, Decision::Abort));
     let right = state.split_off(b"m");
@@ -262,7 +267,7 @@ fn commands_of_both_phases_roundtrip() {
         Command::Prepare(part(&state, u128::MAX)),
         Command::Prepare(Draft::new(state.version()).into_prepare(
             TxnId::new(1),
-            Vec::new(),
+            primary(""),
             Deadline::new(u64::MAX),
         )),
         decide(1, Decision::Commit),
@@ -289,7 +294,7 @@ fn a_fence_waits_for_the_transactions_prepared_before_it() {
     let _prepared = state.apply(Version::new(2), Command::Prepare(part(&state, 7)));
     let held = Outcome::Aborted(Abort::Held {
         by: TxnId::new(7),
-        primary: b"a".to_vec(),
+        primary: primary("a"),
         deadline: DEADLINE,
     });
     assert_eq!(state.apply(Version::new(3), fence(1_001)), held, "held");
@@ -346,7 +351,7 @@ fn behind_the_fence_nothing_is_prepared_or_decided_and_decisions_are_forgotten()
     let later = |id| {
         let mut draft = Draft::new(state.version());
         draft.put("c", "1");
-        draft.into_prepare(TxnId::new(id), b"c".to_vec(), Deadline::new(2_000))
+        draft.into_prepare(TxnId::new(id), primary("c"), Deadline::new(2_000))
     };
     assert_eq!(
         state.apply(Version::new(11), Command::Prepare(later(9))),

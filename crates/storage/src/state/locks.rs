@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use oleaph_codec::{DecodeError, Reader, put_bytes};
+use oleaph_codec::{DecodeError, Reader};
 
-use crate::across::{Deadline, TxnId};
+use crate::across::{Deadline, Primary, TxnId};
 use crate::batch::{KvOp, WriteBatch};
 use crate::outcome::{Abort, Outcome};
 use crate::span::Span;
@@ -29,12 +29,12 @@ pub(super) struct Locks {
     decided: BTreeMap<TxnId, Record>,
 }
 
-/// A decision, the primary key of its transaction, which tells which half
+/// A decision, where its transaction is decided, whose key tells which half
 /// of a split keeps it, and its deadline, which tells when it may be
 /// forgotten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Record {
-    primary: Vec<u8>,
+    primary: Primary,
     deadline: Deadline,
     decided: Decided,
 }
@@ -74,7 +74,7 @@ impl Locks {
             Some(Abort::Locked {
                 key: key.to_vec(),
                 by: prepared.id(),
-                primary: prepared.primary().to_vec(),
+                primary: prepared.primary().clone(),
                 deadline: prepared.deadline(),
             })
         })
@@ -136,7 +136,7 @@ impl Locks {
         if let Some(held) = held {
             return Err(Abort::Held {
                 by: held.id(),
-                primary: held.primary().to_vec(),
+                primary: held.primary().clone(),
                 deadline: held.deadline(),
             });
         }
@@ -156,20 +156,20 @@ impl Locks {
         drop(self.prepared.insert(prepare.id(), prepare));
     }
 
-    /// Records that `id`, whose primary key is `primary` and whose
-    /// deadline is `deadline`, came to `decided`, and hands back its
+    /// Records that `id`, decided at `primary`, whose deadline is
+    /// `deadline`, came to `decided`, and hands back its
     /// prepared part, if it had one. The deadline its part was prepared
     /// with stands over `deadline`.
     pub(super) fn decide(
         &mut self,
         id: TxnId,
-        primary: &[u8],
+        primary: &Primary,
         deadline: Deadline,
         decided: Decided,
     ) -> Option<Prepare> {
         let prepared = self.prepared.remove(&id);
         let record = Record {
-            primary: primary.to_vec(),
+            primary: primary.clone(),
             deadline: prepared.as_ref().map_or(deadline, Prepare::deadline),
             decided,
         };
@@ -183,8 +183,10 @@ impl Locks {
     pub(super) fn split_off(&mut self, at: &[u8]) -> Self {
         Self {
             fence: self.fence,
-            prepared: split_off(&mut self.prepared, |prepared| prepared.primary() >= at),
-            decided: split_off(&mut self.decided, |record| record.primary.as_slice() >= at),
+            prepared: split_off(&mut self.prepared, |prepared| {
+                prepared.primary().key() >= at
+            }),
+            decided: split_off(&mut self.decided, |record| record.primary.key() >= at),
         }
     }
 
@@ -203,7 +205,9 @@ impl Locks {
         put_count(out, self.decided.len())?;
         for (id, record) in &self.decided {
             out.write_all(&id.get().to_le_bytes())?;
-            put_bytes(out, &record.primary)?;
+            let mut primary = Vec::new();
+            record.primary.encode(&mut primary)?;
+            out.write_all(&primary)?;
             out.write_all(&record.deadline.millis().to_le_bytes())?;
             match record.decided {
                 Decided::Committed(version) => {
@@ -233,7 +237,7 @@ impl Locks {
         }
         for _ in 0..reader.read::<u32>()? {
             let id = TxnId::decode(reader)?;
-            let primary = reader.bytes()?.to_vec();
+            let primary = Primary::decode(reader)?;
             let deadline = Deadline::new(reader.read()?);
             let decided = match reader.read::<u8>()? {
                 DECIDED_COMMITTED => Decided::Committed(Version::new(reader.read()?)),
@@ -276,11 +280,12 @@ fn put_count(out: &mut (impl Write + ?Sized), len: usize) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use oleaph_codec::{DecodeError, Reader, put_bytes};
+    use oleaph_codec::{DecodeError, Reader};
 
     use super::{DECIDED_ABORTED, DECIDED_COMMITTED, Locks};
-    use crate::across::{Deadline, TxnId};
+    use crate::across::{Deadline, Primary, TxnId};
     use crate::draft::Draft;
+    use crate::span::NamespaceId;
     use crate::version::Version;
 
     /// Locks fenced at `fence` with the transactions `prepared`, then
@@ -292,7 +297,7 @@ mod tests {
         for id in prepared {
             let prepare = Draft::new(Version::ZERO).into_prepare(
                 TxnId::new(*id),
-                b"p".to_vec(),
+                Primary::new(NamespaceId::DEFAULT, "p"),
                 Deadline::new(1),
             );
             prepare.encode(&mut out).unwrap();
@@ -300,7 +305,9 @@ mod tests {
         out.extend_from_slice(&u32::try_from(decided.len()).unwrap().to_le_bytes());
         for (id, committed) in decided {
             out.extend_from_slice(&id.to_le_bytes());
-            put_bytes(&mut out, b"p").unwrap();
+            Primary::new(NamespaceId::DEFAULT, "p")
+                .encode(&mut out)
+                .unwrap();
             out.extend_from_slice(&1_u64.to_le_bytes());
             match committed {
                 Some(version) => {
