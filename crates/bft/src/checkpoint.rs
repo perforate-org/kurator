@@ -260,6 +260,18 @@ impl CheckpointCertificate {
         self.checkpoint.height
     }
 
+    /// The block after which it certifies the state.
+    #[must_use]
+    pub const fn block(&self) -> BlockId {
+        self.checkpoint.block
+    }
+
+    /// The root of the state it certifies.
+    #[must_use]
+    pub const fn root(&self) -> StateRoot {
+        self.checkpoint.root
+    }
+
     /// Whether it certifies `checkpoint`.
     #[must_use]
     pub fn certifies(&self, checkpoint: &Checkpoint) -> bool {
@@ -290,10 +302,6 @@ impl CheckpointCertificate {
             .try_for_each(|(signer, signature)| check(committee, *signer, &statement, signature))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the journal keeps certificates from P4a-2")
-    )]
     pub(crate) fn encode(&self, out: &mut dyn Write) -> io::Result<()> {
         self.checkpoint.encode(out)?;
         put_count(out, self.signatures.len())?;
@@ -303,10 +311,6 @@ impl CheckpointCertificate {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the journal keeps certificates from P4a-2")
-    )]
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let checkpoint = Checkpoint::decode(reader)?;
         let count = read_count(reader)?;
@@ -332,14 +336,29 @@ impl Own {
         let _replaced = self.0.insert(checkpoint.height, checkpoint);
     }
 
-    /// Forgets the checkpoints up to `certificate`'s height, and returns
-    /// the one at its height if the committee certified another there.
-    pub(crate) fn judge(&mut self, certificate: &CheckpointCertificate) -> Option<Checkpoint> {
+    /// Forgets the checkpoints up to `certificate`'s height, and says how
+    /// the one at its height compares.
+    pub(crate) fn judge(&mut self, certificate: &CheckpointCertificate) -> Verdict {
         let at = certificate.height();
         let mine = self.0.get(&at).copied();
         self.0.retain(|height, _| *height > at);
-        mine.filter(|mine| !certificate.certifies(mine))
+        match mine {
+            None => Verdict::Unknown,
+            Some(mine) if certificate.certifies(&mine) => Verdict::Agrees,
+            Some(mine) => Verdict::Differs(mine),
+        }
     }
+}
+
+/// How a replica's own checkpoint compares with a certified one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// It has none at that height, or judged it already.
+    Unknown,
+    /// Its state is the one certified.
+    Agrees,
+    /// Its state is another: this one.
+    Differs(Checkpoint),
 }
 
 /// The shares a replica collected, until a quorum certifies a checkpoint.
@@ -352,6 +371,14 @@ pub(crate) struct Tally {
 }
 
 impl Tally {
+    /// A tally that counts only shares past `certified`.
+    pub(crate) const fn since(certified: Option<CheckpointCertificate>) -> Self {
+        Self {
+            certified,
+            shares: BTreeMap::new(),
+        }
+    }
+
     /// The height of the newest certified checkpoint.
     fn last(&self) -> Height {
         self.certified
@@ -422,10 +449,10 @@ mod tests {
     use oleaph_consensus::NodeId;
 
     use super::{
-        Checkpoint, CheckpointCertificate, Height, Interval, Own, Share, StateRoot, Tally,
+        Checkpoint, CheckpointCertificate, Height, Interval, Own, Share, StateRoot, Tally, Verdict,
     };
     use crate::committee::Domain;
-    use crate::fixture::{DOMAIN, committee, key};
+    use crate::fixture::{DOMAIN, certify, committee, key};
     use crate::rejection::Rejection;
     use crate::step::Effects;
     use crate::vote::BlockId;
@@ -570,43 +597,29 @@ mod tests {
         assert_eq!(Interval::DEFAULT, every(1000), "a thousand");
     }
 
-    /// A certificate for `checkpoint`, by nodes 1 to 3.
-    fn certificate(checkpoint: Checkpoint) -> CheckpointCertificate {
-        let mut tally = Tally::default();
-        (1..=3)
-            .find_map(|node| tally.count(share(node, checkpoint), 3))
-            .unwrap()
-    }
-
     #[test]
     fn a_certificate_judges_the_replicas_own_checkpoints() {
         let mut own = Own::default();
         for height in [10, 20, 30] {
             own.take(checkpoint(height, 1));
         }
-        assert_eq!(own.judge(&certificate(checkpoint(20, 1))), None, "agrees");
+        let judge =
+            |judged: &mut Own, height, root| judged.judge(&certify(checkpoint(height, root)));
+        assert_eq!(judge(&mut own, 20, 1), Verdict::Agrees, "agrees");
+        assert_eq!(judge(&mut own, 10, 2), Verdict::Unknown, "forgotten");
         assert_eq!(
-            own.judge(&certificate(checkpoint(10, 2))),
-            None,
-            "forgotten"
-        );
-        assert_eq!(
-            own.judge(&certificate(checkpoint(30, 2))),
-            Some(checkpoint(30, 1)),
+            judge(&mut own, 30, 2),
+            Verdict::Differs(checkpoint(30, 1)),
             "differs"
         );
-        assert_eq!(own.judge(&certificate(checkpoint(30, 2))), None, "once");
-        assert_eq!(
-            own.judge(&certificate(checkpoint(40, 2))),
-            None,
-            "not reached"
-        );
+        assert_eq!(judge(&mut own, 30, 2), Verdict::Unknown, "once");
+        assert_eq!(judge(&mut own, 40, 2), Verdict::Unknown, "not reached");
     }
 
     #[test]
     fn a_step_hands_on_its_newest_certificate() {
-        let older = certificate(checkpoint(10, 1));
-        let newer = certificate(checkpoint(20, 1));
+        let older = certify(checkpoint(10, 1));
+        let newer = certify(checkpoint(20, 1));
         assert!(newer.supersedes(&older), "newer");
         assert!(!older.supersedes(&newer), "older");
         assert!(!older.supersedes(&older), "the same");

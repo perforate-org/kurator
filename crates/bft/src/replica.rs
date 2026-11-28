@@ -24,7 +24,7 @@ use oleaph_storage::{Command, Draft, KeyValue, KvState, Outcome, Version};
 use parking_lot::Mutex;
 
 use crate::block::Block;
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Own};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Own, Verdict};
 use crate::core::{Core, Event};
 use crate::message::Message;
 use crate::step::{Act, Timer, To};
@@ -37,6 +37,7 @@ pub use self::manifest::Manifest;
 mod journal;
 mod ledger;
 mod manifest;
+mod states;
 
 /// How long a view's timer runs before its first timeout. Each timeout
 /// in a row doubles it, up to eight times as long.
@@ -115,15 +116,22 @@ impl Inner {
         }
     }
 
-    /// Stops the replica if its own checkpoint differs from the certified
-    /// one at the same height.
+    /// Judges the replica's own checkpoint at the height of the certified
+    /// one: it stops if its state differs, and forgets what came before
+    /// if it agrees.
     fn judge(&mut self) {
-        let diverged = self
-            .certified
-            .as_ref()
-            .and_then(|certified| self.own.judge(certified));
-        if let Some(mine) = diverged {
-            self.halt(Health::Diverged(mine));
+        let Some(certified) = self.certified.clone() else {
+            return;
+        };
+        match self.own.judge(&certified) {
+            Verdict::Unknown => {}
+            Verdict::Agrees => {
+                let records = self.core.compact(&certified);
+                if self.journal.compact(&certified, &records).is_err() {
+                    self.halt(Health::Stopped);
+                }
+            }
+            Verdict::Differs(mine) => self.halt(Health::Diverged(mine)),
         }
     }
 
@@ -152,11 +160,16 @@ impl<H: Host> Act for Acting<'_, H> {
             self.inner.tell(command, &settled);
         }
         // A state that does not encode never took its keys in.
-        if let Ok(Some(checkpoint)) = self.inner.ledger.checkpoint() {
-            self.inner.own.take(checkpoint);
-            self.inner.reached.push(checkpoint);
-            self.inner.judge();
-        }
+        let Ok(Some(snapshot)) = self.inner.ledger.checkpoint() else {
+            return;
+        };
+        let Ok(checkpoint) = self.inner.journal.keep(&snapshot) else {
+            self.inner.halt(Health::Stopped);
+            return;
+        };
+        self.inner.own.take(checkpoint);
+        self.inner.reached.push(checkpoint);
+        self.inner.judge();
     }
 
     fn certify(&mut self, certificate: &CheckpointCertificate) {

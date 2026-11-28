@@ -9,8 +9,8 @@ use std::{cmp, mem};
 use oleaph_consensus::NodeId;
 use oleaph_crypto::{Signature, SigningKey};
 
-use crate::block::{Block, Proposal};
-use crate::checkpoint::{Checkpoint, Share, Tally};
+use crate::block::{Block, Proposal, prune};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Share, Tally};
 use crate::committee::{Committee, Domain};
 use crate::message::Message;
 use crate::rejection::Rejection;
@@ -138,7 +138,7 @@ impl Core {
     /// a leader votes for its own block, so it may have proposed there.
     #[must_use]
     pub fn recover(config: Config, recovered: Recovered) -> Self {
-        let (safety, blocks, committed) = recovered.into_parts();
+        let (safety, blocks, committed, certified) = recovered.into_parts();
         Self {
             config,
             view: View::GENESIS,
@@ -154,10 +154,23 @@ impl Core {
             votes: BTreeMap::new(),
             timeouts: BTreeMap::new(),
             pending: Vec::new(),
-            tally: Tally::default(),
+            tally: Tally::since(certified),
             learned: Vec::new(),
             effects: Effects::default(),
         }
+    }
+
+    /// Forgets the blocks that `certificate`, a certified checkpoint whose
+    /// state the replica keeps, makes no longer matter, and returns the
+    /// records that the journal needs to remember all it still knows:
+    /// with these written, every record before them can go.
+    pub(crate) fn compact(&mut self, certificate: &CheckpointCertificate) -> Vec<Record> {
+        prune(&mut self.blocks, certificate.block());
+        let mut records: Vec<Record> = self.blocks.values().cloned().map(Record::Block).collect();
+        records.push(Record::Safety(Safety::new(self.voted, self.lock.clone())));
+        records.push(Record::Committed(self.committed.0, self.committed.1));
+        records.push(Record::Checkpoint(certificate.clone()));
+        records
     }
 
     /// The node it runs on.

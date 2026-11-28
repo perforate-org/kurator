@@ -798,6 +798,7 @@ name = "oleaph-bft"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "criterion",
  "futures-channel",
  "futures-util",
  "oleaph-codec",
