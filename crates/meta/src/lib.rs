@@ -11,14 +11,15 @@
 //! shard/<id u64 BE> a Placement: the shard, its replicas, and the log
 //!                   entry of the membership they come from
 //! next-namespace    the id the next namespace gets, u32
-//! namespace/<name>  a Namespace: its id, its name and its Assurance
+//! namespace/<name>  a Namespace: its id and its Assurance
 //! ```
 //!
 //! - **Namespaces.** A [`Namespace`] is a key space of its own, split into
 //!   shards of its own, and its [`Assurance`] says how they agree. The
 //!   default namespace, which holds the keys a client names without one,
-//!   is there from the start and has no record. [`create`] makes another,
-//!   with its first shard.
+//!   is there from the start and has no record. [`create`] makes a crash
+//!   fault tolerant one, with its first shard; [`charter`] records a
+//!   Byzantine fault tolerant one as its committee's charter names it.
 //!
 //! - **Ids.** [`allocate`] takes the next id in a transaction, so two
 //!   splits never get the same id, even when one of them then fails.
@@ -40,9 +41,9 @@ mod placement;
 mod registry;
 mod remote;
 
-pub use client::{Created, allocate, create, registry, report};
+pub use client::{Created, allocate, charter, create, registry, report};
 pub use error::{MetaError, Result};
 pub use namespace::{Assurance, BadAssurance, BadName, Namespace, NamespaceName};
 pub use placement::{Placement, Reported};
 pub use registry::Registry;
-pub use remote::{Answer, Ask, Call, Creation, Meta, answer};
+pub use remote::{Answer, Ask, Call, Chartered, Creation, Meta, answer};

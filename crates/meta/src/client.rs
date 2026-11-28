@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use oleaph_consensus::{NodeId, Replicated, Transaction as _};
-use oleaph_shard::{Shard, ShardId};
+use oleaph_shard::{NamespaceId, Shard, ShardId};
 
 use crate::error::{MetaError, Result};
 use crate::namespace::{Assurance, Namespace, NamespaceName};
@@ -59,10 +59,13 @@ pub enum Created {
     /// A namespace of that name is there already: this one. Nothing
     /// changed.
     Taken(Namespace),
+    /// The namespace's id or its shard's, as a charter names them, was
+    /// handed out already, or is the default's. Nothing changed.
+    Spent,
 }
 
-/// Makes a namespace called `name`, kept as `assurance` says, through
-/// `meta`, the meta shard's leader.
+/// Makes a crash fault tolerant namespace called `name` through `meta`,
+/// the meta shard's leader.
 ///
 /// It takes an id for the namespace and one for its first shard, which
 /// holds every key of it, and records that shard on `replicas` at
@@ -77,12 +80,11 @@ pub enum Created {
 pub async fn create(
     meta: &impl Replicated,
     name: &NamespaceName,
-    assurance: Assurance,
     replicas: &BTreeSet<NodeId>,
     membership: u64,
 ) -> Result<Created> {
     for _ in 0..ATTEMPTS {
-        match try_create(meta, name, assurance, replicas, membership).await {
+        match try_create(meta, name, replicas, membership).await {
             Err(MetaError::Consensus(error)) if error.is_aborted() => {}
             outcome => return outcome,
         }
@@ -93,7 +95,6 @@ pub async fn create(
 async fn try_create(
     meta: &impl Replicated,
     name: &NamespaceName,
-    assurance: Assurance,
     replicas: &BTreeSet<NodeId>,
     membership: u64,
 ) -> Result<Created> {
@@ -109,7 +110,7 @@ async fn try_create(
     let after = id.get().checked_add(1).ok_or(MetaError::Exhausted)?;
     txn.put(NEXT_NAMESPACE, after.to_le_bytes());
     let mut record = Vec::new();
-    Namespace::new(id, assurance).encode(&mut record)?;
+    Namespace::new(id, Assurance::Cft).encode(&mut record)?;
     txn.put(key, record);
     let shard = Shard::whole(id, take_id(&mut txn)?);
     let mut placement = Vec::new();
@@ -117,6 +118,77 @@ async fn try_create(
     txn.put(shard_key(shard.id()), placement);
     let _version = txn.commit().await?;
     Ok(Created::Founded(shard))
+}
+
+/// Records a Byzantine fault tolerant namespace that a charter names,
+/// through `meta`, the meta shard's leader, so that clients find it.
+///
+/// The namespace is called `name` and has id `namespace`; the committee
+/// of `members` decides its one shard, `shard`.
+///
+/// A charter fixes the ids, so the registry takes them only if it never
+/// handed them out, and hands out only later ones from then on. Recording
+/// the same namespace again changes nothing, and answers as the first
+/// time did.
+///
+/// # Errors
+///
+/// As [`create`].
+pub async fn charter(
+    meta: &impl Replicated,
+    name: &NamespaceName,
+    namespace: NamespaceId,
+    shard: ShardId,
+    members: &BTreeSet<NodeId>,
+) -> Result<Created> {
+    for _ in 0..ATTEMPTS {
+        match try_charter(meta, name, namespace, shard, members).await {
+            Err(MetaError::Consensus(error)) if error.is_aborted() => {}
+            outcome => return outcome,
+        }
+    }
+    Err(MetaError::Contended)
+}
+
+async fn try_charter(
+    meta: &impl Replicated,
+    name: &NamespaceName,
+    namespace: NamespaceId,
+    shard: ShardId,
+    members: &BTreeSet<NodeId>,
+) -> Result<Created> {
+    if *name == NamespaceName::default_name() {
+        return Ok(Created::Taken(Namespace::founding()));
+    }
+    let chartered = Namespace::new(namespace, Assurance::Bft);
+    let whole = Shard::whole(namespace, shard);
+    let key = namespace_key(name);
+    let mut txn = meta.begin().await?;
+    if let Some(bytes) = txn.get(&key)? {
+        let recorded = Namespace::decode(&bytes)?;
+        return Ok(if recorded == chartered {
+            Created::Founded(whole)
+        } else {
+            Created::Taken(recorded)
+        });
+    }
+    let next = next_namespace(txn.get(NEXT_NAMESPACE)?.as_deref())?;
+    let next_shard = next_id(txn.get(NEXT)?.as_deref())?;
+    if namespace < next || shard < next_shard {
+        return Ok(Created::Spent);
+    }
+    let after = namespace.get().checked_add(1).ok_or(MetaError::Exhausted)?;
+    let after_shard = shard.get().checked_add(1).ok_or(MetaError::Exhausted)?;
+    txn.put(NEXT_NAMESPACE, after.to_le_bytes());
+    txn.put(NEXT, after_shard.to_le_bytes());
+    let mut record = Vec::new();
+    chartered.encode(&mut record)?;
+    txn.put(key, record);
+    let mut placement = Vec::new();
+    Placement::new(whole.clone(), members.clone(), 0).encode(&mut placement)?;
+    txn.put(shard_key(shard), placement);
+    let _version = txn.commit().await?;
+    Ok(Created::Founded(whole))
 }
 
 /// Records `placement` through `meta`, the meta shard's leader, unless the

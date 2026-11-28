@@ -2,6 +2,10 @@
 //! and its first shard, and this node starts that shard on the meta
 //! shard's voters.
 //!
+//! A Byzantine fault tolerant namespace is made by its committee's
+//! charter instead, which the node records in the meta shard with
+//! [`charter`].
+//!
 //! The meta shard takes the namespace's id and its first shard's id in
 //! one transaction, which also records the shard on the voters, so that
 //! clients route to it at once. This node then seeds its own replica of
@@ -11,7 +15,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use oleaph_consensus::Replicated as _;
-use oleaph_meta::{Assurance, Created, Creation, Meta, MetaError, Namespace, NamespaceName};
+use oleaph_meta::{
+    Assurance, Chartered, Created, Creation, Meta, MetaError, Namespace, NamespaceName,
+};
 use oleaph_net::{Quic, Store};
 use oleaph_raft::{NodeId, Peer};
 use oleaph_shard::{NamespaceId, Shard, ShardId};
@@ -27,9 +33,16 @@ pub enum Uncreated {
     /// voter of the new shard either, and could not start it.
     #[error("this node does not vote in the meta shard")]
     NotVoter,
+    /// A Byzantine fault tolerant namespace is made by its committee's
+    /// charter, not from the console.
+    #[error("a bft namespace is made by its committee's charter: `namespace <id> <name>`")]
+    Chartered,
     /// A namespace of that name is there already: this one.
     #[error("there is a namespace of that name already: {0}")]
     Taken(Namespace),
+    /// The ids a charter names were handed out already.
+    #[error("the charter's namespace or shard id is taken")]
+    Spent,
     /// The meta shard did not record the namespace.
     #[error(transparent)]
     Meta(#[from] MetaError),
@@ -40,7 +53,7 @@ pub enum Uncreated {
         /// The shard.
         shard: Shard,
         /// Why.
-        error: oleaph_raft::Error,
+        error: Box<oleaph_raft::Error>,
     },
 }
 
@@ -57,6 +70,9 @@ pub async fn create(
     name: &NamespaceName,
     assurance: Assurance,
 ) -> Result<Shard, Uncreated> {
+    if assurance != Assurance::Cft {
+        return Err(Uncreated::Chartered);
+    }
     let meta = store
         .inbox()
         .replica(ShardId::META)
@@ -72,20 +88,41 @@ pub async fn create(
         .collect();
     let replicas: BTreeSet<NodeId> = voters.keys().copied().collect();
     // The shard's seed is the first entry of its log.
-    let creation = Creation::new(name.clone(), assurance, replicas, 0);
-    let shard = match Meta::new(&meta, ask).create(creation).await? {
-        Created::Founded(shard) => shard,
-        Created::Taken(namespace) => return Err(Uncreated::Taken(namespace)),
-        other => return Err(MetaError::Remote(format!("unexpected {other:?}")).into()),
-    };
+    let creation = Creation::new(name.clone(), replicas, 0);
+    let shard = made(Meta::new(&meta, ask).create(creation).await?)?;
     store
         .found_shard(shard.clone(), voters)
         .await
         .map_err(|error| Uncreated::Unstarted {
             shard: shard.clone(),
-            error,
+            error: Box::new(error),
         })?;
     Ok(shard)
+}
+
+/// Records the namespace `chartered` names in the meta shard, through
+/// this node's replica of it and `ask`, so that clients find it. Returns
+/// its shard, which this node's replica of it decides already.
+///
+/// # Errors
+///
+/// As [`Uncreated`] says.
+pub async fn charter(store: &Store, ask: &Quic, chartered: Chartered) -> Result<Shard, Uncreated> {
+    let meta = store
+        .inbox()
+        .replica(ShardId::META)
+        .ok_or(Uncreated::NoMeta)?;
+    made(Meta::new(&meta, ask).charter(chartered).await?)
+}
+
+/// The shard of a namespace the meta shard made, or why it made none.
+fn made(created: Created) -> Result<Shard, Uncreated> {
+    match created {
+        Created::Founded(shard) => Ok(shard),
+        Created::Taken(namespace) => Err(Uncreated::Taken(namespace)),
+        Created::Spent => Err(Uncreated::Spent),
+        other => Err(MetaError::Remote(format!("unexpected {other:?}")).into()),
+    }
 }
 
 /// The id of the namespace called `name`, as the meta shard records it,
