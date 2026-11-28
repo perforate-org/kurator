@@ -143,3 +143,27 @@ fn parse(name: &str) -> Option<Height> {
     }
     digits.parse().ok().map(Height::new)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Height, parse};
+
+    #[test]
+    fn only_state_files_name_a_height() {
+        assert_eq!(
+            parse("00000000000000000042.state"),
+            Some(Height::new(42)),
+            "a state"
+        );
+        let others = [
+            "42.state",
+            "000000000000000000042.state",
+            "0000000000000000004x.state",
+            "00000000000000000042.snap",
+            ".state-tmp",
+        ];
+        for name in others {
+            assert_eq!(parse(name), None, "{name}");
+        }
+    }
+}
