@@ -41,7 +41,7 @@ use oleaph_wal::{Lsn, Options, Start, Wal};
 
 use super::states::{Snapshot, States};
 use crate::block::Block;
-use crate::checkpoint::{Checkpoint, CheckpointCertificate};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest};
 use crate::step::{Effects, Record, Recovered, Safety, Step};
 use crate::vote::{BlockId, Justify};
 use crate::wire::{put_view, read_view};
@@ -142,6 +142,26 @@ impl Journal {
         self.states.keep(snapshot)
     }
 
+    /// The manifest of the state kept at `height`, for a replica catching
+    /// up.
+    ///
+    /// # Errors
+    ///
+    /// When none was kept.
+    pub(crate) fn manifest(&self, height: Height) -> io::Result<Manifest> {
+        self.states.manifest(height)
+    }
+
+    /// Chunk `index` of the state kept at `height`, for a replica catching
+    /// up.
+    ///
+    /// # Errors
+    ///
+    /// When none was kept.
+    pub(crate) fn chunk(&self, height: Height, index: u32) -> io::Result<Option<Vec<u8>>> {
+        self.states.chunk(height, index)
+    }
+
     /// Writes `records`, all the replica still needs past `certificate`,
     /// a certified checkpoint whose state it keeps, and forgets every
     /// record and state before.
@@ -209,10 +229,14 @@ mod tests {
             Record::Safety(Safety::new(View::new(4), Justify::Genesis)),
             Record::Committed(block.id(), View::new(3)),
             Record::Checkpoint(certify(
-                Snapshot::take(Height::new(1), block.id(), &ShardState::default())
-                    .unwrap()
-                    .checkpoint()
-                    .to_owned(),
+                Snapshot::take(
+                    Height::new(1),
+                    (block.id(), block.view()),
+                    &ShardState::default(),
+                )
+                .unwrap()
+                .checkpoint()
+                .to_owned(),
             )),
         ];
         for record in records {
@@ -273,9 +297,15 @@ mod tests {
         ] {
             journal.append(&[record]).unwrap();
         }
-        let older = Snapshot::take(Height::new(1), first.id(), &ShardState::default()).unwrap();
+        let older = Snapshot::take(
+            Height::new(1),
+            (first.id(), first.view()),
+            &ShardState::default(),
+        )
+        .unwrap();
         let _older = journal.keep(&older).unwrap();
-        let snapshot = Snapshot::take(Height::new(2), second.id(), &state).unwrap();
+        let snapshot =
+            Snapshot::take(Height::new(2), (second.id(), second.view()), &state).unwrap();
         let certificate = certify(journal.keep(&snapshot).unwrap());
         let before = segments(dir.path());
         let live = [
@@ -302,7 +332,7 @@ mod tests {
         assert_eq!(start, state, "its state");
         assert_eq!(
             (height, block),
-            (Height::new(2), second.id()),
+            (Height::new(2), (second.id(), second.view())),
             "where it stands"
         );
         let (safety, blocks, _, _) = recovered.into_parts();

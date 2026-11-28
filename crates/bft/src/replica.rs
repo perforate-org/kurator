@@ -24,19 +24,19 @@ use oleaph_storage::{Command, Draft, KeyValue, KvState, Outcome, Version};
 use parking_lot::Mutex;
 
 use crate::block::Block;
-use crate::checkpoint::{Checkpoint, CheckpointCertificate, Own, Verdict};
+use crate::checkpoint::{Checkpoint, CheckpointCertificate, Height, Manifest, Own, Part, Verdict};
 use crate::core::{Core, Event};
 use crate::message::Message;
 use crate::step::{Act, Timer, To};
 use crate::view::View;
 
+use self::catchup::Catchup;
 pub use self::journal::Journal;
 pub use self::ledger::{Ledger, Settled};
-pub use self::manifest::Manifest;
 
+mod catchup;
 mod journal;
 mod ledger;
-mod manifest;
 mod states;
 
 /// How long a view's timer runs before its first timeout. Each timeout
@@ -104,6 +104,9 @@ struct Inner {
     own: Own,
     /// The newest checkpoint the committee certified.
     certified: Option<CheckpointCertificate>,
+    /// The state at it, as the replica takes it from the others when the
+    /// blocks up to it are gone.
+    catchup: Option<Catchup>,
     health: Health,
 }
 
@@ -132,6 +135,122 @@ impl Inner {
                 }
             }
             Verdict::Differs(mine) => self.halt(Health::Diverged(mine)),
+        }
+    }
+
+    /// The newest certified checkpoint, if the replica's state is behind
+    /// it.
+    fn behind(&self) -> Option<&CheckpointCertificate> {
+        self.certified
+            .as_ref()
+            .filter(|certified| certified.height() > self.ledger.height())
+    }
+
+    /// Starts taking the state at the newest certified checkpoint from the
+    /// others, if it is behind it and not taking it already: a member told
+    /// it the blocks up to it are gone.
+    fn catch_up(&mut self) {
+        let Some(certified) = self.behind() else {
+            return;
+        };
+        if self
+            .catchup
+            .as_ref()
+            .is_none_or(|catchup| catchup.height() < certified.height())
+        {
+            self.catchup = Some(Catchup::new(certified.clone()));
+        }
+    }
+
+    /// Asks again for what it is still taking, or stops taking it once its
+    /// own blocks brought it as far.
+    fn retry(&mut self) {
+        if self.behind().is_none() {
+            self.catchup = None;
+        }
+        if let Some(catchup) = self.catchup.as_mut() {
+            catchup.again();
+        }
+    }
+
+    /// What to ask the others for next, while it catches up.
+    fn asks(&mut self) -> Vec<(NodeId, Message)> {
+        if self.health.check().is_err() {
+            return Vec::new();
+        }
+        let node = self.core.node();
+        let others: Vec<NodeId> = self
+            .core
+            .committee()
+            .members()
+            .filter(|member| *member != node)
+            .collect();
+        self.catchup
+            .as_mut()
+            .map(|catchup| catchup.asks(&others))
+            .unwrap_or_default()
+    }
+
+    /// Takes in the manifest of the state it catches up to.
+    fn take_manifest(&mut self, height: Height, manifest: Manifest) {
+        if let Some(catchup) = self.catchup.as_mut() {
+            let _named = catchup.manifest(height, manifest);
+        }
+    }
+
+    /// Takes in a chunk of the state it catches up to, and moves on to
+    /// that state once it has every chunk.
+    fn take_chunk(&mut self, height: Height, index: u32, bytes: Vec<u8>) {
+        let Some(mut catchup) = self.catchup.take() else {
+            return;
+        };
+        let _named = catchup.chunk(height, index, bytes);
+        match catchup.finish() {
+            Ok((certificate, encoded)) => self.install(&certificate, &encoded),
+            Err(catchup) => self.catchup = Some(*catchup),
+        }
+    }
+
+    /// Moves on to `encoded`, the state that `certificate` certifies,
+    /// as if it had decided the blocks up to it. The commands that wait
+    /// may or may not be among those blocks: their waiters learn the
+    /// outcome is unknown.
+    fn install(&mut self, certificate: &CheckpointCertificate, encoded: &[u8]) {
+        // A state no further than its own, or one that does not decode: a
+        // quorum of the committee is faulty, and the replica waits for
+        // its own blocks.
+        let Ok(snapshot) = self.ledger.restart(certificate, encoded) else {
+            return;
+        };
+        let kept = self.journal.keep(&snapshot);
+        if !kept.is_ok_and(|checkpoint| certificate.certifies(&checkpoint)) {
+            self.halt(Health::Stopped);
+            return;
+        }
+        let records = self.core.rebase(certificate);
+        if self.journal.compact(certificate, &records).is_err() {
+            self.halt(Health::Stopped);
+            return;
+        }
+        let _judged = self.own.judge(certificate);
+        self.waiting.clear();
+    }
+
+    /// Answers a replica catching up with `part` of the state kept at
+    /// `height`, if it still keeps it.
+    fn serve(&self, height: Height, part: Part) -> Option<Message> {
+        match part {
+            Part::Manifest => self
+                .journal
+                .manifest(height)
+                .ok()
+                .map(|manifest| Message::Manifest(height, manifest)),
+            Part::Chunk(index) => self
+                .journal
+                .chunk(height, index)
+                .ok()
+                .flatten()
+                .map(|bytes| Message::Chunk(height, index, bytes)),
         }
     }
 
@@ -227,6 +346,7 @@ impl<H: Host> Replica<H> {
                 reached: Vec::new(),
                 own: Own::default(),
                 certified: None,
+                catchup: None,
                 health: Health::Running,
             }),
         };
@@ -236,12 +356,56 @@ impl<H: Host> Replica<H> {
 
     /// Takes in `message`, which the transport authenticated as `from`'s.
     pub fn receive(&self, from: NodeId, message: Message) {
-        self.handle(&mut self.inner.lock(), Event::Received { from, message });
+        self.take_in(&mut self.inner.lock(), from, message);
     }
 
-    /// Gives up on `view` when the replica is still in it.
+    /// Gives up on `view` when the replica is still in it, and asks again
+    /// for the state it catches up to.
     pub fn expire(&self, view: View) {
-        self.handle(&mut self.inner.lock(), Event::Expired(view));
+        let inner = &mut self.inner.lock();
+        self.handle(inner, Event::Expired(view));
+        inner.retry();
+        self.ask(inner);
+    }
+
+    /// Takes in `message` from `from`: the parts of a checkpoint's state
+    /// here, the rest in the core.
+    fn take_in(&self, inner: &mut Inner, from: NodeId, message: Message) {
+        if inner.health.check().is_err() {
+            return;
+        }
+        match message {
+            Message::Want(height, part) => {
+                if let Some(answer) = inner.serve(height, part) {
+                    self.host.send(from, &answer);
+                }
+            }
+            Message::Manifest(height, manifest) => inner.take_manifest(height, manifest),
+            Message::Chunk(height, index, bytes) => inner.take_chunk(height, index, bytes),
+            // Sent for a block the member let go: what came before it is
+            // to be taken as state.
+            message @ Message::Certified(_) => {
+                self.handle(inner, Event::Received { from, message });
+                inner.catch_up();
+            }
+            message @ (Message::Proposal(_)
+            | Message::Vote(_)
+            | Message::Timeout(_)
+            | Message::Fetch(_)
+            | Message::Deliver(_)
+            | Message::Skip(_)
+            | Message::Forward(_)
+            | Message::Checkpoint(_)) => self.handle(inner, Event::Received { from, message }),
+        }
+        self.ask(inner);
+    }
+
+    /// Sends the others what the replica asks them for while it catches
+    /// up.
+    fn ask(&self, inner: &mut Inner) {
+        for (to, message) in inner.asks() {
+            self.host.send(to, &message);
+        }
     }
 
     /// Handles `event`, writes down what it changed, and only then acts.
@@ -275,12 +439,11 @@ impl<H: Host> Replica<H> {
         let bytes = command.encode()?.payload().to_vec();
         let receiver = self.enqueue(&mut self.inner.lock(), bytes)?;
         receiver.await.map_err(|_closed| {
-            self.inner
-                .lock()
-                .health
-                .check()
-                .err()
-                .unwrap_or_else(|| Error::Failed("the replica stopped".into()))
+            self.inner.lock().health.check().err().unwrap_or_else(|| {
+                Error::Failed(
+                    "the outcome is unknown: the replica took the state from the others".into(),
+                )
+            })
         })
     }
 

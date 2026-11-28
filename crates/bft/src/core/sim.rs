@@ -316,7 +316,11 @@ impl Sim {
                 | Message::Deliver(_)
                 | Message::Skip(_)
                 | Message::Forward(_)
-                | Message::Checkpoint(_) => continue,
+                | Message::Checkpoint(_)
+                | Message::Certified(_)
+                | Message::Want(..)
+                | Message::Manifest(..)
+                | Message::Chunk(..) => continue,
             };
             let first = *replica.signed.entry((view, kind)).or_insert(block);
             if first != block {

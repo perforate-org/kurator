@@ -60,12 +60,14 @@ mod vote;
 mod wire;
 
 pub use block::{Block, Proposal};
-pub use checkpoint::{Checkpoint, CheckpointCertificate, Height, Interval, Share, StateRoot};
+pub use checkpoint::{
+    Checkpoint, CheckpointCertificate, Height, Interval, Manifest, Share, StateRoot,
+};
 pub use committee::{Committee, Domain};
 pub use core::{Config, Core, Event};
 pub use message::Message;
 pub use rejection::Rejection;
-pub use replica::{Host, Journal, Ledger, Manifest, Replica, Settled, Txn};
+pub use replica::{Host, Journal, Ledger, Replica, Settled, Txn};
 pub use step::{Act, Effects, Recovered, Safety, Step, Timer, To};
 pub use timeout::{Timeout, TimeoutCertificate};
 pub use view::View;

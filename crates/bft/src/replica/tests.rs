@@ -379,3 +379,104 @@ fn a_replica_restarts_from_its_certified_state() {
     );
     assert_eq!(held.unwrap(), Some(b"1".to_vec()), "and goes on deciding");
 }
+
+#[test]
+fn a_replica_far_behind_takes_the_certified_state_from_the_others() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let node = NodeId::new(4);
+    // It hears nothing while the others decide, certify and let the
+    // blocks go.
+    let away = cluster.replicas.remove(&node).unwrap();
+    for key in ["a", "b", "c"] {
+        let _put = cluster
+            .run(cluster.replica(1).propose(put(key, "1")))
+            .unwrap();
+    }
+    cluster.pump(2000);
+    let certified = cluster.replica(1).checkpoint().unwrap();
+    assert!(certified.height() >= Height::new(3), "certified");
+    drop(cluster.replicas.insert(node, away));
+    let _put = cluster
+        .run(cluster.replica(2).propose(put("d", "1")))
+        .unwrap();
+    for _ in 0..20 {
+        cluster.pump(2000);
+        cluster.expire();
+    }
+    let theirs = cluster.run(cluster.replica(1).read(Clone::clone)).unwrap();
+    let mine = cluster.run(cluster.replica(4).read(Clone::clone)).unwrap();
+    assert_eq!(mine, theirs, "the same state");
+    assert!(
+        cluster
+            .replica(4)
+            .checkpoint()
+            .is_some_and(|known| known.height() >= certified.height()),
+        "the certified checkpoint"
+    );
+    let _later = cluster
+        .run(cluster.replica(4).propose(put("e", "1")))
+        .unwrap();
+    cluster.pump(2000);
+    let held = cluster.run(
+        cluster
+            .replica(1)
+            .read(|kv| kv.get(b"e").map(<[u8]>::to_vec)),
+    );
+    assert_eq!(held.unwrap(), Some(b"1".to_vec()), "and goes on deciding");
+    cluster.pump(2000);
+    let before = cluster.run(cluster.replica(4).read(Clone::clone)).unwrap();
+    drop(cluster.replicas.remove(&node));
+    let again = open_on(
+        &cluster.dir,
+        &cluster.wire,
+        node,
+        ShardState::default(),
+        every_block(),
+    );
+    let after = cluster.run(again.read(Clone::clone)).unwrap();
+    assert_eq!(after, before, "it restarts from the state it took");
+}
+
+/// How many parts of a checkpoint's state `node` asked for, in flight.
+fn wants_from(cluster: &Cluster, node: NodeId) -> usize {
+    cluster
+        .wire
+        .lock()
+        .iter()
+        .filter(|(from, _, message)| *from == node && matches!(message, Message::Want(..)))
+        .count()
+}
+
+#[test]
+fn only_a_replica_behind_the_certified_state_asks_for_it() {
+    let mut cluster = Cluster::starting(|_| ShardState::default(), every_block());
+    let node = NodeId::new(4);
+    let away = cluster.replicas.remove(&node).unwrap();
+    for key in ["a", "b"] {
+        let _put = cluster
+            .run(cluster.replica(1).propose(put(key, "1")))
+            .unwrap();
+    }
+    cluster.pump(2000);
+    cluster.wire.lock().clear();
+    let certified = cluster.replica(1).checkpoint().unwrap();
+
+    // One as far as the checkpoint has nothing to ask.
+    let level = NodeId::new(1);
+    cluster
+        .replica(1)
+        .receive(NodeId::new(2), Message::Certified(certified.clone()));
+    assert_eq!(wants_from(&cluster, level), 0, "level");
+
+    // One behind asks for the manifest, once however often it hears.
+    away.receive(level, Message::Certified(certified.clone()));
+    assert_eq!(wants_from(&cluster, node), 1, "the manifest");
+    away.receive(NodeId::new(2), Message::Certified(certified));
+    assert_eq!(wants_from(&cluster, node), 1, "asked already");
+
+    // An expired view asks again: the answer may have been lost.
+    cluster.wire.lock().clear();
+    let armed = away.host.wakes.lock().last().copied().unwrap();
+    away.expire(armed.0);
+    assert_eq!(wants_from(&cluster, node), 1, "asks again");
+}
