@@ -131,10 +131,11 @@ impl Endpoint {
     /// When the TLS configuration cannot be built.
     pub fn serve(self, inbox: Inbox) -> Result<Server, NetError> {
         let quic = self.transport();
+        // A build without BFT holds no BFT shard.
         #[cfg(feature = "bft")]
-        let committees: Box<dyn Members> = Box::new(self.committees.clone());
+        let committees: Option<Box<dyn Members>> = Some(Box::new(self.committees.clone()));
         #[cfg(not(feature = "bft"))]
-        let committees: Box<dyn Members> = Box::new(crate::roster::NoCommittees);
+        let committees: Option<Box<dyn Members>> = None;
         let roster = Arc::new(Roster::new(
             self.bootstrap,
             inbox.memberships(),

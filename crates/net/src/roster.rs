@@ -30,8 +30,9 @@ pub(crate) struct Roster {
     bootstrap: BTreeMap<NodeId, VerifyingKey>,
     /// The memberships that decide.
     memberships: Memberships<Tokio>,
-    /// The members of the committees of the node's BFT shards.
-    committees: Box<dyn Members>,
+    /// The members of the committees of the node's BFT shards, if it may
+    /// hold any.
+    committees: Option<Box<dyn Members>>,
     /// The clients the node serves.
     clients: Vec<VerifyingKey>,
 }
@@ -55,7 +56,7 @@ impl Roster {
     pub(crate) const fn new(
         bootstrap: BTreeMap<NodeId, VerifyingKey>,
         memberships: Memberships<Tokio>,
-        committees: Box<dyn Members>,
+        committees: Option<Box<dyn Members>>,
         clients: Vec<VerifyingKey>,
     ) -> Self {
         Self {
@@ -72,7 +73,10 @@ impl Roster {
     pub(crate) fn identify(&self, key: &VerifyingKey) -> Option<Caller> {
         self.node(key)
             .map(Caller::Node)
-            .or_else(|| holder(&self.committees.keys(), key).map(Caller::Member))
+            .or_else(|| {
+                let committees = self.committees.as_ref()?;
+                holder(&committees.keys(), key).map(Caller::Member)
+            })
             .or_else(|| self.clients.contains(key).then_some(Caller::Client))
     }
 
@@ -94,18 +98,6 @@ impl Roster {
 pub(crate) trait Members: Debug + Send + Sync {
     /// The transport key of each, as it stands now.
     fn keys(&self) -> BTreeMap<NodeId, VerifyingKey>;
-}
-
-/// No committees: a build without BFT holds no BFT shard.
-#[cfg(not(feature = "bft"))]
-#[derive(Debug)]
-pub(crate) struct NoCommittees;
-
-#[cfg(not(feature = "bft"))]
-impl Members for NoCommittees {
-    fn keys(&self) -> BTreeMap<NodeId, VerifyingKey> {
-        BTreeMap::new()
-    }
 }
 
 /// The node `keys` lists with `key`.
