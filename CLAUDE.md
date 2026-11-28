@@ -29,6 +29,7 @@ deslop-please                            # needs rust-analyzer + rust-src
 qlty check --all && qlty smells --all
 cargo kani --workspace                   # formal proofs (#[cfg(kani)] modules)
 cargo mutants --workspace                # mutation testing
+specs/check.sh                           # Quint specs (quint, Java 17+)
 ```
 
 - Errors flagged by `deslop-please` must be fixed from first principles, not by
@@ -40,3 +41,6 @@ cargo mutants --workspace                # mutation testing
 - Property tests (proptest) for codecs and for the database against a model;
   Kani proofs for parsing totality and round trips. Use Verus when a proof
   needs more than bounded model checking.
+- Protocols (consensus, cross-shard commit) get a Quint spec in `specs/`
+  that names the code it models; a change to the protocol changes the spec
+  in the same pull request.
