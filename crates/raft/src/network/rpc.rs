@@ -38,11 +38,11 @@ use openraft::raft::{
     VoteResponse,
 };
 
+use super::chunk::SnapshotChunk;
 use crate::codec::{
     entry, flag, log_id, option, put_entry, put_len, put_log_id, put_option, put_vote, vote,
 };
 use crate::config::Config;
-use crate::snapshot::SnapshotChunk;
 use crate::types::{LogId, NodeId, Vote};
 use oleaph_shard::ShardId;
 
@@ -436,7 +436,8 @@ mod tests {
     use crate::proposal::Proposal;
     use std::num::NonZeroUsize;
 
-    use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk, chunks};
+    use crate::network::chunk::{SnapshotChunk, chunks};
+    use crate::snapshot::{Snapshot, SnapshotBytes};
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, SnapshotMeta, StoredMembership, Vote};
     use oleaph_shard::ShardId;

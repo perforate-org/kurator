@@ -16,9 +16,9 @@ use crate::backup::Backup;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
+use crate::network::rpc::{Message, Refusal, Response};
 use crate::network::{Network, Transport};
 use crate::replica::{Member, Replica};
-use crate::rpc::{Message, Refusal, Response};
 use crate::snapshot::{SnapshotBytes, SnapshotDir};
 use crate::types::{NodeId, Peer};
 
@@ -402,10 +402,11 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use super::Store;
+    use crate::network::chunk::{SnapshotChunk, chunks};
+    use crate::network::rpc::{Message, Refusal, Request, Response};
     use crate::network::{Connection, Failure, Transport};
     use crate::replica::Member;
-    use crate::rpc::{Message, Refusal, Request, Response};
-    use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk, chunks};
+    use crate::snapshot::{Snapshot, SnapshotBytes};
     use crate::types::testing::membership;
     use crate::types::{LeaderId, LogId, NodeId, Peer, SnapshotMeta, StoredMembership, Vote};
     use oleaph_crypto::NodeSecret;

@@ -22,10 +22,14 @@ use openraft::raft::{
 };
 
 use crate::config::Config;
-use crate::rpc::{Message, Refusal, Request, Response};
-use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk, chunks};
+use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{NodeId, Peer, Vote};
+use chunk::{SnapshotChunk, chunks};
 use oleaph_shard::ShardId;
+use rpc::{Message, Refusal, Request, Response};
+
+pub(crate) mod chunk;
+pub(crate) mod rpc;
 
 /// The size of a snapshot chunk when `OpenRaft` names none: its own
 /// default.
@@ -328,9 +332,10 @@ mod tests {
     use openraft::error::{ReplicationClosed, StreamingError};
     use parking_lot::Mutex;
 
+    use super::chunk::SnapshotChunk;
+    use super::rpc::{Message, Refusal, Request, Response};
     use super::{Connection, Failure, Network, Transport};
-    use crate::rpc::{Message, Refusal, Request, Response};
-    use crate::snapshot::{Snapshot, SnapshotBytes, SnapshotChunk};
+    use crate::snapshot::{Snapshot, SnapshotBytes};
     use crate::types::testing::peer;
     use crate::types::{NodeId, Peer, SnapshotMeta, Vote};
 

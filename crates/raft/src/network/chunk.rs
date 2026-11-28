@@ -19,8 +19,8 @@ use std::num::NonZeroUsize;
 
 use oleaph_codec::{DecodeError, Reader, put_bytes};
 
-use super::{FORMAT, Snapshot, SnapshotBytes};
 use crate::codec::{meta, put_meta};
+use crate::snapshot::{Snapshot, SnapshotBytes};
 use crate::types::{SnapshotMeta, Vote};
 
 /// One part of a snapshot, as the leader sends it.
@@ -161,21 +161,12 @@ impl Assembly {
             return Received::Stray;
         };
         let snapshot = SnapshotBytes::from_vec(bytes);
-        if names(&snapshot, &meta) {
+        if snapshot.names(&meta) {
             Received::Whole(Snapshot { meta, snapshot })
         } else {
             Received::Damaged
         }
     }
-}
-
-/// Whether `snapshot` passes its checksum and holds `meta`, without
-/// decoding the state.
-fn names(snapshot: &SnapshotBytes, expected: &SnapshotMeta) -> bool {
-    FORMAT
-        .read(snapshot.as_slice())
-        .and_then(|mut reader| meta(&mut reader))
-        .is_ok_and(|held| held == *expected)
 }
 
 fn len(bytes: &[u8]) -> u64 {
