@@ -7,6 +7,20 @@
 # QUINT_TRACES   runs of each instance replayed against the code
 #                                                    (default 100)
 
+# Which checks run, the first argument of specs/check.sh: `all` (the
+# default), `run` (the evaluator's: scenarios, mutants, simulations and
+# trace validation) or `verify` (Apalache's bounded model checking). CI
+# runs the two parts as two jobs.
+part="${1:-all}"
+case "$part" in
+  all | run | verify) ;;
+  *)
+    echo "usage: specs/check.sh [all | run | verify]" >&2
+    exit 2
+    ;;
+esac
+runs() { [ "$part" = all ] || [ "$part" = "$1" ]; }
+
 samples="${QUINT_SAMPLES:-2000}"
 steps="${QUINT_STEPS:-40}"
 depth="${QUINT_DEPTH:-3}"

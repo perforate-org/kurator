@@ -100,6 +100,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install quint
+        run: npm install --global @informalsystems/quint@0.35.0
+      - run: specs/check.sh run
+        env:
+          QUINT_SAMPLES: 3000
+
+  # Apalache's bounded model checking, apart from the rest: it takes the
+  # longest, some 20 minutes.
+  quint-verify:
+    name: quint model checking
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       # Apalache, which `quint verify` runs, needs Java 17 or later.
       - uses: actions/setup-java@v4
         with:
@@ -112,9 +131,7 @@ jobs:
         with:
           path: ~/.quint
           key: quint-0.35.0-apalache-0.62.4
-      - run: specs/check.sh
-        env:
-          QUINT_SAMPLES: 3000
+      - run: specs/check.sh verify
 
   simulation:
     name: simulation, 500 seeds
@@ -132,15 +149,16 @@ jobs:
           OLEAPH_SIM_SEEDS: 500
 
   mutants:
-    name: mutation testing (${{ matrix.shard }}/4)
+    name: mutation testing (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # Every mutant runs the whole workspace's tests, the simulations
-    # among them, so the mutants are spread over four runners.
+    # among them, so the mutants are spread over eight runners: on four,
+    # a run of all of them on main took over two hours.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -156,10 +174,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git diff "origin/${{ github.base_ref }}.." > pr.diff
-          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 300 -j 2 --shard ${{ matrix.shard }}/4
+          cargo mutants --workspace --no-shuffle --in-diff pr.diff --timeout 300 -j 2 --shard ${{ matrix.shard }}/${{ strategy.job-total }}
       - name: All mutants (main)
         if: github.event_name != 'pull_request'
-        run: cargo mutants --workspace --no-shuffle --timeout 300 -j 2 --shard ${{ matrix.shard }}/4
+        run: cargo mutants --workspace --no-shuffle --timeout 300 -j 2 --shard ${{ matrix.shard }}/${{ strategy.job-total }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
